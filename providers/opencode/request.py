@@ -38,7 +38,7 @@ def _is_deepseek_v4_model(model: str) -> bool:
 def _extract_anthropic_effort(request_data: Any) -> str | None:
     """Extract effort from ``output_config.effort`` or derive from ``thinking.budget_tokens``."""
     output_config = getattr(request_data, "output_config", None)
-    if isinstance(output_config, dict) and output_config.get("effort"):
+    if isinstance(output_config, dict) and "effort" in output_config:
         return output_config["effort"]
 
     thinking = getattr(request_data, "thinking", None)
