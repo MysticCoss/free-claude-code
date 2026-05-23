@@ -9,7 +9,7 @@ from core.anthropic.conversion import OpenAIConversionError
 from providers.exceptions import InvalidRequestError
 
 # Anthropic adaptive thinking effort → DeepSeek reasoning_effort mapping.
-# DeepSeek only has two effective tiers (low/medium → high, xhigh → max).
+# DeepSeek only has two effective tiers (low/medium → high, high/xhigh/max → max).
 _ANTHROPIC_TO_DEEPSEEK_EFFORT = {
     "low": "high",
     "medium": "high",
