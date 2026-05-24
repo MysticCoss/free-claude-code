@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 
@@ -32,6 +33,64 @@ class RoutedMessagesRequest:
 class RoutedTokenCountRequest:
     request: TokenCountRequest
     resolved: ResolvedModel
+
+
+COMPACT_SYSTEM_MARKER = "summarizing conversations"
+COMPACT_USER_MARKER = "CRITICAL: Respond with TEXT ONLY"
+
+
+def _extract_system_text(system: str | list[Any] | None) -> str:
+    """Flatten the system prompt to a single searchable string."""
+    if system is None:
+        return ""
+    if isinstance(system, str):
+        return system
+    parts: list[str] = []
+    for block in system:
+        if isinstance(block, dict):
+            parts.append(str(block.get("text", "")))
+        elif hasattr(block, "text"):
+            parts.append(str(block.text))
+    return " ".join(parts)
+
+
+def _extract_last_user_text(messages: list[Any]) -> str:
+    """Return text content of the last user message for compaction detection."""
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None)
+        if role != "user":
+            continue
+        content = getattr(msg, "content", None)
+        if content is None:
+            continue
+        if isinstance(content, str):
+            return content
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text", "")))
+            elif hasattr(block, "text"):
+                parts.append(str(block.text))
+        return " ".join(parts)
+    return ""
+
+
+def _is_compaction_request(request: MessagesRequest) -> bool:
+    """Detect a compaction / summarization request from Claude Code.
+
+    Claude Code sends compaction with:
+      1. System prompt: "You are a helpful AI assistant tasked with summarizing conversations."
+      2. Last user message starts with: "CRITICAL: Respond with TEXT ONLY..."
+
+    Either signal is sufficient to classify the request as compaction.
+    """
+    system_text = _extract_system_text(request.system)
+    if COMPACT_SYSTEM_MARKER in system_text:
+        return True
+    user_text = _extract_last_user_text(request.messages)
+    if COMPACT_USER_MARKER in user_text:
+        return True
+    return False
 
 
 class ModelRouter:
@@ -83,6 +142,28 @@ class ModelRouter:
             thinking_enabled=thinking_enabled,
         )
 
+    def _resolve_compact_override(self, claude_model_name: str) -> ResolvedModel | None:
+        """Return a compaction-specific model resolution when configured."""
+        compact_ref = self._settings.model_compact
+        if compact_ref is None:
+            return None
+        provider_id = Settings.parse_provider_type(compact_ref)
+        provider_model = Settings.parse_model_name(compact_ref)
+        thinking_enabled = self._settings.resolve_thinking(compact_ref)
+        logger.info(
+            "COMPACT ROUTE: '{}' -> provider='{}' model='{}'",
+            claude_model_name,
+            provider_id,
+            provider_model,
+        )
+        return ResolvedModel(
+            original_model=claude_model_name,
+            provider_id=provider_id,
+            provider_model=provider_model,
+            provider_model_ref=compact_ref,
+            thinking_enabled=thinking_enabled,
+        )
+
     def _direct_provider_model(
         self, model_name: str
     ) -> tuple[str | None, str | None, bool | None]:
@@ -108,7 +189,21 @@ class ModelRouter:
     def resolve_messages_request(
         self, request: MessagesRequest
     ) -> RoutedMessagesRequest:
-        """Return an internal routed request context."""
+        """Return an internal routed request context.
+
+        Compaction requests (detected by system prompt) are routed to
+        MODEL_COMPACT when configured, otherwise fall through to normal
+        model resolution.
+        """
+        if self._settings.model_compact is not None and _is_compaction_request(
+            request
+        ):
+            resolved = self._resolve_compact_override(request.model)
+            if resolved is not None:
+                routed = request.model_copy(deep=True)
+                routed.model = resolved.provider_model
+                return RoutedMessagesRequest(request=routed, resolved=resolved)
+
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
         routed.model = resolved.provider_model

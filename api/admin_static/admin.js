@@ -176,6 +176,10 @@ function renderProviders(providerStatus) {
     pill.textContent = provider.label;
     title.appendChild(pill);
 
+    const prefix = document.createElement("div");
+    prefix.className = "provider-prefix";
+    prefix.textContent = provider.provider_id;
+
     const meta = document.createElement("div");
     meta.className = "provider-meta";
     meta.textContent =
@@ -189,7 +193,7 @@ function renderProviders(providerStatus) {
     button.textContent = provider.kind === "local" ? "Test" : "Refresh models";
     button.addEventListener("click", () => testProvider(provider.provider_id, button));
 
-    card.append(title, meta, button);
+    card.append(title, prefix, meta, button);
     grid.appendChild(card);
   });
 }
