@@ -437,6 +437,13 @@ FIELDS: tuple[ConfigFieldSpec, ...] = (
         description="Optional provider/model route for Haiku requests.",
     ),
     ConfigFieldSpec(
+        "MODEL_COMPACT",
+        "Compaction Override",
+        "models",
+        settings_attr="model_compact",
+        description="Optional provider/model route for compaction/summarization requests.",
+    ),
+    ConfigFieldSpec(
         "ENABLE_MODEL_THINKING",
         "Enable Thinking",
         "thinking",

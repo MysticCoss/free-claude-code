@@ -246,6 +246,13 @@ textarea {
   word-break: break-word;
 }
 
+.provider-prefix {
+  font-family: "SF Mono", "Cascadia Code", ui-monospace, monospace;
+  color: var(--info);
+  font-weight: 600;
+  font-size: 11px;
+}
+
 .test-button,
 .ghost-button,
 .secondary-button,
