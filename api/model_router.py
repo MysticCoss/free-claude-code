@@ -93,82 +93,118 @@ def _is_compaction_request(request: MessagesRequest) -> bool:
     return False
 
 
+def _tool_input_summary(inp: Any, max_len: int = 200) -> str:
+    """Render tool input as a compact string for a text block."""
+    try:
+        from json import dumps as _json_dumps
+
+        raw = _json_dumps(inp, ensure_ascii=False, default=str)
+    except Exception:
+        raw = str(inp)
+    if len(raw) > max_len:
+        raw = raw[:max_len] + "..."
+    return raw
+
+
+def _make_text_block(template_block: Any, text: str) -> Any:
+    """Create a ``{"type": "text", "text": ...}`` block matching the style of *template_block*."""
+    if isinstance(template_block, dict):
+        return {"type": "text", "text": text}
+    try:
+        return type(template_block)(type="text", text=text)
+    except Exception:
+        return {"type": "text", "text": text}
+
+
 def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
-    """Strip orphan ``tool_result`` blocks whose ``tool_use`` is missing.
+    """Convert ``tool_use`` / ``tool_result`` blocks into plain-text blocks.
 
-    When a session is terminated mid-flight, assistant messages with
-    ``tool_use`` blocks may be absent from the history while their
-    corresponding ``tool_result`` blocks remain.  Upstream providers
-    (especially those using strict Jinja chat templates) reject these
-    orphan tool messages because a tool result must follow an assistant
-    or tool message.
-
-    This walker collects every ``tool_use.id`` from assistant content
-    blocks, then drops ``tool_result`` blocks whose ``tool_use_id``
-    doesn't reference a known id.  User messages that become empty
-    after stripping are removed entirely.
+    Upstream providers — especially llama.cpp with strict Jinja chat
+    templates — reject tool messages that don't follow the exact
+    "assistant(tool_use) → user(tool_result)" sequence.  Compaction /
+    summarization models don't need to call tools, so we rewrite every
+    tool block as a human-readable text block and drop the outer
+    ``tools`` definition later in the caller.
     """
-    # Collect known tool_use ids from assistant messages.
-    known_tool_use_ids: set[str] = set()
-    for msg in messages:
-        role = getattr(msg, "role", None)
-        if role != "assistant":
-            continue
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "tool_use":
-                    tid = block.get("id")
-                    if isinstance(tid, str):
-                        known_tool_use_ids.add(tid)
-            elif hasattr(block, "type") and getattr(block, "type", None) == "tool_use":
-                tid = getattr(block, "id", None)
-                if isinstance(tid, str):
-                    known_tool_use_ids.add(tid)
-
     sanitized: list[Any] = []
+    tool_count = 0
+
     for msg in messages:
         role = getattr(msg, "role", None)
-        if role != "user":
-            sanitized.append(msg)
-            continue
         content = getattr(msg, "content", None)
         if not isinstance(content, list):
             sanitized.append(msg)
             continue
 
-        kept_blocks: list[Any] = []
+        new_blocks: list[Any] = []
         for block in content:
             block_type = None
-            tool_use_id = None
             if isinstance(block, dict):
                 block_type = block.get("type")
-                tool_use_id = block.get("tool_use_id")
             elif hasattr(block, "type"):
                 block_type = getattr(block, "type", None)
-                tool_use_id = getattr(block, "tool_use_id", None)
 
-            if block_type == "tool_result" and tool_use_id not in known_tool_use_ids:
-                logger.debug(
-                    "COMPACT SANITIZE: dropping orphan tool_result tool_use_id={}",
-                    tool_use_id,
+            if block_type == "tool_use":
+                name = (
+                    block.get("name", "unknown")
+                    if isinstance(block, dict)
+                    else getattr(block, "name", "unknown")
                 )
-                continue
-            kept_blocks.append(block)
-
-        if kept_blocks:
-            # Preserve the message structure but replace content with kept blocks.
-            if hasattr(msg, "model_copy"):
-                sanitized.append(msg.model_copy(update={"content": kept_blocks}))
-            elif isinstance(msg, dict):
-                sanitized.append({**msg, "content": kept_blocks})
+                inp = (
+                    block.get("input", {})
+                    if isinstance(block, dict)
+                    else getattr(block, "input", {})
+                )
+                inp_str = _tool_input_summary(inp)
+                text = f"[Tool call: {name} — {inp_str}]"
+                new_blocks.append(_make_text_block(block, text))
+                tool_count += 1
+            elif block_type == "tool_result":
+                tid = (
+                    block.get("tool_use_id", "?")
+                    if isinstance(block, dict)
+                    else getattr(block, "tool_use_id", "?")
+                )
+                result = (
+                    block.get("content", "")
+                    if isinstance(block, dict)
+                    else getattr(block, "content", "")
+                )
+                if isinstance(result, list):
+                    parts: list[str] = []
+                    for c in result:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            parts.append(str(c.get("text", "")))
+                    result = " ".join(parts)
+                result_str = str(result)
+                if len(result_str) > 300:
+                    result_str = result_str[:300] + "..."
+                is_error = (
+                    block.get("is_error", False)
+                    if isinstance(block, dict)
+                    else getattr(block, "is_error", False)
+                )
+                label = "Tool error" if is_error else "Tool result"
+                new_blocks.append(
+                    _make_text_block(block, f"[{label} for {tid}: {result_str}]")
+                )
+                tool_count += 1
             else:
-                sanitized.append(msg)
-        else:
-            logger.debug("COMPACT SANITIZE: dropping empty user message after orphan cleanup")
+                new_blocks.append(block)
 
+        if not new_blocks:
+            logger.debug("COMPACT SANITIZE: dropping empty {} message", role)
+            continue
+
+        if hasattr(msg, "model_copy"):
+            sanitized.append(msg.model_copy(update={"content": new_blocks}))
+        elif isinstance(msg, dict):
+            sanitized.append({**msg, "content": new_blocks})
+        else:
+            sanitized.append(msg)
+
+    if tool_count:
+        logger.info("COMPACT SANITIZE: converted {} tool blocks to text", tool_count)
     return sanitized
 
 
@@ -282,12 +318,25 @@ class ModelRouter:
                 routed = request.model_copy(deep=True)
                 routed.model = resolved.provider_model
                 sanitized = _sanitize_compact_messages(routed.messages)
-                if len(sanitized) != len(routed.messages):
-                    logger.info(
-                        "COMPACT SANITIZE: removed {} orphan messages",
-                        len(routed.messages) - len(sanitized),
-                    )
                 routed.messages = sanitized
+                # Compaction models don't need tool definitions — and strict
+                # Jinja templates reject requests that advertise tools but
+                # then receive tool blocks in text form.
+                routed.tools = None
+                routed.tool_choice = None
+                # Anthropic-specific fields unknown to generic providers.
+                routed.output_config = None
+                routed.mcp_servers = None
+                # Flatten structured system prompts to a plain string so
+                # providers that only accept string systems can handle them.
+                if isinstance(routed.system, list):
+                    parts: list[str] = []
+                    for block in routed.system:
+                        if isinstance(block, dict):
+                            parts.append(str(block.get("text", "")))
+                        elif hasattr(block, "text"):
+                            parts.append(str(block.text))
+                    routed.system = "\n\n".join(parts)
                 return RoutedMessagesRequest(request=routed, resolved=resolved)
 
         resolved = self.resolve(request.model)
