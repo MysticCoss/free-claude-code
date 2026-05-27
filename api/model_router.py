@@ -128,9 +128,6 @@ def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
                 if isinstance(tid, str):
                     known_tool_use_ids.add(tid)
 
-    if not known_tool_use_ids:
-        return list(messages)
-
     sanitized: list[Any] = []
     for msg in messages:
         role = getattr(msg, "role", None)
