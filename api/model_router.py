@@ -93,6 +93,88 @@ def _is_compaction_request(request: MessagesRequest) -> bool:
     return False
 
 
+def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
+    """Strip orphan ``tool_result`` blocks whose ``tool_use`` is missing.
+
+    When a session is terminated mid-flight, assistant messages with
+    ``tool_use`` blocks may be absent from the history while their
+    corresponding ``tool_result`` blocks remain.  Upstream providers
+    (especially those using strict Jinja chat templates) reject these
+    orphan tool messages because a tool result must follow an assistant
+    or tool message.
+
+    This walker collects every ``tool_use.id`` from assistant content
+    blocks, then drops ``tool_result`` blocks whose ``tool_use_id``
+    doesn't reference a known id.  User messages that become empty
+    after stripping are removed entirely.
+    """
+    # Collect known tool_use ids from assistant messages.
+    known_tool_use_ids: set[str] = set()
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role != "assistant":
+            continue
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "tool_use":
+                    tid = block.get("id")
+                    if isinstance(tid, str):
+                        known_tool_use_ids.add(tid)
+            elif hasattr(block, "type") and getattr(block, "type", None) == "tool_use":
+                tid = getattr(block, "id", None)
+                if isinstance(tid, str):
+                    known_tool_use_ids.add(tid)
+
+    if not known_tool_use_ids:
+        return list(messages)
+
+    sanitized: list[Any] = []
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role != "user":
+            sanitized.append(msg)
+            continue
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+
+        kept_blocks: list[Any] = []
+        for block in content:
+            block_type = None
+            tool_use_id = None
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                tool_use_id = block.get("tool_use_id")
+            elif hasattr(block, "type"):
+                block_type = getattr(block, "type", None)
+                tool_use_id = getattr(block, "tool_use_id", None)
+
+            if block_type == "tool_result" and tool_use_id not in known_tool_use_ids:
+                logger.debug(
+                    "COMPACT SANITIZE: dropping orphan tool_result tool_use_id={}",
+                    tool_use_id,
+                )
+                continue
+            kept_blocks.append(block)
+
+        if kept_blocks:
+            # Preserve the message structure but replace content with kept blocks.
+            if hasattr(msg, "model_copy"):
+                sanitized.append(msg.model_copy(update={"content": kept_blocks}))
+            elif isinstance(msg, dict):
+                sanitized.append({**msg, "content": kept_blocks})
+            else:
+                sanitized.append(msg)
+        else:
+            logger.debug("COMPACT SANITIZE: dropping empty user message after orphan cleanup")
+
+    return sanitized
+
+
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
@@ -202,6 +284,13 @@ class ModelRouter:
             if resolved is not None:
                 routed = request.model_copy(deep=True)
                 routed.model = resolved.provider_model
+                sanitized = _sanitize_compact_messages(routed.messages)
+                if len(sanitized) != len(routed.messages):
+                    logger.info(
+                        "COMPACT SANITIZE: removed {} orphan messages",
+                        len(routed.messages) - len(sanitized),
+                    )
+                routed.messages = sanitized
                 return RoutedMessagesRequest(request=routed, resolved=resolved)
 
         resolved = self.resolve(request.model)
