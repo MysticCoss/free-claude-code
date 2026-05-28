@@ -11,7 +11,7 @@ from config.provider_ids import SUPPORTED_PROVIDER_IDS
 from config.settings import Settings
 
 from .gateway_model_ids import decode_gateway_model_id
-from .models.anthropic import MessagesRequest, TokenCountRequest
+from .models.anthropic import ContentBlockText, MessagesRequest, TokenCountRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,14 +106,9 @@ def _tool_input_summary(inp: Any, max_len: int = 200) -> str:
     return raw
 
 
-def _make_text_block(template_block: Any, text: str) -> Any:
-    """Create a ``{"type": "text", "text": ...}`` block matching the style of *template_block*."""
-    if isinstance(template_block, dict):
-        return {"type": "text", "text": text}
-    try:
-        return type(template_block)(type="text", text=text)
-    except Exception:
-        return {"type": "text", "text": text}
+def _make_text_block(text: str) -> ContentBlockText:
+    """Create a ``ContentBlockText`` block."""
+    return ContentBlockText(type="text", text=text)
 
 
 def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
@@ -157,7 +152,7 @@ def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
                 )
                 inp_str = _tool_input_summary(inp)
                 text = f"[Tool call: {name} — {inp_str}]"
-                new_blocks.append(_make_text_block(block, text))
+                new_blocks.append(_make_text_block(text))
                 tool_count += 1
             elif block_type == "tool_result":
                 tid = (
@@ -173,12 +168,17 @@ def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
                 if isinstance(result, list):
                     parts: list[str] = []
                     for c in result:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            parts.append(str(c.get("text", "")))
-                    result = " ".join(parts)
+                        if isinstance(c, dict):
+                            if c.get("type") == "text":
+                                parts.append(str(c.get("text", "")))
+                            elif c.get("type") == "image":
+                                parts.append("[image]")
+                            else:
+                                parts.append(f"[{c.get('type', '?')}]")
+                        else:
+                            parts.append(str(c))
+                    result = "\n".join(parts)
                 result_str = str(result)
-                if len(result_str) > 300:
-                    result_str = result_str[:300] + "..."
                 is_error = (
                     block.get("is_error", False)
                     if isinstance(block, dict)
@@ -186,7 +186,7 @@ def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
                 )
                 label = "Tool error" if is_error else "Tool result"
                 new_blocks.append(
-                    _make_text_block(block, f"[{label} for {tid}: {result_str}]")
+                    _make_text_block(f"[{label} for {tid}]:\n{result_str}")
                 )
                 tool_count += 1
             else:
