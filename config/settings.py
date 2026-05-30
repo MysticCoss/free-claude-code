@@ -201,6 +201,13 @@ class Settings(BaseSettings):
         default=None, validation_alias="ENABLE_HAIKU_THINKING"
     )
 
+    # ==================== 1M Context Models ====================
+    # Comma-separated list of provider/model refs whose upstream context window
+    # is >= 1M tokens.  Each matching model also gets a ``[1m]``-suffixed variant
+    # in the model list so Claude Code grants 1M-token context window.
+    # Example: ``opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash``
+    fcc_1m_models: str = Field(default="", validation_alias="FCC_1M_MODELS")
+
     # ==================== HTTP Client Timeouts ====================
     http_read_timeout: float = Field(
         default=120.0, validation_alias="HTTP_READ_TIMEOUT"
@@ -531,6 +538,17 @@ class Settings(BaseSettings):
     def parse_model_name(model_string: str) -> str:
         """Extract model name from any 'provider/model' string."""
         return model_string.split("/", 1)[1]
+
+    def one_m_model_refs(self) -> frozenset[str]:
+        """Return the set of provider/model refs tagged for 1M-context variants."""
+        refs: set[str] = set()
+        for part in self.fcc_1m_models.split(","):
+            stripped = part.strip()
+            if not stripped:
+                continue
+            # Strip any existing [1m] suffix so the config is idempotent.
+            refs.add(stripped.removesuffix("[1m]"))
+        return frozenset(refs)
 
     model_config = SettingsConfigDict(
         env_file=_env_files(),

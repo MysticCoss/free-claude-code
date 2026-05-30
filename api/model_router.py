@@ -39,6 +39,11 @@ COMPACT_SYSTEM_MARKER = "summarizing conversations"
 COMPACT_USER_MARKER = "CRITICAL: Respond with TEXT ONLY"
 
 
+def _strip_1m_suffix(model: str) -> str:
+    """Remove the ``[1m]`` context-window marker so upstream receives the real model id."""
+    return model.removesuffix("[1m]")
+
+
 def _extract_system_text(system: str | list[Any] | None) -> str:
     """Flatten the system prompt to a single searchable string."""
     if system is None:
@@ -221,6 +226,7 @@ class ModelRouter:
             force_thinking_enabled,
         ) = self._direct_provider_model(claude_model_name)
         if direct_provider_id is not None and direct_provider_model is not None:
+            direct_provider_model = _strip_1m_suffix(direct_provider_model)
             thinking_enabled = (
                 force_thinking_enabled
                 if force_thinking_enabled is not None
@@ -244,7 +250,7 @@ class ModelRouter:
         provider_model_ref = self._settings.resolve_model(claude_model_name)
         thinking_enabled = self._settings.resolve_thinking(claude_model_name)
         provider_id = Settings.parse_provider_type(provider_model_ref)
-        provider_model = Settings.parse_model_name(provider_model_ref)
+        provider_model = _strip_1m_suffix(Settings.parse_model_name(provider_model_ref))
         if provider_model != claude_model_name:
             logger.debug(
                 "MODEL MAPPING: '{}' -> '{}'", claude_model_name, provider_model
