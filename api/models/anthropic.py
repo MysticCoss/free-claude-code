@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Role(StrEnum):
     user = "user"
     assistant = "assistant"
-    system = "system"
+    system = "system"  # accepted at parse time but filtered before provider dispatch
 
 
 class _AnthropicBlockBase(BaseModel):
@@ -142,7 +142,9 @@ def _normalize_system_role_messages(data: Any) -> Any:
 # Message Types
 # =============================================================================
 class Message(BaseModel):
-    role: Literal["user", "assistant"]
+    role: Literal[
+        "user", "assistant", "system"
+    ]  # system accepted at parse, filtered before provider dispatch
     content: (
         str
         | list[

@@ -27,6 +27,7 @@ class ResolvedModel:
 class RoutedMessagesRequest:
     request: MessagesRequest
     resolved: ResolvedModel
+    is_compaction_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +214,54 @@ def _sanitize_compact_messages(messages: list[Any]) -> list[Any]:
     return sanitized
 
 
+def _merge_system_messages(
+    messages: list[Any], system: str | list[Any] | None
+) -> tuple[list[Any], str | list[Any] | None]:
+    """Extract system messages from ``messages`` and merge their text into the top-level ``system`` field.
+
+    Handles both Pydantic model objects (``.role`` / ``.content``
+    attributes) and plain dicts (``["role"]`` / ``["content"]`` keys)
+    so callers can pass any message shape.
+
+    Returns a ``(filtered_messages, merged_system)`` tuple where
+    *filtered_messages* has no system-role messages and *merged_system*
+    preserves the original system content plus any newly extracted text.
+    """
+    filtered: list[Any] = []
+    system_contents: list[str] = []
+
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role is None and isinstance(msg, dict):
+            role = msg.get("role")
+
+        if role == "system":
+            content = getattr(msg, "content", None)
+            if content is None and isinstance(msg, dict):
+                content = msg.get("content")
+            if content is not None:
+                system_contents.append(str(content))
+            continue
+        filtered.append(msg)
+
+    if system_contents:
+        merged_system: str | list[Any] | None = system
+        for content in system_contents:
+            if merged_system is None:
+                merged_system = content
+            elif isinstance(merged_system, str):
+                merged_system = f"{merged_system}\n\n---\n\n{content}"
+            elif isinstance(merged_system, list):
+                merged_system = [*merged_system, {"type": "text", "text": content}]
+        logger.debug(
+            "Merged {} system message(s) into system field",
+            len(system_contents),
+        )
+        return filtered, merged_system
+
+    return filtered, system
+
+
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
@@ -316,9 +365,7 @@ class ModelRouter:
         MODEL_COMPACT when configured, otherwise fall through to normal
         model resolution.
         """
-        if self._settings.model_compact is not None and _is_compaction_request(
-            request
-        ):
+        if self._settings.model_compact is not None and _is_compaction_request(request):
             resolved = self._resolve_compact_override(request.model)
             if resolved is not None:
                 routed = request.model_copy(deep=True)
@@ -343,11 +390,19 @@ class ModelRouter:
                         elif hasattr(block, "text"):
                             parts.append(str(block.text))
                     routed.system = "\n\n".join(parts)
-                return RoutedMessagesRequest(request=routed, resolved=resolved)
+                routed.messages, routed.system = _merge_system_messages(
+                    routed.messages, routed.system
+                )
+                return RoutedMessagesRequest(
+                    request=routed, resolved=resolved, is_compaction_override=True
+                )
 
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
         routed.model = resolved.provider_model
+        routed.messages, routed.system = _merge_system_messages(
+            routed.messages, routed.system
+        )
         return RoutedMessagesRequest(request=routed, resolved=resolved)
 
     def resolve_token_count_request(
