@@ -35,7 +35,7 @@ _IMAGE_STRIP_HINT = (
     "Use the `understand_image` tool to analyze images — call it with the "
     "image path or URL provided by the user.]"
 )
-_TOOL_IMAGE_STRIP_HINT = "[Tool output image removed: DeepSeek has no vision support.]"
+_TOOL_IMAGE_STRIP_HINT = _IMAGE_STRIP_HINT
 
 
 def _is_deepseek_v4_model(model: str) -> bool:
