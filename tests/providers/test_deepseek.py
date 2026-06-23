@@ -784,6 +784,11 @@ def test_strips_image_blocks_for_deepseek(deepseek_provider):
     assert "image" not in block_types
     assert "text" in block_types
 
+    texts = [block["text"] for block in content if block["type"] == "text"]
+    combined = " ".join(texts)
+    assert "describe this" in combined
+    assert "understand_image" in combined
+
 
 def test_normalizes_tool_result_content_dict_to_string(deepseek_provider):
     """Test that tool_result content dicts are normalized to JSON strings."""
@@ -1008,8 +1013,8 @@ def test_image_only_message_replaced_with_placeholder(deepseek_provider):
     content = body["messages"][0]["content"]
     assert len(content) == 1
     assert content[0]["type"] == "text"
-    assert "attachment omitted" in content[0]["text"].lower()
-    assert "image or document inputs" in content[0]["text"].lower()
+    assert "understand_image" in content[0]["text"].lower()
+    assert "image" in content[0]["text"].lower()
 
 
 def test_document_only_message_replaced_with_placeholder(deepseek_provider):
@@ -1118,3 +1123,90 @@ def test_no_warning_when_no_attachments(deepseek_provider, caplog):
         for r in caplog.records
         if r.levelno == logging.WARNING
     )
+
+
+def test_image_strip_hint_not_injected_for_non_user_messages(deepseek_provider):
+    """Images stripped from assistant messages get the generic placeholder, not the hint."""
+    request = MessagesRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "generate an image"}],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "here is your image"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "abc",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+
+    body = deepseek_provider._build_request_body(request)
+
+    # User message should be unchanged (no images to strip)
+    user_content = body["messages"][0]["content"]
+    assert len(user_content) == 1
+    assert user_content[0]["type"] == "text"
+    assert user_content[0]["text"] == "generate an image"
+
+    # Assistant message should have the image stripped, NO understand_image hint
+    assistant_content = body["messages"][1]["content"]
+    texts = [b["text"] for b in assistant_content if b["type"] == "text"]
+    combined = " ".join(texts)
+    assert "here is your image" in combined
+    assert "understand_image" not in combined
+    assert "image" not in [b["type"] for b in assistant_content]
+
+
+def test_document_and_image_in_user_message_gets_image_hint(deepseek_provider):
+    """When both document and image are stripped from a user message, hint is injected."""
+    request = MessagesRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "analyze these files"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "img",
+                            },
+                        },
+                        {
+                            "type": "document",
+                            "source": {"type": "file", "file_id": "file_pdf"},
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+
+    body = deepseek_provider._build_request_body(request)
+
+    content = body["messages"][0]["content"]
+    block_types = [b["type"] for b in content]
+    assert "image" not in block_types
+    assert "document" not in block_types
+    assert "text" in block_types
+
+    texts = [b["text"] for b in content if b["type"] == "text"]
+    combined = " ".join(texts)
+    assert "analyze these files" in combined
+    assert "understand_image" in combined

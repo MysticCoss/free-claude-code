@@ -4,7 +4,9 @@ from typing import Any
 
 from loguru import logger
 
+from api.models.anthropic import ContentBlockText
 from core.anthropic import ReasoningReplayMode, build_base_request_body
+from core.anthropic.content import get_block_type
 from core.anthropic.conversion import OpenAIConversionError
 from providers.exceptions import InvalidRequestError
 
@@ -27,6 +29,12 @@ _BUDGET_EFFORT_THRESHOLDS = (
 )
 
 _DEEPSEEK_V4_MODEL_PREFIXES = ("deepseek-v4",)
+
+_IMAGE_STRIP_HINT = (
+    "[Image attachment removed: DeepSeek models cannot view images natively. "
+    "Use the `understand_image` tool to analyze images — call it with the "
+    "image path or URL provided by the user.]"
+)
 
 
 def _is_deepseek_v4_model(model: str) -> bool:
@@ -74,6 +82,38 @@ def _apply_deepseek_reasoning_effort(request_data: Any, body: dict) -> None:
     )
 
 
+def _strip_image_blocks_and_hint(request_data: Any) -> bool:
+    """Strip image blocks from a MessagesRequest and inject hints for DeepSeek V4.
+
+    Modifies messages in-place so the OpenAI converter never sees image blocks.
+    Returns True if any images were stripped.
+    """
+    messages = getattr(request_data, "messages", [])
+    if not messages:
+        return False
+
+    stripped_any = False
+    for msg in messages:
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+
+        had_image = False
+        new_content: list[Any] = []
+        for block in content:
+            if get_block_type(block) == "image":
+                had_image = True
+                stripped_any = True
+                continue
+            new_content.append(block)
+
+        if had_image:
+            new_content.append(ContentBlockText(type="text", text=_IMAGE_STRIP_HINT))
+            msg.content = new_content
+
+    return stripped_any
+
+
 def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
     """Build OpenAI-format request body from Anthropic request for OpenCode Zen."""
     logger.debug(
@@ -81,6 +121,13 @@ def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
         getattr(request_data, "model", "?"),
         len(getattr(request_data, "messages", [])),
     )
+
+    # DeepSeek V4 models lack vision support — strip image blocks and inject
+    # a hint so the model knows it can use the understand_image tool instead.
+    model = getattr(request_data, "model", "")
+    if _is_deepseek_v4_model(model):
+        _strip_image_blocks_and_hint(request_data)
+
     try:
         body = build_base_request_body(
             request_data,
