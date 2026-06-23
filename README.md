@@ -68,6 +68,24 @@ Free Claude Code routes Anthropic Messages API traffic from Claude Code (CLI and
 - Optional voice-note transcription through local Whisper or NVIDIA NIM.
 - Local **Admin UI** at `/admin` to edit supported proxy settings, validate changes, and check providers (loopback access only).
 
+### What This Fork Adds
+
+This fork adds several enhancements on top of upstream:
+
+**OpenCode Go — Anthropic Messages fallback.** When the primary OpenAI-compatible request to `opencode_go` fails (e.g. 400 on unsupported blocks or rate limits), the provider retries through the native Anthropic `/messages` endpoint on the same base URL. This improves reliability for DeepSeek V4 and other models on OpenCode Go. Set in the Admin UI via `OPENCODE_API_KEY` with the `opencode_go/` prefix.
+
+**OpenCode Go — DeepSeek V4 reasoning effort forwarding.** Anthropic adaptive thinking effort levels (`output_config.effort` or `thinking.budget_tokens`) are mapped to DeepSeek's `reasoning_effort` parameter (`high` / `max`) for `deepseek-v4-pro` and `deepseek-v4-flash` on OpenCode Go.
+
+**DeepSeek — image hint injection.** DeepSeek V4 models lack native vision support. When image blocks appear in user messages, this fork strips them and injects a hint telling the model to use the `understand_image` MCP tool instead. This applies both to the native `deepseek` provider (Anthropic-compatible path) and to DeepSeek V4 models on `opencode_go` (OpenAI chat path), where the hint prevents an `OpenAIConversionError`.
+
+**FCC_1M_MODELS — 1M-token context window variants.** Configure `FCC_1M_MODELS` in the Admin UI as a comma-separated list of provider/model refs (e.g. `opencode_go/deepseek-v4-pro`). Each matching model gets a `[1m]`-suffixed variant in the `/v1/models` response, signaling Claude Code to grant the full 1M-token context window for those models.
+
+**MODEL_COMPACT — dedicated compaction routing.** Route Claude Code compaction/summarization requests to a cheaper model. Set `MODEL_COMPACT` in the Admin UI to a provider/model slug (e.g. `opencode_go/deepseek-v4-flash`). This keeps your main model for coding and a lighter model for context compaction, reducing cost.
+
+**Compaction reliability fixes.** Multiple fixes ensure compaction requests succeed across providers: orphan `tool_result` blocks are sanitized, system messages are merged, provider-incompatible fields are stripped, and the compaction falls back to the original model if the compact model fails.
+
+**Suggestion mode detection fix.** Claude Code suggestion mode is detected from the last user message only, preventing false positives when tool results earlier in the conversation contain suggestion-like content.
+
 ## Quick Start
 
 ### 1. Install/Update The Proxy
