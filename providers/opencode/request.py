@@ -35,6 +35,7 @@ _IMAGE_STRIP_HINT = (
     "Use the `understand_image` tool to analyze images — call it with the "
     "image path or URL provided by the user.]"
 )
+_TOOL_IMAGE_STRIP_HINT = "[Tool output image removed: DeepSeek has no vision support.]"
 
 
 def _is_deepseek_v4_model(model: str) -> bool:
@@ -86,6 +87,8 @@ def _strip_image_blocks_and_hint(request_data: Any) -> bool:
     """Strip image blocks from a MessagesRequest and inject hints for DeepSeek V4.
 
     Modifies messages in-place so the OpenAI converter never sees image blocks.
+    Handles both top-level image blocks in user messages and images nested inside
+    ``tool_result.content`` lists (e.g. Firefox MCP screenshot_page output).
     Returns True if any images were stripped.
     """
     messages = getattr(request_data, "messages", [])
@@ -101,10 +104,30 @@ def _strip_image_blocks_and_hint(request_data: Any) -> bool:
         had_image = False
         new_content: list[Any] = []
         for block in content:
-            if get_block_type(block) == "image":
+            btype = get_block_type(block)
+            if btype == "image":
                 had_image = True
                 stripped_any = True
                 continue
+            if btype == "tool_result":
+                tool_content = getattr(block, "content", None)
+                if isinstance(tool_content, list):
+                    filtered_tool_content: list[Any] = []
+                    tool_had_image = False
+                    for sub in tool_content:
+                        if get_block_type(sub) == "image":
+                            tool_had_image = True
+                            stripped_any = True
+                            continue
+                        filtered_tool_content.append(sub)
+                    if tool_had_image:
+                        if not filtered_tool_content:
+                            filtered_tool_content = [
+                                ContentBlockText(
+                                    type="text", text=_TOOL_IMAGE_STRIP_HINT
+                                )
+                            ]
+                        block.content = filtered_tool_content
             new_content.append(block)
 
         if had_image:
