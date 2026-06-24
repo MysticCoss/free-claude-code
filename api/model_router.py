@@ -262,6 +262,33 @@ def _merge_system_messages(
     return filtered, system
 
 
+def _rewrite_system_messages_as_user(messages: list[Any]) -> list[Any]:
+    """Convert system-role messages to user-role so OpenAI providers accept them.
+
+    System reminders injected mid-conversation by Claude Code (skills list,
+    task hints, ``<system-reminder>`` tags) are kept in-place as user
+    messages so the message prefix stays byte-stable for upstream caching.
+    """
+    result: list[Any] = []
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role is None and isinstance(msg, dict):
+            role = msg.get("role")
+
+        if role == "system":
+            content = getattr(msg, "content", None)
+            if content is None and isinstance(msg, dict):
+                content = msg.get("content")
+            if content is not None:
+                if isinstance(msg, dict):
+                    result.append({"role": "user", "content": str(content)})
+                else:
+                    result.append(msg.model_copy(update={"role": "user"}))
+            continue
+        result.append(msg)
+    return result
+
+
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
@@ -400,9 +427,7 @@ class ModelRouter:
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
         routed.model = resolved.provider_model
-        routed.messages, routed.system = _merge_system_messages(
-            routed.messages, routed.system
-        )
+        routed.messages = _rewrite_system_messages_as_user(routed.messages)
         return RoutedMessagesRequest(request=routed, resolved=resolved)
 
     def resolve_token_count_request(
