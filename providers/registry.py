@@ -103,7 +103,9 @@ def _create_opencode(config: ProviderConfig, _settings: Settings) -> BaseProvide
 def _create_opencode_go(config: ProviderConfig, _settings: Settings) -> BaseProvider:
     from providers.opencode import OpenCodeProvider
 
-    return OpenCodeProvider(config, provider_name="OPENCODE_GO", enable_anthropic_fallback=True)
+    return OpenCodeProvider(
+        config, provider_name="OPENCODE_GO", enable_anthropic_fallback=True
+    )
 
 
 def _create_zai(config: ProviderConfig, _settings: Settings) -> BaseProvider:

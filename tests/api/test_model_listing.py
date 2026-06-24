@@ -12,6 +12,7 @@ def _settings(
     model: str = "deepseek/deepseek-chat",
     model_opus: str | None = "open_router/anthropic/claude-opus",
     model_haiku: str | None = "deepseek/deepseek-chat",
+    fcc_1m_models: str = "",
 ) -> Settings:
     return Settings.model_construct(
         model=model,
@@ -19,6 +20,7 @@ def _settings(
         model_sonnet=None,
         model_haiku=model_haiku,
         anthropic_auth_token="",
+        fcc_1m_models=fcc_1m_models,
     )
 
 
@@ -146,6 +148,81 @@ def test_models_list_includes_cached_wafer_models():
     assert "claude-3-freecc-no-thinking/wafer/DeepSeek-V4-Pro" in ids
     assert "anthropic/wafer/MiniMax-M2.7" in ids
     assert "claude-3-freecc-no-thinking/wafer/MiniMax-M2.7" in ids
+
+
+def test_models_list_includes_1m_suffixed_variants():
+    app = create_app(lifespan_enabled=False)
+    settings = _settings(
+        model="opencode_go/deepseek-v4-pro",
+        model_opus=None,
+        model_haiku=None,
+        fcc_1m_models="opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+    )
+    registry = ProviderRegistry()
+    registry.cache_model_ids("opencode_go", {"deepseek-v4-pro", "deepseek-v4-flash"})
+    app.state.provider_registry = registry
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    try:
+        response = TestClient(app).get("/v1/models")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+
+    # Base variants exist
+    assert "anthropic/opencode_go/deepseek-v4-pro" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro" in ids
+    assert "anthropic/opencode_go/deepseek-v4-flash" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-flash" in ids
+
+    # [1m]-suffixed variants exist
+    assert "anthropic/opencode_go/deepseek-v4-pro[1m]" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro[1m]" in ids
+    assert "anthropic/opencode_go/deepseek-v4-flash[1m]" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-flash[1m]" in ids
+
+    # [1m] variants have correct display names
+    display_names = {
+        item["id"]: item["display_name"] for item in response.json()["data"]
+    }
+    assert (
+        display_names["anthropic/opencode_go/deepseek-v4-pro[1m]"]
+        == "opencode_go/deepseek-v4-pro[1m]"
+    )
+    assert (
+        display_names["claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro[1m]"]
+        == "opencode_go/deepseek-v4-pro[1m] (no thinking)"
+    )
+
+
+def test_models_list_no_1m_variants_when_not_configured():
+    app = create_app(lifespan_enabled=False)
+    settings = _settings(
+        model="opencode_go/deepseek-v4-pro",
+        model_opus=None,
+        model_haiku=None,
+        fcc_1m_models="",
+    )
+    registry = ProviderRegistry()
+    registry.cache_model_ids("opencode_go", {"deepseek-v4-pro"})
+    app.state.provider_registry = registry
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    try:
+        response = TestClient(app).get("/v1/models")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+
+    assert "anthropic/opencode_go/deepseek-v4-pro" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro" in ids
+    # No [1m] variants
+    assert "anthropic/opencode_go/deepseek-v4-pro[1m]" not in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro[1m]" not in ids
 
 
 def test_models_list_works_without_provider_registry():
