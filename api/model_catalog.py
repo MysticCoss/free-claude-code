@@ -56,6 +56,8 @@ def build_models_list_response(
     """Return configured, cached, and compatibility model ids."""
     models: list[ModelResponse] = []
     seen: set[str] = set()
+    # Track model_ref -> supports_thinking for 1M variant generation.
+    ref_thinking: dict[str, bool | None] = {}
 
     for ref in settings.configured_chat_model_refs():
         supports_thinking = None
@@ -63,6 +65,7 @@ def build_models_list_response(
             supports_thinking = provider_registry.cached_model_supports_thinking(
                 ref.provider_id, ref.model_id
             )
+        ref_thinking[ref.model_ref] = supports_thinking
         _append_provider_model_variants(
             models,
             seen,
@@ -72,12 +75,25 @@ def build_models_list_response(
 
     if provider_registry is not None:
         for model_info in provider_registry.cached_prefixed_model_infos():
+            ref_thinking[model_info.model_id] = model_info.supports_thinking
             _append_provider_model_variants(
                 models,
                 seen,
                 model_info.model_id,
                 supports_thinking=model_info.supports_thinking,
             )
+
+    # Append [1m]-suffixed variants so Claude Code grants 1M-token context windows.
+    one_m_refs = settings.one_m_model_refs()
+    if one_m_refs:
+        for ref, supports_thinking in ref_thinking.items():
+            if ref in one_m_refs:
+                _append_provider_model_variants(
+                    models,
+                    seen,
+                    f"{ref}[1m]",
+                    supports_thinking=supports_thinking,
+                )
 
     for model in SUPPORTED_CLAUDE_MODELS:
         _append_unique_model(models, seen, model)

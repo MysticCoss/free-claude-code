@@ -355,7 +355,8 @@ class TestStripImagesInToolResults:
         inner = tool_result.content
         assert isinstance(inner, list)
         block_types = [
-            b["type"] if isinstance(b, dict) else b.type for b in inner  # type: ignore[union-attr]
+            b["type"] if isinstance(b, dict) else b.type
+            for b in inner  # type: ignore[union-attr]
         ]
         assert "image" not in block_types
         assert "text" in block_types

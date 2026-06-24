@@ -35,7 +35,7 @@ class _FakeDelta:
 
 
 class _FakeChoice:
-    __slots__ = ("index", "delta", "finish_reason")
+    __slots__ = ("delta", "finish_reason", "index")
 
     def __init__(self):
         self.index = 0
@@ -44,7 +44,7 @@ class _FakeChoice:
 
 
 class _FakeChunk:
-    __slots__ = ("usage", "choices")
+    __slots__ = ("choices", "usage")
 
     def __init__(self):
         self.usage = None
@@ -59,7 +59,7 @@ async def _iter_anthropic_json_as_chunks(
         data = json.loads(body_bytes)
     except json.JSONDecodeError:
         raise httpx.HTTPStatusError(
-            f"Anthropic fallback: invalid JSON response",
+            "Anthropic fallback: invalid JSON response",
             request=response.request,
             response=response,
         )
