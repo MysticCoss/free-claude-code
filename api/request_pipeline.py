@@ -78,8 +78,13 @@ def _log_unexpected_pipeline_exception(
     context: str,
     request_id: str | None = None,
 ) -> None:
-    """Log API failures without echoing exception text unless opted in."""
-    if settings.log_api_error_tracebacks:
+    """Log API failures without echoing exception text unless opted in.
+
+    TypeError, AttributeError, and ValueError always include the traceback
+    (they indicate bugs, not user or provider errors).
+    """
+    _always_traceback = isinstance(exc, (TypeError, AttributeError, ValueError))
+    if settings.log_api_error_tracebacks or _always_traceback:
         if request_id is not None:
             logger.error("{} request_id={}: {}", context, request_id, exc)
         else:
