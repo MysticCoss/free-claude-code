@@ -12,6 +12,7 @@ def test_messages_request_parses_without_model_mapping_side_effects():
 
 
 def test_messages_request_normalizes_system_role_messages():
+    """System-role messages stay in-place at their original array positions."""
     request = MessagesRequest.model_validate(
         {
             "model": "claude-3-opus",
@@ -24,11 +25,14 @@ def test_messages_request_normalizes_system_role_messages():
         }
     )
 
-    assert [message.role for message in request.messages] == ["user", "user"]
-    assert request.system == "system prompt"
+    assert [message.role for message in request.messages] == [
+        "user", "system", "user"
+    ]
+    assert request.system is None
 
 
 def test_messages_request_merges_system_role_messages_with_existing_system():
+    """System-role messages stay in array; top-level system field is untouched."""
     request = MessagesRequest.model_validate(
         {
             "model": "claude-3-opus",
@@ -41,8 +45,8 @@ def test_messages_request_merges_system_role_messages_with_existing_system():
         }
     )
 
-    assert len(request.messages) == 1
-    assert request.system == "existing system\n\nmessage system"
+    assert [message.role for message in request.messages] == ["system", "user"]
+    assert request.system == "existing system"
 
 
 def test_messages_request_preserves_system_block_cache_control_when_normalizing():
