@@ -111,31 +111,18 @@ def _merge_system_values(existing: Any, additions: list[Any]) -> Any:
 
 
 def _normalize_system_role_messages(data: Any) -> Any:
-    if not isinstance(data, dict):
-        return data
+    """Keep system-role messages in the array instead of merging into ``system``.
 
-    messages = data.get("messages")
-    if not isinstance(messages, list):
-        return data
+    When system-role messages (e.g. ``<system-reminder>`` tags injected by
+    Claude Code mid-conversation) are extracted and merged into the top-level
+    ``system`` field, the system prompt changes between requests, which
+    invalidates upstream prefix caches on the entire system payload.
 
-    system_contents: list[Any] = []
-    normalized_messages: list[Any] = []
-    for message in messages:
-        role = message.get("role") if isinstance(message, dict) else None
-        if role == Role.system:
-            system_contents.append(message.get("content", ""))
-            continue
-        normalized_messages.append(message)
-
-    if not system_contents:
-        return data
-
-    normalized = dict(data)
-    normalized["messages"] = normalized_messages
-    normalized["system"] = _merge_system_values(
-        normalized.get("system"), system_contents
-    )
-    return normalized
+    Leaving them in-place keeps the ``system`` field byte-stable so the
+    provider cache can re-use the prefix across requests.  Both Anthropic and
+    OpenAI-compatible providers accept system-role messages at any position.
+    """
+    return data
 
 
 # =============================================================================

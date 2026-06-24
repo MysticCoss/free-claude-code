@@ -96,7 +96,11 @@ def test_create_message_stream(client: TestClient):
 
 
 def test_create_message_accepts_system_role_messages(client: TestClient):
-    """Create message accepts latest-client system messages."""
+    """System-role messages stay in-place (not extracted to system field).
+
+    Keeping them in the messages array prevents the system field from growing
+    on every system-reminder injection, which preserves upstream prefix caches.
+    """
     mock_provider.stream_response = _mock_stream_response
     _stream_response_calls.clear()
     payload = {
@@ -114,8 +118,9 @@ def test_create_message_accepts_system_role_messages(client: TestClient):
 
     assert response.status_code == 200
     routed_request = _stream_response_calls[0][0][0]
-    assert [message.role for message in routed_request.messages] == ["user", "user"]
-    assert routed_request.system == "system prompt"
+    assert [message.role for message in routed_request.messages] == [
+        "user", "system", "user"
+    ]
 
 
 def test_model_mapping(client: TestClient):
