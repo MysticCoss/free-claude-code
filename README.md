@@ -86,6 +86,8 @@ This fork adds several enhancements on top of upstream:
 
 **Suggestion mode detection fix.** Claude Code suggestion mode is detected from the last user message only, preventing false positives when tool results earlier in the conversation contain suggestion-like content.
 
+**Web search/fetch — listed tool support for OpenAI Chat upstreams.** Anthropic server-side tools (`web_search` and `web_fetch`) are now intercepted locally even when the client only lists them (without `tool_choice` forcing). Older Claude Code releases *force* the tools via `tool_choice`, but newer releases *list* them under `tools` instead. Without this fix the proxy rejected listed tools with a 400 error on OpenAI Chat upstreams (opencode_go, etc.). The fix detects listed tools from the last user turn, executes them locally, and streams the result back — the request never reaches the upstream provider.
+
 ## Quick Start
 
 ### 1. Install/Update The Proxy

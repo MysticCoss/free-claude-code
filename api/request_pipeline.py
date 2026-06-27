@@ -29,6 +29,7 @@ from .models.responses import TokenCountResponse
 from .optimization_handlers import try_optimizations
 from .web_tools.egress import WebFetchEgressPolicy
 from .web_tools.request import (
+    is_listed_web_server_tool_request,
     is_web_server_tool_request,
     openai_chat_upstream_server_tool_error,
 )
@@ -312,7 +313,7 @@ class ApiRequestPipeline:
     ) -> object | None:
         if not self._settings.enable_web_server_tools:
             return None
-        if not is_web_server_tool_request(routed.request):
+        if not is_web_server_tool_request(routed.request) and not is_listed_web_server_tool_request(routed.request):
             return None
 
         input_tokens = self._token_counter(
