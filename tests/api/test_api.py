@@ -119,7 +119,9 @@ def test_create_message_accepts_system_role_messages(client: TestClient):
     assert response.status_code == 200
     routed_request = _stream_response_calls[0][0][0]
     assert [message.role for message in routed_request.messages] == [
-        "user", "system", "user"
+        "user",
+        "system",
+        "user",
     ]
 
 

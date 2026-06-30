@@ -5,7 +5,7 @@ from loguru import logger
 
 from config.settings import Settings
 from core.anthropic import get_token_count
-from core.trace import trace_event
+from core.trace import extract_claude_session_id_from_headers, trace_event
 from providers.registry import ProviderRegistry
 
 from . import dependencies
@@ -27,7 +27,9 @@ def get_request_pipeline(
     return ApiRequestPipeline(
         settings,
         provider_getter=lambda provider_type: dependencies.resolve_provider(
-            provider_type, app=request.app, settings=settings
+            provider_type,
+            app=request.app,
+            settings=settings,
         ),
         token_counter=get_token_count,
     )
@@ -44,10 +46,14 @@ def _probe_response(allow: str) -> Response:
 @router.post("/v1/messages")
 async def create_message(
     request_data: MessagesRequest,
+    request: Request,
     pipeline: ApiRequestPipeline = Depends(get_request_pipeline),
     _auth=Depends(require_api_key),
 ):
     """Create a message (always streaming)."""
+    session_id = extract_claude_session_id_from_headers(request.headers)
+    if session_id:
+        request_data.fcc_session_id = session_id
     return pipeline.create_message(request_data)
 
 
@@ -91,7 +97,8 @@ async def probe_count_tokens(_auth=Depends(require_api_key)):
 
 @router.get("/")
 async def root(
-    settings: Settings = Depends(get_settings), _auth=Depends(require_api_key)
+    settings: Settings = Depends(get_settings),
+    _auth=Depends(require_api_key),
 ):
     """Root endpoint."""
     return {

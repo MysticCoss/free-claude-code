@@ -124,8 +124,9 @@ def _strip_image_blocks_and_hint(request_data: Any) -> bool:
                         if not filtered_tool_content:
                             filtered_tool_content = [
                                 ContentBlockText(
-                                    type="text", text=_TOOL_IMAGE_STRIP_HINT
-                                )
+                                    type="text",
+                                    text=_TOOL_IMAGE_STRIP_HINT,
+                                ),
                             ]
                         block.content = filtered_tool_content
             new_content.append(block)
@@ -164,6 +165,23 @@ def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
     model = body.get("model", "")
     if thinking_enabled and _is_deepseek_v4_model(model):
         _apply_deepseek_reasoning_effort(request_data, body)
+
+    # Forward session / request identifiers to OpenCode Go so the billing
+    # dashboard correlates requests originating from the same Claude Code session.
+    extra_headers: dict[str, str] = {}
+    extra_headers["x-opencode-client"] = "fcc"
+    session_id = getattr(request_data, "fcc_session_id", None)
+    if session_id:
+        extra_headers["x-opencode-session"] = session_id
+    else:
+        # Fall back to request ID when Claude Code doesn't provide a session header.
+        request_id = getattr(request_data, "fcc_request_id", None)
+        if request_id:
+            extra_headers["x-opencode-session"] = request_id
+    request_id = getattr(request_data, "fcc_request_id", None)
+    if request_id:
+        extra_headers["x-opencode-request"] = request_id
+    body["extra_headers"] = extra_headers
 
     logger.debug(
         "OPENCODE_REQUEST: conversion done model={} msgs={} tools={}",
