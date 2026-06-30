@@ -5,9 +5,13 @@ from typing import Any
 from loguru import logger
 
 from api.models.anthropic import ContentBlockText
+from config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 from core.anthropic import ReasoningReplayMode, build_base_request_body
 from core.anthropic.content import get_block_type
 from core.anthropic.conversion import OpenAIConversionError
+from core.anthropic.native_messages_request import (
+    build_base_native_anthropic_request_body,
+)
 from providers.exceptions import InvalidRequestError
 
 # Anthropic adaptive thinking effort → DeepSeek reasoning_effort mapping.
@@ -36,6 +40,72 @@ _IMAGE_STRIP_HINT = (
     "image path or URL provided by the user.]"
 )
 _TOOL_IMAGE_STRIP_HINT = _IMAGE_STRIP_HINT
+
+# Models that use Anthropic Messages API (@ai-sdk/anthropic) natively,
+# rather than OpenAI Chat Completions (@ai-sdk/openai-compatible).
+# Source: https://opencode.ai/docs/go
+_ANTHROPIC_NATIVE_MODELS = frozenset(
+    {
+        "minimax-m3",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+    }
+)
+
+
+def _normalize_model_name(model: str) -> str:
+    """Strip ``provider/`` prefix if present, returning the bare model id."""
+    return model.rpartition("/")[-1] if "/" in model else model
+
+
+def is_anthropic_native_model(model: str) -> bool:
+    """Return True when *model* should use the Anthropic Messages endpoint."""
+    return _normalize_model_name(model) in _ANTHROPIC_NATIVE_MODELS
+
+
+def build_anthropic_request_body(
+    request_data: Any,
+    *,
+    thinking_enabled: bool,
+) -> dict:
+    """Build a native Anthropic Messages request body for Anthropic-native models."""
+    logger.debug(
+        "OPENCODE_ANTHROPIC_REQUEST: native build model={} msgs={}",
+        getattr(request_data, "model", "?"),
+        len(getattr(request_data, "messages", [])),
+    )
+
+    body = build_base_native_anthropic_request_body(
+        request_data,
+        default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        thinking_enabled=thinking_enabled,
+    )
+
+    # Forward session / request identifiers to OpenCode Go.
+    extra_headers: dict[str, str] = {}
+    extra_headers["x-opencode-client"] = "fcc"
+    session_id = getattr(request_data, "fcc_session_id", None)
+    if session_id:
+        extra_headers["x-opencode-session"] = session_id
+    else:
+        request_id = getattr(request_data, "fcc_request_id", None)
+        if request_id:
+            extra_headers["x-opencode-session"] = request_id
+    request_id = getattr(request_data, "fcc_request_id", None)
+    if request_id:
+        extra_headers["x-opencode-request"] = request_id
+    body["extra_headers"] = extra_headers
+
+    logger.debug(
+        "OPENCODE_ANTHROPIC_REQUEST: build done model={} msgs={} tools={}",
+        body.get("model"),
+        len(body.get("messages", [])),
+        len(body.get("tools", [])),
+    )
+    return body
 
 
 def _is_deepseek_v4_model(model: str) -> bool:
