@@ -130,7 +130,9 @@ def _normalize_system_role_messages(data: Any) -> Any:
 # =============================================================================
 class Message(BaseModel):
     role: Literal[
-        "user", "assistant", "system"
+        "user",
+        "assistant",
+        "system",
     ]  # system accepted at parse, filtered before provider dispatch
     content: (
         str
@@ -199,6 +201,10 @@ class MessagesRequest(BaseModel):
     extra_body: dict[str, Any] | None = None
     # Beta feature flags sent by Claude Code as a body field; accepted but never forwarded.
     betas: list[str] | None = Field(default=None, exclude=True)
+    # Session / request identity forwarded as x-opencode-* headers by the
+    # OpenCode Zen provider so the billing dashboard correlates requests.
+    fcc_session_id: str | None = Field(default=None, exclude=True)
+    fcc_request_id: str | None = Field(default=None, exclude=True)
 
 
 class TokenCountRequest(BaseModel):

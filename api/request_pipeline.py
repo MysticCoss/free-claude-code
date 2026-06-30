@@ -148,13 +148,15 @@ class ApiRequestPipeline:
                     wire_api="messages",
                     raw_log_label="FULL_PAYLOAD",
                     raw_log_payload=routed.request.model_dump(),
-                )
+                ),
             )
         except ProviderError:
             raise
         except Exception as e:
             _log_unexpected_pipeline_exception(
-                self._settings, e, context="CREATE_MESSAGE_ERROR"
+                self._settings,
+                e,
+                context="CREATE_MESSAGE_ERROR",
             )
             raise HTTPException(
                 status_code=_http_status_for_unexpected_pipeline_exception(e),
@@ -166,7 +168,7 @@ class ApiRequestPipeline:
         request_payload = request_data.model_dump(mode="json", exclude_none=True)
         if request_data.stream is False:
             invalid_request = InvalidRequestError(
-                "FCC /v1/responses supports streaming only; omit stream or set stream=true."
+                "FCC /v1/responses supports streaming only; omit stream or set stream=true.",
             )
             return JSONResponse(
                 status_code=invalid_request.status_code,
@@ -178,7 +180,7 @@ class ApiRequestPipeline:
 
         try:
             anthropic_payload = self._responses_adapter.to_anthropic_payload(
-                request_payload
+                request_payload,
             )
             response_request = MessagesRequest(**anthropic_payload)
             _require_non_empty_messages(response_request.messages)
@@ -195,7 +197,7 @@ class ApiRequestPipeline:
                 self._responses_adapter.iter_sse_from_anthropic(
                     streamed,
                     request_payload,
-                )
+                ),
             )
         except OpenAIResponsesAdapter.ConversionError as exc:
             invalid_request = InvalidRequestError(str(exc))
@@ -236,7 +238,9 @@ class ApiRequestPipeline:
                 _require_non_empty_messages(request_data.messages)
                 routed = self._model_router.resolve_token_count_request(request_data)
                 tokens = self._token_counter(
-                    routed.request.messages, routed.request.system, routed.request.tools
+                    routed.request.messages,
+                    routed.request.system,
+                    routed.request.tools,
                 )
                 trace_event(
                     stage="routing",
@@ -282,7 +286,8 @@ class ApiRequestPipeline:
             raise InvalidRequestError(tool_err)
 
     def _apply_message_routing_policies(
-        self, routed: RoutedMessagesRequest
+        self,
+        routed: RoutedMessagesRequest,
     ) -> RoutedMessagesRequest:
         if not is_safety_classifier_request(routed.request):
             return routed
@@ -309,15 +314,20 @@ class ApiRequestPipeline:
         return None
 
     def _intercept_web_server_tool(
-        self, routed: RoutedMessagesRequest
+        self,
+        routed: RoutedMessagesRequest,
     ) -> object | None:
         if not self._settings.enable_web_server_tools:
             return None
-        if not is_web_server_tool_request(routed.request) and not is_listed_web_server_tool_request(routed.request):
+        if not is_web_server_tool_request(
+            routed.request,
+        ) and not is_listed_web_server_tool_request(routed.request):
             return None
 
         input_tokens = self._token_counter(
-            routed.request.messages, routed.request.system, routed.request.tools
+            routed.request.messages,
+            routed.request.system,
+            routed.request.tools,
         )
         trace_event(
             stage="routing",
@@ -339,7 +349,8 @@ class ApiRequestPipeline:
         )
 
     def _intercept_local_optimization(
-        self, routed: RoutedMessagesRequest
+        self,
+        routed: RoutedMessagesRequest,
     ) -> object | None:
         optimized = try_optimizations(routed.request, self._settings)
         if optimized is None:
@@ -381,6 +392,7 @@ class ApiRequestPipeline:
         trace_event(**route_trace)
 
         request_id = f"req_{uuid.uuid4().hex[:12]}"
+        routed.request.fcc_request_id = request_id
         trace_event(
             stage="ingress",
             event=(

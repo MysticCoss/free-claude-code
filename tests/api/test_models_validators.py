@@ -25,9 +25,7 @@ def test_messages_request_normalizes_system_role_messages():
         }
     )
 
-    assert [message.role for message in request.messages] == [
-        "user", "system", "user"
-    ]
+    assert [message.role for message in request.messages] == ["user", "system", "user"]
     assert request.system is None
 
 

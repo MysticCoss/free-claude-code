@@ -112,7 +112,5 @@ def openai_chat_upstream_server_tool_error(
 
     # Web tools enabled — listed or forced are both OK (interceptor handles them).
     if forced and not has_tool_named(request, forced):
-        return (
-            f"tool_choice forces {forced!r} but that tool is not in the tools list"
-        )
+        return f"tool_choice forces {forced!r} but that tool is not in the tools list"
     return None
