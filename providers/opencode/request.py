@@ -108,6 +108,15 @@ def build_anthropic_request_body(
     return body
 
 
+def _convert_reminder_to_latest_reminder(body: dict) -> None:
+    """Convert user-role ``<system-reminder>`` messages to DeepSeek's native ``latest_reminder`` role."""
+    for msg in body.get("messages", []):
+        if msg.get("role") == "user" and "<system-reminder>" in str(
+            msg.get("content", "")
+        ):
+            msg["role"] = "latest_reminder"
+
+
 def _is_deepseek_v4_model(model: str) -> bool:
     """Return True for deepseek-v4-pro, deepseek-v4-flash, or prefixed variants."""
     name = model.rpartition("/")[-1] if "/" in model else model
@@ -235,6 +244,10 @@ def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
     model = body.get("model", "")
     if thinking_enabled and _is_deepseek_v4_model(model):
         _apply_deepseek_reasoning_effort(request_data, body)
+
+    # Convert <system-reminder> messages to DeepSeek's native latest_reminder role.
+    if _is_deepseek_v4_model(model):
+        _convert_reminder_to_latest_reminder(body)
 
     # Forward session / request identifiers to OpenCode Go so the billing
     # dashboard correlates requests originating from the same Claude Code session.
