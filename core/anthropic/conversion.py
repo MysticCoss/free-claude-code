@@ -283,21 +283,17 @@ class AnthropicToOpenAIConverter:
                 AnthropicToOpenAIConverter._deferred_post_tool_to_messages(pending)
             )
 
-        # Move system-role <system-reminder> messages to the end as user messages.
-        # Mid-conversation system messages confuse providers that don't expect them,
-        # and changing a message in-place mid-array invalidates the prefix cache.
-        reminders: list[dict[str, Any]] = []
-        kept: list[dict[str, Any]] = []
+        # Convert system-role <system-reminder> messages to user role in-place.
+        # Mid-conversation system messages confuse providers that don't expect them.
+        # We change the role in-place (do NOT reorder) because the DeepSeek V4
+        # encoder uses positional indices and inter-message transition tokens —
+        # any insertion, deletion, or reordering shifts byte sequences downstream
+        # and invalidates the prefix cache for all subsequent messages.
         for msg in result:
             if msg.get("role") == "system" and "<system-reminder>" in str(
                 msg.get("content", "")
             ):
                 msg["role"] = "user"
-                reminders.append(msg)
-            else:
-                kept.append(msg)
-        if reminders:
-            result = kept + reminders
 
         return result
 
