@@ -283,6 +283,22 @@ class AnthropicToOpenAIConverter:
                 AnthropicToOpenAIConverter._deferred_post_tool_to_messages(pending)
             )
 
+        # Move system-role <system-reminder> messages to the end as user messages.
+        # Mid-conversation system messages confuse providers that don't expect them,
+        # and changing a message in-place mid-array invalidates the prefix cache.
+        reminders: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
+        for msg in result:
+            if msg.get("role") == "system" and "<system-reminder>" in str(
+                msg.get("content", "")
+            ):
+                msg["role"] = "user"
+                reminders.append(msg)
+            else:
+                kept.append(msg)
+        if reminders:
+            result = kept + reminders
+
         return result
 
     @staticmethod
