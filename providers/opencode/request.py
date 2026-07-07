@@ -14,6 +14,8 @@ from core.anthropic.native_messages_request import (
 )
 from providers.exceptions import InvalidRequestError
 
+from .session_id import claude_to_opencode_session_id
+
 # Anthropic adaptive thinking effort → DeepSeek reasoning_effort mapping.
 # DeepSeek only has two effective tiers (low/medium → high, high/xhigh/max → max).
 _ANTHROPIC_TO_DEEPSEEK_EFFORT = {
@@ -85,15 +87,15 @@ def build_anthropic_request_body(
     )
 
     # Forward session / request identifiers to OpenCode Go.
-    extra_headers: dict[str, str] = {}
-    extra_headers["x-opencode-client"] = "fcc"
-    session_id = getattr(request_data, "fcc_session_id", None)
-    if session_id:
-        extra_headers["x-opencode-session"] = session_id
-    else:
-        request_id = getattr(request_data, "fcc_request_id", None)
-        if request_id:
-            extra_headers["x-opencode-session"] = request_id
+    # x-opencode-session is the deterministically-mapped opencode-shape id
+    # derived from the Claude session id; an empty string is the explicit
+    # "no session" sentinel when Claude Code did not supply one.
+    extra_headers: dict[str, str] = {
+        "x-opencode-client": "fcc",
+        "x-opencode-session": claude_to_opencode_session_id(
+            getattr(request_data, "fcc_session_id", None)
+        ),
+    }
     request_id = getattr(request_data, "fcc_request_id", None)
     if request_id:
         extra_headers["x-opencode-request"] = request_id
@@ -251,16 +253,15 @@ def build_request_body(request_data: Any, *, thinking_enabled: bool) -> dict:
 
     # Forward session / request identifiers to OpenCode Go so the billing
     # dashboard correlates requests originating from the same Claude Code session.
-    extra_headers: dict[str, str] = {}
-    extra_headers["x-opencode-client"] = "fcc"
-    session_id = getattr(request_data, "fcc_session_id", None)
-    if session_id:
-        extra_headers["x-opencode-session"] = session_id
-    else:
-        # Fall back to request ID when Claude Code doesn't provide a session header.
-        request_id = getattr(request_data, "fcc_request_id", None)
-        if request_id:
-            extra_headers["x-opencode-session"] = request_id
+    # x-opencode-session is the deterministically-mapped opencode-shape id
+    # derived from the Claude session id; an empty string is the explicit
+    # "no session" sentinel when Claude Code did not supply one.
+    extra_headers: dict[str, str] = {
+        "x-opencode-client": "fcc",
+        "x-opencode-session": claude_to_opencode_session_id(
+            getattr(request_data, "fcc_session_id", None)
+        ),
+    }
     request_id = getattr(request_data, "fcc_request_id", None)
     if request_id:
         extra_headers["x-opencode-request"] = request_id

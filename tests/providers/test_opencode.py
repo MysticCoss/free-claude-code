@@ -15,8 +15,10 @@ from providers.exceptions import InvalidRequestError
 from providers.opencode.request import (
     _TOOL_IMAGE_STRIP_HINT,
     _strip_image_blocks_and_hint,
+    build_anthropic_request_body,
     build_request_body,
 )
+from providers.opencode.session_id import claude_to_opencode_session_id
 
 
 def test_strip_image_blocks_and_hint_strips_images():
@@ -477,3 +479,128 @@ class TestStripImagesInToolResults:
         inner = tool_result.content
         assert isinstance(inner, list)
         assert inner[0]["text"] == "plain text result"
+
+
+class TestExtraHeadersSessionMapping:
+    """Both request builders must emit the deterministic opencode session id.
+
+    The mapping is a pure function of the Claude session id. The same input
+    always produces the same output; when no Claude session is supplied, the
+    header is set to the empty string (an explicit "no session" sentinel) and
+    must NOT fall back to the request id.
+    """
+
+    def _make_request(self, **overrides: object) -> MessagesRequest:
+        defaults: dict[str, object] = {
+            "model": "deepseek-v4-pro",
+            "messages": [Message(role="user", content="hi")],
+        }
+        defaults.update(overrides)
+        return MessagesRequest.model_validate(defaults)
+
+    # ---- build_request_body (OpenAI Chat path) ----
+
+    def test_openai_path_maps_claude_session_id_deterministically(self):
+        """The Claude session id is mapped, not passed verbatim."""
+        request = self._make_request(fcc_session_id="sess_abc123")
+        body = build_request_body(request, thinking_enabled=False)
+        extra = body["extra_headers"]
+        assert extra["x-opencode-client"] == "fcc"
+        # Deterministic mapping, not the raw value.
+        assert extra["x-opencode-session"] == "ses_61561039cbe7oQkJXkO3nyfecO"
+        assert extra["x-opencode-session"] != "sess_abc123"
+
+    def test_openai_path_no_claude_session_emits_empty_string(self):
+        """No Claude session id → header is the empty string sentinel."""
+        request = self._make_request(fcc_request_id="req_deadbeef")
+        body = build_request_body(request, thinking_enabled=False)
+        extra = body["extra_headers"]
+        assert extra["x-opencode-session"] == ""
+        # Must not fall back to the request id.
+        assert extra["x-opencode-session"] != "req_deadbeef"
+
+    def test_openai_path_session_id_is_stable_across_calls(self):
+        """Two requests with the same Claude session id produce the same mapped id."""
+        body1 = build_request_body(
+            self._make_request(fcc_session_id="sess_abc123"),
+            thinking_enabled=False,
+        )
+        body2 = build_request_body(
+            self._make_request(fcc_session_id="sess_abc123"),
+            thinking_enabled=False,
+        )
+        assert (
+            body1["extra_headers"]["x-opencode-session"]
+            == body2["extra_headers"]["x-opencode-session"]
+        )
+
+    def test_openai_path_distinct_sessions_distinct_ids(self):
+        """Two different Claude session ids produce two different mapped ids."""
+        body1 = build_request_body(
+            self._make_request(fcc_session_id="sess_abc123"),
+            thinking_enabled=False,
+        )
+        body2 = build_request_body(
+            self._make_request(fcc_session_id="sess_xyz"),
+            thinking_enabled=False,
+        )
+        assert (
+            body1["extra_headers"]["x-opencode-session"]
+            != body2["extra_headers"]["x-opencode-session"]
+        )
+
+    def test_openai_path_request_id_preserved(self):
+        """x-opencode-request still carries the FCC request id (unchanged)."""
+        request = self._make_request(
+            fcc_session_id="sess_abc123",
+            fcc_request_id="req_cafe",
+        )
+        body = build_request_body(request, thinking_enabled=False)
+        assert body["extra_headers"]["x-opencode-request"] == "req_cafe"
+
+    # ---- build_anthropic_request_body (Anthropic-native path) ----
+
+    def test_anthropic_path_maps_claude_session_id_deterministically(self):
+        """The Anthropic-native path uses the same mapping."""
+        request = self._make_request(fcc_session_id="sess_abc123")
+        body = build_anthropic_request_body(request, thinking_enabled=False)
+        extra = body["extra_headers"]
+        assert extra["x-opencode-client"] == "fcc"
+        assert extra["x-opencode-session"] == "ses_61561039cbe7oQkJXkO3nyfecO"
+        assert extra["x-opencode-session"] != "sess_abc123"
+
+    def test_anthropic_path_no_claude_session_emits_empty_string(self):
+        """The Anthropic-native path also uses the empty-string sentinel."""
+        request = self._make_request(fcc_request_id="req_deadbeef")
+        body = build_anthropic_request_body(request, thinking_enabled=False)
+        extra = body["extra_headers"]
+        assert extra["x-opencode-session"] == ""
+        assert extra["x-opencode-session"] != "req_deadbeef"
+
+    def test_anthropic_path_request_id_preserved(self):
+        """x-opencode-request is still set on the native path when present."""
+        request = self._make_request(
+            fcc_session_id="sess_abc123",
+            fcc_request_id="req_babe",
+        )
+        body = build_anthropic_request_body(request, thinking_enabled=False)
+        assert body["extra_headers"]["x-opencode-request"] == "req_babe"
+
+    def test_both_paths_produce_identical_session_headers(self):
+        """Both request builders agree on the mapped id for the same input."""
+        request_a = self._make_request(fcc_session_id="sess_abc123")
+        request_b = self._make_request(fcc_session_id="sess_abc123")
+        body_openai = build_request_body(request_a, thinking_enabled=False)
+        body_native = build_anthropic_request_body(request_b, thinking_enabled=False)
+        assert (
+            body_openai["extra_headers"]["x-opencode-session"]
+            == body_native["extra_headers"]["x-opencode-session"]
+        )
+
+    def test_mapped_value_matches_converter_function_directly(self):
+        """The header value is exactly what the converter returns (no extra wrapping)."""
+        request = self._make_request(fcc_session_id="sess_xyz")
+        body = build_request_body(request, thinking_enabled=False)
+        assert body["extra_headers"]["x-opencode-session"] == (
+            claude_to_opencode_session_id("sess_xyz")
+        )
