@@ -88,11 +88,17 @@ class OpenCodeProvider(OpenAIChatTransport):
         }
 
     async def _send_stream_request(self, body: dict) -> httpx.Response:
+        # Pop opencode-specific headers out of the JSON body and merge into the
+        # actual HTTP request — Anthropic Messages API does not understand
+        # `extra_headers` as a body field, and our transport builds requests
+        # with bare httpx (no SDK layer to intercept it).
+        extra = body.pop("extra_headers", None) or {}
+        headers = {**self._request_headers(), **extra}
         request = self._get_anthropic_httpx().build_request(
             "POST",
             "/messages",
             json=body,
-            headers=self._request_headers(),
+            headers=headers,
         )
         return await self._get_anthropic_httpx().send(request, stream=True)
 

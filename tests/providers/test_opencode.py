@@ -5,13 +5,19 @@ models (which lack vision), image blocks are stripped and a hint is injected
 before the converter runs, preventing OpenAIConversionError.
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from api.models.anthropic import (
     ContentBlockImage,
     ContentBlockText,
     Message,
     MessagesRequest,
 )
+from providers.base import ProviderConfig
 from providers.exceptions import InvalidRequestError
+from providers.opencode.client import OpenCodeProvider
 from providers.opencode.request import (
     _TOOL_IMAGE_STRIP_HINT,
     _strip_image_blocks_and_hint,
@@ -604,3 +610,155 @@ class TestExtraHeadersSessionMapping:
         assert body["extra_headers"]["x-opencode-session"] == (
             claude_to_opencode_session_id("sess_xyz")
         )
+
+
+class TestAnthropicBranchHeadersForwarded:
+    """The Anthropic-native transport must forward body['extra_headers'] as HTTP headers.
+
+    Regression: opencode Go dashboards correlate requests via x-opencode-session.
+    The native Anthropic branch builds httpx requests by hand in OpenCodeProvider
+    (no SDK layer to absorb extra_headers), so the provider must pop the body
+    field and merge it into the actual request headers — otherwise the session
+    id never reaches the wire for anthropic-native models (e.g. minimax-m3).
+    """
+
+    def _make_provider(self) -> OpenCodeProvider:
+        return OpenCodeProvider(
+            ProviderConfig(
+                api_key="test-key",
+                base_url="https://opencode.test/v1/",
+                rate_limit=10,
+                rate_window=60,
+                http_read_timeout=600.0,
+                http_write_timeout=15.0,
+                http_connect_timeout=5.0,
+            )
+        )
+
+    def _anthropic_request(self, **overrides: object) -> MessagesRequest:
+        defaults: dict[str, object] = {
+            "model": "minimax-m3",
+            "messages": [Message(role="user", content="hi")],
+        }
+        defaults.update(overrides)
+        return MessagesRequest.model_validate(defaults)
+
+    @pytest.mark.asyncio
+    async def test_anthropic_branch_sends_session_header(self):
+        """The mapped session id is forwarded on the wire (not stuck in the JSON body)."""
+        provider = self._make_provider()
+        request = self._anthropic_request(
+            fcc_session_id="sess_abc123",
+            fcc_request_id="req_cafe",
+        )
+
+        fake_request = MagicMock()
+        with (
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "build_request",
+                return_value=fake_request,
+            ) as mock_build,
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "send",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+        ):
+            await provider._send_stream_request(
+                build_anthropic_request_body(request, thinking_enabled=False)
+            )
+
+        headers = mock_build.call_args.kwargs["headers"]
+        assert headers["x-opencode-session"] == "ses_61561039cbe7oQkJXkO3nyfecO"
+        assert headers["x-opencode-client"] == "fcc"
+        assert headers["x-opencode-request"] == "req_cafe"
+        # Anthropic Messages API does not understand an `extra_headers` body field.
+        json_body = mock_build.call_args.kwargs["json"]
+        assert "extra_headers" not in json_body
+
+    @pytest.mark.asyncio
+    async def test_anthropic_branch_empty_session_sentinel_forwarded(self):
+        """When there is no Claude session, the empty-string sentinel is still sent."""
+        provider = self._make_provider()
+        request = self._anthropic_request(fcc_request_id="req_deadbeef")
+
+        fake_request = MagicMock()
+        with (
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "build_request",
+                return_value=fake_request,
+            ) as mock_build,
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "send",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+        ):
+            await provider._send_stream_request(
+                build_anthropic_request_body(request, thinking_enabled=False)
+            )
+
+        headers = mock_build.call_args.kwargs["headers"]
+        assert headers["x-opencode-session"] == ""
+        assert headers["x-opencode-request"] == "req_deadbeef"
+
+    @pytest.mark.asyncio
+    async def test_anthropic_branch_preserves_static_headers(self):
+        """Forwarded extra_headers must not clobber Content-Type / Accept / x-api-key."""
+        provider = self._make_provider()
+        request = self._anthropic_request(fcc_session_id="sess_abc123")
+
+        fake_request = MagicMock()
+        with (
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "build_request",
+                return_value=fake_request,
+            ) as mock_build,
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "send",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+        ):
+            await provider._send_stream_request(
+                build_anthropic_request_body(request, thinking_enabled=False)
+            )
+
+        headers = mock_build.call_args.kwargs["headers"]
+        assert headers["Content-Type"] == "application/json"
+        assert headers["Accept"] == "text/event-stream"
+        assert headers["x-api-key"] == "test-key"
+
+    @pytest.mark.asyncio
+    async def test_anthropic_branch_no_extra_headers_still_sends_request(self):
+        """Backward-compat: a body without extra_headers must still build successfully."""
+        provider = self._make_provider()
+
+        fake_request = MagicMock()
+        with (
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "build_request",
+                return_value=fake_request,
+            ) as mock_build,
+            patch.object(
+                provider._get_anthropic_httpx(),
+                "send",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+        ):
+            await provider._send_stream_request(
+                {"model": "minimax-m3", "messages": []}
+            )
+
+        # No x-opencode-* headers (none were provided), but the static set is intact.
+        headers = mock_build.call_args.kwargs["headers"]
+        assert "x-opencode-session" not in headers
+        assert headers["Content-Type"] == "application/json"
