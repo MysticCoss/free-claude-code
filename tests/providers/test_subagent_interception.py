@@ -3,18 +3,26 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.nim import NimSettings
-from core.anthropic import StreamBlockLedger
-from providers.base import ProviderConfig
-from providers.nvidia_nim import NvidiaNimProvider
-from providers.transports.openai_chat.tool_calls import OpenAIToolCallAssembler
+from free_claude_code.config.nim import NimSettings
+from free_claude_code.config.provider_catalog import NVIDIA_NIM_DEFAULT_BASE
+from free_claude_code.core.anthropic import StreamBlockLedger
+from free_claude_code.providers.base import ProviderConfig
+from free_claude_code.providers.nvidia_nim import NvidiaNimProvider
+from free_claude_code.providers.openai_chat.tool_calls import (
+    OpenAIToolCallAssembler,
+)
+from tests.providers.support import passthrough_rate_limiter
 
 
 @pytest.mark.asyncio
 async def test_task_tool_interception():
     # Setup provider
-    config = ProviderConfig(api_key="test")
-    provider = NvidiaNimProvider(config, nim_settings=NimSettings())
+    config = ProviderConfig(api_key="test", base_url=NVIDIA_NIM_DEFAULT_BASE)
+    provider = NvidiaNimProvider(
+        config,
+        nim_settings=NimSettings(),
+        rate_limiter=passthrough_rate_limiter(),
+    )
 
     # Mock request and stream ledger with real StreamBlockLedger
     request = MagicMock()

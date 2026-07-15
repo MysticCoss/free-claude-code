@@ -1,12 +1,10 @@
 """HTTP helpers for live smoke requests."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import httpx
 
-from core.anthropic.stream_contracts import SSEEvent, parse_sse_lines
+from free_claude_code.core.anthropic.stream_contracts import SSEEvent, parse_sse_lines
 
 from .config import SmokeConfig, auth_headers, redacted
 from .server import RunningServer

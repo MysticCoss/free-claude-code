@@ -2,6 +2,7 @@
 
 import json
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -10,25 +11,27 @@ from urllib.request import Request
 
 import pytest
 
-from config.settings import Settings
+from free_claude_code.config.settings import Settings
 
 
 def _launcher_settings(
     *,
     port: int = 8082,
     token: str = "freecc",
+    open_admin_browser: bool = True,
 ) -> Settings:
     return Settings.model_construct(
         host="0.0.0.0",
         port=port,
         anthropic_auth_token=token,
         model="nvidia_nim/test-model",
+        open_admin_browser=open_admin_browser,
     )
 
 
 def _run_init(tmp_home: Path) -> tuple[str, Path]:
     """Run init() with home directory redirected to tmp_home. Returns (printed output, env_file path)."""
-    from cli.entrypoints import init
+    from free_claude_code.cli.entrypoints import init
 
     env_file = tmp_home / ".fcc" / ".env"
     printed: list[str] = []
@@ -106,7 +109,7 @@ def test_legacy_env_migration_does_not_overwrite_managed_env(
     tmp_path: Path,
 ) -> None:
     """Legacy migration never overwrites an existing ~/.fcc/.env."""
-    from cli.entrypoints import _migrate_legacy_env_if_missing
+    from free_claude_code.cli.entrypoints import _migrate_legacy_env_if_missing
 
     managed_env = tmp_path / ".fcc" / ".env"
     managed_env.parent.mkdir(parents=True)
@@ -124,13 +127,13 @@ def test_legacy_env_migration_does_not_overwrite_managed_env(
 
 def test_env_template_loader_uses_root_template_in_source_checkout() -> None:
     """Source checkout fallback uses the root .env.example as the single source."""
-    from cli.entrypoints import _load_env_template
+    from free_claude_code.config.env_template import load_env_template
 
     template = (Path(__file__).resolve().parents[2] / ".env.example").read_text(
         encoding="utf-8"
     )
 
-    assert _load_env_template() == template
+    assert load_env_template() == template
 
 
 def test_init_creates_parent_directories(tmp_path: Path) -> None:
@@ -172,19 +175,58 @@ def test_cli_scripts_are_registered() -> None:
     )
 
     scripts = pyproject["project"]["scripts"]
-    assert scripts["fcc-server"] == "cli.entrypoints:serve"
-    assert scripts["free-claude-code"] == "cli.entrypoints:serve"
-    assert scripts["fcc-claude"] == "cli.launchers.claude:launch"
-    assert scripts["fcc-codex"] == "cli.launchers.codex:launch"
+    assert scripts["fcc-server"] == "free_claude_code.cli.entrypoints:serve"
+    assert scripts["free-claude-code"] == "free_claude_code.cli.entrypoints:serve"
+    assert scripts["fcc-claude"] == "free_claude_code.cli.launchers.claude:launch"
+    assert scripts["fcc-codex"] == "free_claude_code.cli.launchers.codex:launch"
+    assert scripts["fcc-pi"] == "free_claude_code.cli.launchers.pi:launch"
 
 
-def test_schedule_open_admin_browser_opens_when_health_ready(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("entrypoint_name", ["serve", "init"])
+@pytest.mark.parametrize(
+    "argv",
+    [("--version",), ("--version", "--help"), ("--help", "--version")],
+)
+def test_fcc_owned_entrypoints_report_version_without_side_effects(
+    entrypoint_name: str,
+    argv: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from free_claude_code.cli import entrypoints
+
+    with (
+        patch.object(entrypoints, "package_version", return_value="9.8.7"),
+        patch.object(entrypoints, "_migrate_legacy_env_if_missing") as migrate_legacy,
+        patch.object(entrypoints, "_migrate_config_env_keys") as migrate_keys,
+        patch.object(entrypoints, "get_settings") as get_settings,
+        patch.object(
+            entrypoints, "_run_supervised_server", return_value=False
+        ) as run_server,
+        patch.object(entrypoints, "kill_all_best_effort") as kill_all,
+        patch.object(entrypoints, "config_dir_path") as config_dir,
+        patch.object(entrypoints, "managed_env_path") as managed_env,
+        patch.object(entrypoints, "load_env_template") as load_template,
+    ):
+        getattr(entrypoints, entrypoint_name)(argv)
+
+    assert capsys.readouterr() == ("free-claude-code 9.8.7\n", "")
+    for side_effect in {
+        migrate_legacy,
+        migrate_keys,
+        get_settings,
+        run_server,
+        kill_all,
+        config_dir,
+        managed_env,
+        load_template,
+    }:
+        side_effect.assert_not_called()
+
+
+def test_schedule_open_admin_browser_opens_when_health_ready() -> None:
     """Opening /admin runs after /health preflight succeeds."""
-    monkeypatch.delenv("FCC_OPEN_BROWSER", raising=False)
-    from api.admin_urls import local_admin_url
-    from cli import entrypoints
+    from free_claude_code.cli import entrypoints
+    from free_claude_code.config.server_urls import local_admin_url
 
     settings = _launcher_settings(port=31337)
     opened_urls: list[str] = []
@@ -212,27 +254,41 @@ def test_schedule_open_admin_browser_opens_when_health_ready(
     assert opened_urls == [local_admin_url(settings)]
 
 
-def test_schedule_open_admin_browser_skips_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("FCC_OPEN_BROWSER", "0")
-    from cli import entrypoints
+def test_serve_skips_admin_browser_when_setting_is_disabled() -> None:
+    from free_claude_code.cli import entrypoints
 
-    settings = _launcher_settings()
+    settings = _launcher_settings(open_admin_browser=False)
+    get_settings = MagicMock(return_value=settings)
+    get_settings.cache_clear = MagicMock()
 
-    with patch.object(entrypoints.threading, "Thread") as thread_cls:
-        entrypoints._schedule_open_admin_browser(settings)
+    with (
+        patch.object(entrypoints, "get_settings", get_settings),
+        patch.object(
+            entrypoints, "_run_supervised_server", return_value=False
+        ) as run_server,
+        patch.object(entrypoints, "kill_all_best_effort"),
+    ):
+        entrypoints.serve()
 
-    thread_cls.assert_not_called()
+    run_server.assert_called_once_with(settings, open_admin_browser=False)
 
 
 def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
-    from cli import entrypoints
+    from free_claude_code.cli import entrypoints
 
     settings = _launcher_settings()
     get_settings = MagicMock(side_effect=[settings, settings])
     get_settings.cache_clear = MagicMock()
     servers: list[object] = []
+    restart_callbacks: list[Callable[[], None]] = []
+
+    apps: list[SimpleNamespace] = []
+
+    def build_asgi_app(_settings: Settings, restart_callback: Callable[[], None]):
+        restart_callbacks.append(restart_callback)
+        app = SimpleNamespace(runtime=SimpleNamespace(is_closed=False))
+        apps.append(app)
+        return app
 
     class FakeServer:
         def __init__(self, config):
@@ -242,8 +298,9 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
 
         def run(self):
             if len(servers) == 1:
-                self.config.app.app.state.admin_restart_callback()
+                restart_callbacks[-1]()
                 assert self.should_exit is True
+                self.config.app.runtime.is_closed = True
 
     def fake_config(app, **kwargs):
         return SimpleNamespace(app=app, kwargs=kwargs)
@@ -252,18 +309,63 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
         patch.object(entrypoints, "get_settings", get_settings),
         patch.object(entrypoints.uvicorn, "Config", side_effect=fake_config),
         patch.object(entrypoints.uvicorn, "Server", side_effect=FakeServer),
-        patch.object(entrypoints, "_schedule_open_admin_browser"),
+        patch.object(entrypoints, "build_asgi_app", side_effect=build_asgi_app),
+        patch.object(
+            entrypoints, "_schedule_open_admin_browser"
+        ) as schedule_open_admin,
         patch.object(entrypoints, "kill_all_best_effort") as kill_all,
     ):
         entrypoints.serve()
 
     assert len(servers) == 2
+    schedule_open_admin.assert_called_once_with(settings)
     get_settings.cache_clear.assert_called_once()
     kill_all.assert_called_once()
 
 
+def test_serve_supervisor_refuses_restart_after_incomplete_shutdown() -> None:
+    from free_claude_code.cli import entrypoints
+
+    settings = _launcher_settings()
+    get_settings = MagicMock(return_value=settings)
+    get_settings.cache_clear = MagicMock()
+    servers: list[object] = []
+    restart_callbacks: list[Callable[[], None]] = []
+
+    def build_asgi_app(_settings: Settings, restart_callback: Callable[[], None]):
+        restart_callbacks.append(restart_callback)
+        return SimpleNamespace(runtime=SimpleNamespace(is_closed=False))
+
+    class FakeServer:
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            servers.append(self)
+
+        def run(self):
+            restart_callbacks[-1]()
+            assert self.should_exit is True
+
+    def fake_config(app, **kwargs):
+        return SimpleNamespace(app=app, kwargs=kwargs)
+
+    with (
+        patch.object(entrypoints, "get_settings", get_settings),
+        patch.object(entrypoints.uvicorn, "Config", side_effect=fake_config),
+        patch.object(entrypoints.uvicorn, "Server", side_effect=FakeServer),
+        patch.object(entrypoints, "build_asgi_app", side_effect=build_asgi_app),
+        patch.object(entrypoints, "_schedule_open_admin_browser"),
+        patch.object(entrypoints, "kill_all_best_effort") as kill_all,
+    ):
+        entrypoints.serve()
+
+    assert len(servers) == 1
+    get_settings.cache_clear.assert_not_called()
+    kill_all.assert_called_once()
+
+
 def test_serve_migrates_legacy_env_before_loading_settings(tmp_path: Path) -> None:
-    from cli import entrypoints
+    from free_claude_code.cli import entrypoints
 
     legacy_env = tmp_path / "free-claude-code" / ".env"
     legacy_env.parent.mkdir(parents=True)
@@ -286,8 +388,54 @@ def test_serve_migrates_legacy_env_before_loading_settings(tmp_path: Path) -> No
     get_settings.assert_called_once_with()
 
 
+def test_serve_migrates_hf_token_before_loading_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from free_claude_code.cli import entrypoints
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env").write_text("HF_TOKEN=legacy-hf\n", encoding="utf-8")
+    settings = _launcher_settings()
+    get_settings = MagicMock(return_value=settings)
+    get_settings.cache_clear = MagicMock()
+    monkeypatch.chdir(repo)
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch.object(entrypoints, "get_settings", get_settings),
+        patch.object(entrypoints, "_run_supervised_server", return_value=False),
+        patch.object(entrypoints, "kill_all_best_effort"),
+        patch.object(entrypoints, "explicit_env_file_huggingface_warning"),
+    ):
+        entrypoints.serve()
+
+    assert (repo / ".env").read_text(encoding="utf-8") == (
+        "HUGGINGFACE_API_KEY=legacy-hf\n"
+    )
+    get_settings.assert_called_once_with()
+
+
+def test_config_env_key_migration_warns_for_explicit_env_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from free_claude_code.cli import entrypoints
+
+    explicit = tmp_path / "custom.env"
+    explicit.write_text("HF_TOKEN=legacy-hf\n", encoding="utf-8")
+
+    with patch.dict(entrypoints.os.environ, {"FCC_ENV_FILE": str(explicit)}):
+        migrated = entrypoints._migrate_config_env_keys()
+
+    assert migrated == ()
+    assert "HF_TOKEN" in capsys.readouterr().err
+    assert explicit.read_text(encoding="utf-8") == "HF_TOKEN=legacy-hf\n"
+
+
 def test_serve_handles_keyboard_interrupt_without_traceback() -> None:
-    from cli import entrypoints
+    from free_claude_code.cli import entrypoints
 
     settings = _launcher_settings()
     get_settings = MagicMock(return_value=settings)
@@ -309,16 +457,23 @@ def test_serve_handles_keyboard_interrupt_without_traceback() -> None:
 
 
 def test_claude_child_env_targets_current_proxy_config() -> None:
-    from cli.launchers.claude import build_claude_launcher_env
+    from free_claude_code.cli.claude_env import build_claude_proxy_env
 
-    env = build_claude_launcher_env(
+    env = build_claude_proxy_env(
         proxy_root_url="http://127.0.0.1:9090",
         auth_token=" proxy-token ",
         base_env={
             "PATH": "keep",
+            "ANTHROPIC_API_URL": "https://api.anthropic.com/v1",
             "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
             "ANTHROPIC_AUTH_TOKEN": "old-token",
             "ANTHROPIC_API_KEY": "official-key",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "0",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_AUTOUPDATER": "0",
+            "DISABLE_FEEDBACK_COMMAND": "0",
+            "DISABLE_ERROR_REPORTING": "0",
+            "DISABLE_TELEMETRY": "0",
         },
     )
 
@@ -327,13 +482,19 @@ def test_claude_child_env_targets_current_proxy_config() -> None:
     assert env["ANTHROPIC_AUTH_TOKEN"] == "proxy-token"
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "190000"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["DISABLE_FEEDBACK_COMMAND"] == "1"
+    assert env["DISABLE_ERROR_REPORTING"] == "1"
+    assert env["DISABLE_TELEMETRY"] == "1"
+    assert "ANTHROPIC_API_URL" not in env
     assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
 
 
 def test_claude_child_env_uses_sentinel_for_blank_configured_auth_token() -> None:
-    from cli.launchers.claude import build_claude_launcher_env
+    from free_claude_code.cli.claude_env import build_claude_proxy_env
 
-    env = build_claude_launcher_env(
+    env = build_claude_proxy_env(
         proxy_root_url="http://127.0.0.1:8082",
         auth_token="",
         base_env={
@@ -349,7 +510,7 @@ def test_claude_child_env_uses_sentinel_for_blank_configured_auth_token() -> Non
 def test_launch_claude_passes_args_and_child_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from cli.launchers.claude import launch
+    from free_claude_code.cli.launchers.claude import launch
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "old-token")
@@ -357,12 +518,19 @@ def test_launch_claude_passes_args_and_child_env(
     settings = _launcher_settings(port=9191, token="proxy-token")
 
     with (
-        patch("cli.launchers.claude.get_settings", return_value=settings),
-        patch("cli.launchers.claude.preflight_proxy", return_value=None),
-        patch("cli.launchers.common.shutil.which", return_value="resolved-claude.cmd"),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
-        patch("cli.launchers.common.register_pid") as register_pid,
-        patch("cli.launchers.common.unregister_pid") as unregister_pid,
+        patch(
+            "free_claude_code.cli.launchers.claude.get_settings", return_value=settings
+        ),
+        patch(
+            "free_claude_code.cli.launchers.claude.preflight_proxy", return_value=None
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-claude.cmd",
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid") as register_pid,
+        patch("free_claude_code.cli.launchers.common.unregister_pid") as unregister_pid,
         pytest.raises(SystemExit) as exc_info,
     ):
         process = popen.return_value
@@ -378,6 +546,11 @@ def test_launch_claude_passes_args_and_child_env(
     assert child_env["ANTHROPIC_AUTH_TOKEN"] == "proxy-token"
     assert child_env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
     assert child_env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "190000"
+    assert child_env["DISABLE_AUTOUPDATER"] == "1"
+    assert child_env["DISABLE_FEEDBACK_COMMAND"] == "1"
+    assert child_env["DISABLE_ERROR_REPORTING"] == "1"
+    assert child_env["DISABLE_TELEMETRY"] == "1"
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in child_env
     assert child_env["KEEP_ME"] == "yes"
     register_pid.assert_called_once_with(12345)
     unregister_pid.assert_called_once_with(12345)
@@ -387,11 +560,15 @@ def test_launch_codex_passes_responses_config_and_child_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from cli.launchers.codex import launch
+    from free_claude_code.cli.launchers.codex import launch
 
     monkeypatch.setenv("OPENAI_API_KEY", "official-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("CODEX_HOME", "keep-home")
+    monkeypatch.setenv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
+    monkeypatch.setenv("CODEX_PERMISSION_PROFILE", "danger-full-access")
+    monkeypatch.setenv("CODEX_SHELL", "1")
+    monkeypatch.setenv("CODEX_THREAD_ID", "parent-thread")
     settings = _launcher_settings(port=9191, token="proxy-token")
     catalog_path = tmp_path / "codex-model-catalog.json"
     requests: list[Request] = []
@@ -419,16 +596,24 @@ def test_launch_codex_passes_responses_config_and_child_env(
         )
 
     with (
-        patch("cli.launchers.codex.get_settings", return_value=settings),
-        patch("cli.launchers.codex.preflight_proxy", return_value=None),
-        patch("cli.launchers.common.shutil.which", return_value="resolved-codex.cmd"),
         patch(
-            "cli.launchers.codex.codex_model_catalog_path", return_value=catalog_path
+            "free_claude_code.cli.launchers.codex.get_settings", return_value=settings
         ),
-        patch("cli.launchers.codex.urlopen", side_effect=fake_urlopen),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
-        patch("cli.launchers.common.register_pid") as register_pid,
-        patch("cli.launchers.common.unregister_pid") as unregister_pid,
+        patch(
+            "free_claude_code.cli.launchers.codex.preflight_proxy", return_value=None
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-codex.cmd",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.codex.codex_model_catalog_path",
+            return_value=catalog_path,
+        ),
+        patch("free_claude_code.cli.launchers.codex.urlopen", side_effect=fake_urlopen),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid") as register_pid,
+        patch("free_claude_code.cli.launchers.common.unregister_pid") as unregister_pid,
         pytest.raises(SystemExit) as exc_info,
     ):
         process = popen.return_value
@@ -448,7 +633,8 @@ def test_launch_codex_passes_responses_config_and_child_env(
     request = requests[0]
     assert request.full_url == "http://127.0.0.1:9191/v1/models"
     headers = {key.lower(): value for key, value in request.header_items()}
-    assert headers["x-api-key"] == "proxy-token"
+    assert headers["authorization"] == "Bearer proxy-token"
+    assert "x-api-key" not in headers
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     assert [model["slug"] for model in catalog["models"]] == [
         "nvidia_nim/provider-model"
@@ -456,6 +642,10 @@ def test_launch_codex_passes_responses_config_and_child_env(
     child_env = popen.call_args.kwargs["env"]
     assert child_env["FCC_CODEX_API_KEY"] == "proxy-token"
     assert child_env["CODEX_HOME"] == "keep-home"
+    assert "CODEX_INTERNAL_ORIGINATOR_OVERRIDE" not in child_env
+    assert "CODEX_PERMISSION_PROFILE" not in child_env
+    assert "CODEX_SHELL" not in child_env
+    assert "CODEX_THREAD_ID" not in child_env
     assert "OPENAI_API_KEY" not in child_env
     assert "OPENAI_BASE_URL" not in child_env
     register_pid.assert_called_once_with(12345)
@@ -466,22 +656,31 @@ def test_launch_codex_catalog_failure_warns_and_continues(
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
-    from cli.launchers.codex import launch
+    from free_claude_code.cli.launchers.codex import launch
 
     settings = _launcher_settings(port=9191, token="proxy-token")
 
     with (
-        patch("cli.launchers.codex.get_settings", return_value=settings),
-        patch("cli.launchers.codex.preflight_proxy", return_value=None),
-        patch("cli.launchers.common.shutil.which", return_value="resolved-codex.cmd"),
         patch(
-            "cli.launchers.codex.codex_model_catalog_path",
+            "free_claude_code.cli.launchers.codex.get_settings", return_value=settings
+        ),
+        patch(
+            "free_claude_code.cli.launchers.codex.preflight_proxy", return_value=None
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-codex.cmd",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.codex.codex_model_catalog_path",
             return_value=tmp_path / "codex-model-catalog.json",
         ),
-        patch("cli.launchers.codex.urlopen", side_effect=URLError("boom")),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
-        patch("cli.launchers.common.register_pid"),
-        patch("cli.launchers.common.unregister_pid"),
+        patch(
+            "free_claude_code.cli.launchers.codex.urlopen", side_effect=URLError("boom")
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid"),
+        patch("free_claude_code.cli.launchers.common.unregister_pid"),
         pytest.raises(SystemExit) as exc_info,
     ):
         process = popen.return_value
@@ -497,19 +696,269 @@ def test_launch_codex_catalog_failure_warns_and_continues(
     assert "launching without model picker catalog" in captured.err
 
 
+def test_pi_launcher_builds_scoped_session_command_and_proxy_env(
+    tmp_path: Path,
+) -> None:
+    from free_claude_code.cli.launchers.pi import (
+        build_pi_launcher_command,
+        build_pi_launcher_env,
+    )
+
+    extension = tmp_path / "pi_extension.ts"
+    env = build_pi_launcher_env(
+        proxy_root_url="http://127.0.0.1:9191/",
+        auth_token=" proxy-token ",
+        base_env={
+            "PATH": "keep",
+            "ANTHROPIC_API_KEY": "native-pi-credential",
+            "FCC_PI_API_KEY": "stale-key",
+            "FCC_PI_BASE_URL": "https://stale.invalid",
+        },
+    )
+
+    assert build_pi_launcher_command(
+        binary_path="resolved-pi.cmd",
+        extension_path=extension,
+        argv=["--print", "hello"],
+    ) == [
+        "resolved-pi.cmd",
+        "-e",
+        str(extension),
+        "--models",
+        "free-claude-code/**",
+        "--print",
+        "hello",
+    ]
+    assert env == {
+        "PATH": "keep",
+        "ANTHROPIC_API_KEY": "native-pi-credential",
+        "FCC_PI_BASE_URL": "http://127.0.0.1:9191",
+        "FCC_PI_API_KEY": "proxy-token",
+    }
+
+
+def test_pi_launcher_uses_no_auth_sentinel_for_blank_token() -> None:
+    from free_claude_code.cli.launchers.pi import build_pi_launcher_env
+
+    env = build_pi_launcher_env(
+        proxy_root_url="http://127.0.0.1:8082",
+        auth_token="",
+        base_env={},
+    )
+
+    assert env["FCC_PI_API_KEY"] == "fcc-no-auth"
+
+
+def test_launch_pi_registers_bundled_extension_for_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from free_claude_code.cli.launchers.pi import launch
+
+    monkeypatch.setenv("KEEP_ME", "yes")
+    monkeypatch.setenv("FCC_PI_API_KEY", "stale-key")
+    extension = tmp_path / "pi_extension.ts"
+    extension.write_text("export default () => {};", encoding="utf-8")
+    settings = _launcher_settings(port=9191, token="proxy-token")
+
+    with (
+        patch("free_claude_code.cli.launchers.pi.get_settings", return_value=settings),
+        patch("free_claude_code.cli.launchers.pi.preflight_proxy", return_value=None),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_extension_path",
+            return_value=extension,
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-pi.cmd",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_binary_is_compatible",
+            return_value=True,
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid"),
+        patch("free_claude_code.cli.launchers.common.unregister_pid"),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        process = popen.return_value
+        process.pid = 12345
+        process.wait.return_value = 0
+        launch(["--print", "hello"])
+
+    assert exc_info.value.code == 0
+    assert popen.call_args.args[0] == [
+        "resolved-pi.cmd",
+        "-e",
+        str(extension),
+        "--models",
+        "free-claude-code/**",
+        "--print",
+        "hello",
+    ]
+    child_env = popen.call_args.kwargs["env"]
+    assert child_env["FCC_PI_BASE_URL"] == "http://127.0.0.1:9191"
+    assert child_env["FCC_PI_API_KEY"] == "proxy-token"
+    assert child_env["KEEP_ME"] == "yes"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--help"],
+        ["--version"],
+        ["config", "set", "theme", "dark"],
+        ["install", "npm:example"],
+        ["list"],
+        ["remove", "npm:example"],
+        ["uninstall", "npm:example"],
+        ["update"],
+    ],
+)
+def test_launch_pi_passes_management_commands_through_without_proxy(
+    argv: list[str],
+) -> None:
+    from free_claude_code.cli.launchers.pi import launch
+
+    with (
+        patch("free_claude_code.cli.launchers.pi.get_settings") as get_settings,
+        patch("free_claude_code.cli.launchers.pi.preflight_proxy") as preflight,
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-pi",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_binary_is_compatible",
+            return_value=True,
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid"),
+        patch("free_claude_code.cli.launchers.common.unregister_pid"),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        process = popen.return_value
+        process.pid = 12345
+        process.wait.return_value = 0
+        launch(argv)
+
+    assert exc_info.value.code == 0
+    assert popen.call_args.args[0] == ["resolved-pi", *argv]
+    get_settings.assert_not_called()
+    preflight.assert_not_called()
+
+
+def test_launch_pi_fails_closed_when_bundled_extension_is_missing(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    from free_claude_code.cli.launchers.pi import launch
+
+    settings = _launcher_settings(port=9191)
+    with (
+        patch("free_claude_code.cli.launchers.pi.get_settings", return_value=settings),
+        patch("free_claude_code.cli.launchers.pi.preflight_proxy", return_value=None),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_extension_path",
+            return_value=tmp_path / "missing.ts",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-pi",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_binary_is_compatible",
+            return_value=True,
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        launch([])
+
+    assert exc_info.value.code == 1
+    popen.assert_not_called()
+    assert "bundled Pi extension is missing" in capsys.readouterr().err
+
+
+def test_pi_install_hints_use_official_platform_installers() -> None:
+    from free_claude_code.cli.launchers.pi import pi_install_hint
+
+    assert "https://pi.dev/install.ps1" in pi_install_hint("win32")
+    assert "https://pi.dev/install.sh" in pi_install_hint("darwin")
+
+
+@pytest.mark.parametrize(
+    ("help_output", "return_code", "expected"),
+    [
+        ("--extension <path>\n--models <patterns>\n", 0, True),
+        ("--models <patterns>\n", 0, False),
+        ("--extension <path>\n", 0, False),
+        ("--extension <path>\n--models <patterns>\n", 1, False),
+    ],
+)
+def test_pi_binary_compatibility_requires_both_launcher_capabilities(
+    help_output: str,
+    return_code: int,
+    expected: bool,
+) -> None:
+    from free_claude_code.cli.launchers.pi import pi_binary_is_compatible
+
+    with patch(
+        "free_claude_code.cli.launchers.pi.subprocess.run",
+        return_value=SimpleNamespace(returncode=return_code, stdout=help_output),
+    ):
+        assert pi_binary_is_compatible("resolved-pi") is expected
+
+
+def test_launch_pi_rejects_unrelated_pi_binary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from free_claude_code.cli.launchers.pi import launch
+
+    with (
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="unrelated-pi",
+        ),
+        patch(
+            "free_claude_code.cli.launchers.pi.pi_binary_is_compatible",
+            return_value=False,
+        ),
+        patch("free_claude_code.cli.launchers.pi.get_settings") as get_settings,
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        launch([])
+
+    assert exc_info.value.code == 126
+    get_settings.assert_not_called()
+    popen.assert_not_called()
+    captured = capsys.readouterr()
+    assert "not a compatible Pi Coding Agent" in captured.err
+    assert "https://pi.dev/install." in captured.err
+
+
 def test_launch_claude_keyboard_interrupt_kills_child_tree() -> None:
-    from cli.launchers.claude import launch
+    from free_claude_code.cli.launchers.claude import launch
 
     settings = _launcher_settings(port=9191, token="proxy-token")
 
     with (
-        patch("cli.launchers.claude.get_settings", return_value=settings),
-        patch("cli.launchers.claude.preflight_proxy", return_value=None),
-        patch("cli.launchers.common.shutil.which", return_value="resolved-claude.cmd"),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
-        patch("cli.launchers.common.register_pid"),
-        patch("cli.launchers.common.kill_pid_tree_best_effort") as kill_tree,
-        patch("cli.launchers.common.unregister_pid") as unregister_pid,
+        patch(
+            "free_claude_code.cli.launchers.claude.get_settings", return_value=settings
+        ),
+        patch(
+            "free_claude_code.cli.launchers.claude.preflight_proxy", return_value=None
+        ),
+        patch(
+            "free_claude_code.cli.launchers.common.shutil.which",
+            return_value="resolved-claude.cmd",
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
+        patch("free_claude_code.cli.launchers.common.register_pid"),
+        patch(
+            "free_claude_code.cli.launchers.common.kill_pid_tree_best_effort"
+        ) as kill_tree,
+        patch("free_claude_code.cli.launchers.common.unregister_pid") as unregister_pid,
         pytest.raises(KeyboardInterrupt),
     ):
         process = popen.return_value
@@ -525,14 +974,18 @@ def test_launch_claude_keyboard_interrupt_kills_child_tree() -> None:
 def test_launch_claude_exits_when_command_cannot_be_resolved(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from cli.launchers.claude import launch
+    from free_claude_code.cli.launchers.claude import launch
 
     settings = _launcher_settings()
     with (
-        patch("cli.launchers.claude.get_settings", return_value=settings),
-        patch("cli.launchers.claude.preflight_proxy", return_value=None),
-        patch("cli.launchers.common.shutil.which", return_value=None),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
+        patch(
+            "free_claude_code.cli.launchers.claude.get_settings", return_value=settings
+        ),
+        patch(
+            "free_claude_code.cli.launchers.claude.preflight_proxy", return_value=None
+        ),
+        patch("free_claude_code.cli.launchers.common.shutil.which", return_value=None),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
         pytest.raises(SystemExit) as exc_info,
     ):
         launch([])
@@ -547,15 +1000,18 @@ def test_launch_claude_exits_when_command_cannot_be_resolved(
 def test_launch_claude_unreachable_proxy_exits_with_hint(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from cli.launchers.claude import launch
+    from free_claude_code.cli.launchers.claude import launch
 
     settings = _launcher_settings(port=9393)
     with (
-        patch("cli.launchers.claude.get_settings", return_value=settings),
         patch(
-            "cli.launchers.claude.preflight_proxy", return_value="connection refused"
+            "free_claude_code.cli.launchers.claude.get_settings", return_value=settings
         ),
-        patch("cli.launchers.common.subprocess.Popen") as popen,
+        patch(
+            "free_claude_code.cli.launchers.claude.preflight_proxy",
+            return_value="connection refused",
+        ),
+        patch("free_claude_code.cli.launchers.common.subprocess.Popen") as popen,
         pytest.raises(SystemExit) as exc_info,
     ):
         launch([])

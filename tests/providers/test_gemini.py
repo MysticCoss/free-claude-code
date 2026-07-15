@@ -1,35 +1,21 @@
 """Tests for Google AI Studio Gemini (OpenAI-compatible) provider."""
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from providers.base import ProviderConfig
-from providers.gemini import GEMINI_DEFAULT_BASE, GeminiProvider
-from providers.gemini.request import GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+from free_claude_code.config.provider_catalog import GEMINI_DEFAULT_BASE
+from free_claude_code.providers.base import ProviderConfig
+from free_claude_code.providers.gemini import GeminiProvider
+from free_claude_code.providers.gemini.quirks import (
+    GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+)
+from tests.providers.request_factory import make_messages_request
+from tests.providers.support import passthrough_rate_limiter
 
 
-class MockMessage:
-    def __init__(self, role, content):
-        self.role = role
-        self.content = content
-
-
-class MockRequest:
-    def __init__(self, **kwargs):
-        self.model = "models/gemini-3.1-flash-lite"
-        self.messages = [MockMessage("user", "Hello")]
-        self.max_tokens = 100
-        self.temperature = 0.5
-        self.top_p = 0.9
-        self.system = "System prompt"
-        self.stop_sequences = None
-        self.tools = []
-        self.thinking = MagicMock()
-        self.thinking.enabled = True
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+def make_request(**overrides):
+    return make_messages_request("models/gemini-3.1-flash-lite", **overrides)
 
 
 def _simulate_openai_sdk_wire_json(body: dict) -> dict:
@@ -51,34 +37,19 @@ def gemini_config():
     )
 
 
-@pytest.fixture(autouse=True)
-def mock_rate_limiter():
-    """Mock the global rate limiter to prevent waiting."""
-
-    @asynccontextmanager
-    async def _slot():
-        yield
-
-    with patch("providers.transports.openai_chat.transport.GlobalRateLimiter") as mock:
-        instance = mock.get_scoped_instance.return_value
-
-        async def _passthrough(fn, *args, **kwargs):
-            return await fn(*args, **kwargs)
-
-        instance.execute_with_retry = AsyncMock(side_effect=_passthrough)
-        instance.concurrency_slot.side_effect = _slot
-        yield instance
-
-
 @pytest.fixture
 def gemini_provider(gemini_config):
-    return GeminiProvider(gemini_config)
+    return GeminiProvider(gemini_config, rate_limiter=passthrough_rate_limiter())
 
 
 def test_init(gemini_config):
     """Test provider initialization."""
-    with patch("providers.transports.openai_chat.transport.AsyncOpenAI") as mock_openai:
-        provider = GeminiProvider(gemini_config)
+    with patch(
+        "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
+    ) as mock_openai:
+        provider = GeminiProvider(
+            gemini_config, rate_limiter=passthrough_rate_limiter()
+        )
         assert provider._api_key == "test_gemini_key"
         assert (
             provider._base_url
@@ -95,7 +66,7 @@ def test_default_base_url_constant():
 
 def test_build_request_body_basic(gemini_provider):
     """Basic body conversion attaches Gemini thinking fields when thinking is on."""
-    req = MockRequest()
+    req = make_request()
     body = gemini_provider._build_request_body(req)
 
     assert body["model"] == "models/gemini-3.1-flash-lite"
@@ -115,7 +86,7 @@ def test_build_request_body_basic(gemini_provider):
 
 def test_build_request_body_sdk_wire_json_has_literal_extra_body(gemini_provider):
     """Regression for issue #542: SDK merge must not send top-level google."""
-    req = MockRequest()
+    req = make_request()
 
     body = gemini_provider._build_request_body(req)
     wire_json = _simulate_openai_sdk_wire_json(body)
@@ -140,9 +111,10 @@ def test_build_request_body_global_disable_sets_reasoning_none():
             rate_limit=10,
             rate_window=60,
             enable_thinking=False,
-        )
+        ),
+        rate_limiter=passthrough_rate_limiter(),
     )
-    req = MockRequest()
+    req = make_request()
     body = provider._build_request_body(req)
 
     assert body["reasoning_effort"] == "none"
@@ -151,7 +123,7 @@ def test_build_request_body_global_disable_sets_reasoning_none():
 
 
 def test_build_request_body_preserves_caller_extra_body(gemini_provider):
-    req = MockRequest(extra_body={"metadata": {"user": "u1"}})
+    req = make_request(extra_body={"metadata": {"user": "u1"}})
 
     body = gemini_provider._build_request_body(req)
 
@@ -166,7 +138,7 @@ def test_build_request_body_preserves_caller_extra_body(gemini_provider):
 
 
 def test_build_request_body_merges_caller_nested_google(gemini_provider):
-    req = MockRequest(
+    req = make_request(
         extra_body={
             "metadata": {"user": "u1"},
             "extra_body": {
@@ -196,13 +168,13 @@ def test_build_request_body_merges_caller_nested_google(gemini_provider):
 
 
 def test_build_request_body_preserves_tool_call_extra_content(gemini_provider):
-    req = MockRequest(
+    req = make_request(
         system=None,
         messages=[
-            MockMessage("user", "Find files"),
-            MockMessage(
-                "assistant",
-                [
+            {"role": "user", "content": "Find files"},
+            {
+                "role": "assistant",
+                "content": [
                     {
                         "type": "tool_use",
                         "id": "function-call-1",
@@ -211,19 +183,19 @@ def test_build_request_body_preserves_tool_call_extra_content(gemini_provider):
                         "extra_content": {
                             "google": {"thought_signature": "sig-from-client"}
                         },
-                    }
+                    },
                 ],
-            ),
-            MockMessage(
-                "user",
-                [
+            },
+            {
+                "role": "user",
+                "content": [
                     {
                         "type": "tool_result",
                         "tool_use_id": "function-call-1",
                         "content": "[]",
-                    }
+                    },
                 ],
-            ),
+            },
         ],
     )
 
@@ -239,31 +211,31 @@ def test_build_request_body_uses_cached_tool_call_signature(gemini_provider):
     gemini_provider._record_tool_call_extra_content(
         "function-call-1", {"google": {"thought_signature": "sig-from-cache"}}
     )
-    req = MockRequest(
+    req = make_request(
         system=None,
         messages=[
-            MockMessage("user", "Find files"),
-            MockMessage(
-                "assistant",
-                [
+            {"role": "user", "content": "Find files"},
+            {
+                "role": "assistant",
+                "content": [
                     {
                         "type": "tool_use",
                         "id": "function-call-1",
                         "name": "Glob",
                         "input": {"pattern": "*.py"},
-                    }
+                    },
                 ],
-            ),
-            MockMessage(
-                "user",
-                [
+            },
+            {
+                "role": "user",
+                "content": [
                     {
                         "type": "tool_result",
                         "tool_use_id": "function-call-1",
                         "content": "[]",
-                    }
+                    },
                 ],
-            ),
+            },
         ],
     )
 
@@ -278,13 +250,13 @@ def test_build_request_body_uses_cached_tool_call_signature(gemini_provider):
 def test_build_request_body_adds_gemini3_current_turn_fallback_signature(
     gemini_provider,
 ):
-    req = MockRequest(
+    req = make_request(
         system=None,
         messages=[
-            MockMessage("user", "Find files"),
-            MockMessage(
-                "assistant",
-                [
+            {"role": "user", "content": "Find files"},
+            {
+                "role": "assistant",
+                "content": [
                     {
                         "type": "tool_use",
                         "id": "function-call-1",
@@ -298,10 +270,10 @@ def test_build_request_body_adds_gemini3_current_turn_fallback_signature(
                         "input": {"file_path": "a.py"},
                     },
                 ],
-            ),
-            MockMessage(
-                "user",
-                [
+            },
+            {
+                "role": "user",
+                "content": [
                     {
                         "type": "tool_result",
                         "tool_use_id": "function-call-1",
@@ -313,7 +285,7 @@ def test_build_request_body_adds_gemini3_current_turn_fallback_signature(
                         "content": "contents",
                     },
                 ],
-            ),
+            },
         ],
     )
 
@@ -328,7 +300,7 @@ def test_build_request_body_adds_gemini3_current_turn_fallback_signature(
 
 @pytest.mark.asyncio
 async def test_stream_response_text(gemini_provider):
-    req = MockRequest()
+    req = make_request()
 
     mock_chunk = MagicMock()
     mock_chunk.choices = [
@@ -371,7 +343,7 @@ async def test_stream_response_text(gemini_provider):
 
 @pytest.mark.asyncio
 async def test_stream_response_preserves_tool_call_extra_content(gemini_provider):
-    req = MockRequest()
+    req = make_request()
 
     mock_tc = MagicMock()
     mock_tc.index = 0
@@ -419,7 +391,7 @@ async def test_stream_response_preserves_tool_call_extra_content(gemini_provider
 
 @pytest.mark.asyncio
 async def test_stream_response_reasoning_content(gemini_provider):
-    req = MockRequest()
+    req = make_request()
 
     mock_chunk = MagicMock()
     mock_chunk.choices = [

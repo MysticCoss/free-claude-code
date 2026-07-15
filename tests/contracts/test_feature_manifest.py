@@ -1,26 +1,21 @@
-from __future__ import annotations
-
 import re
 from pathlib import Path
 
-from messaging.platforms.factory import create_messaging_components
-from providers.base import BaseProvider
-from providers.cerebras import CerebrasProvider
-from providers.codestral import CodestralProvider
-from providers.deepseek import DeepSeekProvider
-from providers.fireworks import FireworksProvider
-from providers.gemini import GeminiProvider
-from providers.groq import GroqProvider
-from providers.kimi import KimiProvider
-from providers.llamacpp import LlamaCppProvider
-from providers.lmstudio import LMStudioProvider
-from providers.mistral import MistralProvider
-from providers.nvidia_nim import NvidiaNimProvider
-from providers.ollama import OllamaProvider
-from providers.open_router import OpenRouterProvider
-from providers.opencode import OpenCodeProvider
-from providers.wafer import WaferProvider
-from providers.zai import ZaiProvider
+from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
+from free_claude_code.messaging.platforms.factory import create_messaging_components
+from free_claude_code.providers.base import BaseProvider
+from free_claude_code.providers.cloudflare import CloudflareProvider
+from free_claude_code.providers.deepseek import DeepSeekProvider
+from free_claude_code.providers.gemini import GeminiProvider
+from free_claude_code.providers.github_models import GitHubModelsProvider
+from free_claude_code.providers.lmstudio import LMStudioProvider
+from free_claude_code.providers.mistral import MistralProvider
+from free_claude_code.providers.nvidia_nim import NvidiaNimProvider
+from free_claude_code.providers.open_router import OpenRouterProvider
+from free_claude_code.providers.openai_chat import (
+    OPENAI_CHAT_PROFILES,
+    OpenAIChatProvider,
+)
 from smoke.features import FEATURE_INVENTORY, README_FEATURES, feature_ids
 
 VALID_SOURCE = {"readme", "public_surface"}
@@ -33,6 +28,24 @@ def test_every_readme_feature_has_inventory_entry() -> None:
     assert not extra_readme, (
         f"README inventory entries not in README_FEATURES: {extra_readme}"
     )
+
+
+def test_readme_provider_table_covers_full_catalog() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    provider_section = readme.split("## Choose A Provider", 1)[1].split("\n## ", 1)[0]
+    rows = [line for line in provider_section.splitlines() if line.startswith("| [")]
+
+    prefixes: list[str] = []
+    for row in rows:
+        example_cell = row.split("|")[3]
+        match = re.search(r"`([a-z0-9_]+)/", example_cell)
+        assert match is not None, row
+        prefixes.append(match.group(1))
+
+    assert len(rows) == len(PROVIDER_CATALOG)
+    assert len(prefixes) == len(set(prefixes))
+    assert set(prefixes) == set(PROVIDER_CATALOG)
 
 
 def test_feature_inventory_is_unique_and_decision_complete() -> None:
@@ -76,26 +89,22 @@ def test_product_coverage_is_not_satisfied_by_prereq_probes() -> None:
 
 
 def test_provider_and_platform_registries_include_advertised_builtins() -> None:
-    provider_classes = {
+    specialized_provider_classes = {
         "nvidia_nim": NvidiaNimProvider,
         "open_router": OpenRouterProvider,
         "mistral": MistralProvider,
-        "mistral_codestral": CodestralProvider,
         "deepseek": DeepSeekProvider,
-        "kimi": KimiProvider,
-        "fireworks": FireworksProvider,
+        "cloudflare": CloudflareProvider,
         "lmstudio": LMStudioProvider,
-        "llamacpp": LlamaCppProvider,
-        "ollama": OllamaProvider,
-        "wafer": WaferProvider,
-        "opencode": OpenCodeProvider,
-        "opencode_go": OpenCodeProvider,
-        "zai": ZaiProvider,
+        "github_models": GitHubModelsProvider,
         "gemini": GeminiProvider,
-        "groq": GroqProvider,
-        "cerebras": CerebrasProvider,
     }
-    for provider_class in provider_classes.values():
+    assert set(OPENAI_CHAT_PROFILES).isdisjoint(specialized_provider_classes)
+    assert set(PROVIDER_CATALOG) == (
+        set(OPENAI_CHAT_PROFILES) | set(specialized_provider_classes)
+    )
+    assert issubclass(OpenAIChatProvider, BaseProvider)
+    for provider_class in specialized_provider_classes.values():
         assert issubclass(provider_class, BaseProvider)
 
     assert create_messaging_components("not-a-platform") is None

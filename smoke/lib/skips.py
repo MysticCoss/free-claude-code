@@ -1,11 +1,9 @@
 """Skip helpers for expected live-smoke environment gaps."""
 
-from __future__ import annotations
-
 import httpx
 import pytest
 
-from core.anthropic.stream_contracts import SSEEvent, text_content
+from free_claude_code.core.anthropic.stream_contracts import SSEEvent, text_content
 
 UPSTREAM_UNAVAILABLE_MARKERS = (
     "connection refused",

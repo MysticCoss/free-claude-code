@@ -41,7 +41,7 @@ uv run pytest smoke -n auto --dist=loadgroup -s --tb=short
 ```
 
 Provider product E2E runs once per configured provider, independent of `MODEL`,
-`MODEL_OPUS`, `MODEL_SONNET`, and `MODEL_HAIKU`. Defaults come from the provider
+`MODEL_FABLE`, `MODEL_OPUS`, `MODEL_SONNET`, and `MODEL_HAIKU`. Defaults come from the provider
 catalog/docs and can be overridden with `FCC_SMOKE_MODEL_<PROVIDER>`, for example
 `FCC_SMOKE_MODEL_DEEPSEEK=deepseek-v4-pro` (or `deepseek-v4-flash`). If no provider smoke model is
 configured, live product smoke fails as `missing_env` unless you explicitly set
@@ -54,18 +54,18 @@ Default targets do not send real bot messages or load voice backends:
 | Target | Product scenarios | Required environment |
 | --- | --- | --- |
 | `api` | messages, count_tokens full payload, errors, `/stop`, optimizations | configured provider only for streaming messages |
-| `auth` | x-api-key, bearer, anthropic-auth-token, invalid/missing auth | none; test sets an isolated token |
+| `auth` | canonical bearer auth, conflicting legacy headers, invalid/missing auth | none; test sets an isolated token |
 | `cli` | `fcc-init`, server entrypoint, Claude CLI adaptive thinking, session cleanup | Claude CLI binary and provider only for real CLI |
 | `clients` | VS Code and JetBrains protocol payloads | configured provider |
 | `config` | env precedence, removed-env migration, proxy/timeouts | none |
-| `extensibility` | provider registry and platform factory construction | none |
-| `messaging` | fake Discord/Telegram full flow, commands, trees, persistence, voice cancel | none |
+| `extensibility` | provider runtime and platform factory construction | none |
+| `messaging` | fake Discord/Telegram full flow, literal clear scopes, trees, persistence, voice cancel | none |
 | `providers` | multi-turn text, adaptive thinking history, tools, disconnect, errors | configured providers, optional `FCC_SMOKE_MODEL_*` |
 | `tools` | forced tool_use and tool_result continuation | tool-capable configured provider |
 | `rate_limit` | disconnect cleanup and follow-up request | configured provider |
-| `lmstudio` | local `/models` plus native `/messages` through proxy | running LM Studio server |
-| `llamacpp` | local `/models` plus native `/messages` through proxy | running llama-server |
-| `ollama` | local `/api/tags` plus native Anthropic messages through proxy | running Ollama server |
+| `lmstudio` | local `/models` plus OpenAI-chat-backed Messages through proxy | running LM Studio server |
+| `llamacpp` | local `/models` plus OpenAI-chat-backed Messages through proxy | running llama-server |
+| `ollama` | local `/v1/models` plus OpenAI-chat-backed Messages through proxy | running Ollama server |
 
 Heavy/side-effectful targets are opt-in:
 
@@ -102,7 +102,7 @@ uv run pytest smoke/product -n 0 -s --tb=short
 ```powershell
 $env:FCC_LIVE_SMOKE = "1"
 $env:FCC_SMOKE_TARGETS = "nvidia_nim_cli"
-$env:FCC_SMOKE_NIM_MODELS = "z-ai/glm-5.1,moonshotai/kimi-k2.6,minimaxai/minimax-m2.7,nvidia/nemotron-3-super-120b-a12b,deepseek-ai/deepseek-v4-pro,deepseek-ai/deepseek-v4-flash"
+$env:FCC_SMOKE_NIM_MODELS = "z-ai/glm-5.2,moonshotai/kimi-k2.6,minimaxai/minimax-m2.7,nvidia/nemotron-3-super-120b-a12b,deepseek-ai/deepseek-v4-pro,deepseek-ai/deepseek-v4-flash"
 uv run pytest smoke/product -n 0 -s --tb=short
 ```
 
@@ -127,15 +127,19 @@ uv run pytest smoke/product -n 0 -s --tb=short
 - `FCC_SMOKE_TARGETS`: comma-separated targets, or `all`.
 - `FCC_SMOKE_PROVIDER_MATRIX`: comma-separated provider prefixes to require.
 - `FCC_SMOKE_MODEL_NVIDIA_NIM`, `FCC_SMOKE_MODEL_OPEN_ROUTER`,
-  `FCC_SMOKE_MODEL_MISTRAL`, `FCC_SMOKE_MODEL_MISTRAL_CODESTRAL`,
+  `FCC_SMOKE_MODEL_MISTRAL`, `FCC_SMOKE_MODEL_MISTRAL_REASONING`,
+  `FCC_SMOKE_MODEL_MISTRAL_CODESTRAL`,
   `FCC_SMOKE_MODEL_DEEPSEEK`, `FCC_SMOKE_MODEL_KIMI`,
-  `FCC_SMOKE_MODEL_WAFER`, `FCC_SMOKE_MODEL_OPENCODE`, `FCC_SMOKE_MODEL_OPENCODE_GO`,
-  `FCC_SMOKE_MODEL_ZAI`, `FCC_SMOKE_MODEL_FIREWORKS`,   `FCC_SMOKE_MODEL_GEMINI`,
-  `FCC_SMOKE_MODEL_GROQ`, `FCC_SMOKE_MODEL_CEREBRAS`,
-  `FCC_SMOKE_MODEL_LMSTUDIO`,
+  `FCC_SMOKE_MODEL_WAFER`, `FCC_SMOKE_MODEL_MINIMAX`,
+  `FCC_SMOKE_MODEL_OPENCODE`, `FCC_SMOKE_MODEL_OPENCODE_GO`,
+  `FCC_SMOKE_MODEL_ZAI`, `FCC_SMOKE_MODEL_FIREWORKS`, `FCC_SMOKE_MODEL_CLOUDFLARE`,
+  `FCC_SMOKE_MODEL_GEMINI`, `FCC_SMOKE_MODEL_GROQ`, `FCC_SMOKE_MODEL_CEREBRAS`,
+  `FCC_SMOKE_MODEL_OLLAMA_CLOUD`, `FCC_SMOKE_MODEL_LMSTUDIO`,
   `FCC_SMOKE_MODEL_LLAMACPP`, `FCC_SMOKE_MODEL_OLLAMA`: optional per-provider
   smoke model overrides. Values may include the provider prefix or just the model
   name for that provider.
+- `FCC_SMOKE_MODEL_MISTRAL_REASONING`: optional override for the dedicated
+  Mistral native reasoning smoke, default `mistral/mistral-medium-3-5`.
 - `FCC_SMOKE_NIM_MODELS`: optional comma-separated NVIDIA NIM CLI matrix models
   that replace the default characterization set.
 - `FCC_SMOKE_NIM_EXTRA_MODELS`: optional comma-separated NVIDIA NIM CLI matrix
