@@ -14,6 +14,7 @@ import free_claude_code.cli.managed as cli_managed
 import free_claude_code.messaging.session as messaging_session
 import free_claude_code.messaging.workflow as messaging_workflow_module
 from free_claude_code.application.errors import ApplicationUnavailableError
+from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.ports import StopResult
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
@@ -244,14 +245,8 @@ class ApplicationRuntime:
             "models": sorted(info.model_id for info in infos),
         }
 
-    async def refresh_models(self) -> dict[str, Any]:
-        await self.provider_manager.refresh_model_list_cache()
-        return {
-            "cached_models": {
-                provider_id: sorted(model_ids)
-                for provider_id, model_ids in self.provider_manager.cached_model_ids().items()
-            }
-        }
+    async def refresh_models(self) -> ProviderModelRefreshResult:
+        return await self.provider_manager.refresh_model_list_cache()
 
     async def request_restart(self) -> None:
         callback = self._restart_callback
