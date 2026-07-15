@@ -130,6 +130,7 @@ class TestTitleGenerationRequest:
         req = MagicMock(spec=MessagesRequest)
         req.system = self._title_gen_system()
         req.tools = None
+        req.messages = []
 
         assert is_title_generation_request(req) is True
 
@@ -138,6 +139,7 @@ class TestTitleGenerationRequest:
         req = MagicMock(spec=MessagesRequest)
         req.system = self._title_gen_system()
         req.tools = [MagicMock()]
+        req.messages = []
 
         assert is_title_generation_request(req) is False
 
@@ -146,6 +148,7 @@ class TestTitleGenerationRequest:
         req = MagicMock(spec=MessagesRequest)
         req.system = None
         req.tools = None
+        req.messages = []
 
         assert is_title_generation_request(req) is False
 
@@ -156,6 +159,7 @@ class TestTitleGenerationRequest:
         req = MagicMock(spec=MessagesRequest)
         req.system = [block]
         req.tools = None
+        req.messages = []
 
         assert is_title_generation_request(req) is False
 
@@ -166,6 +170,7 @@ class TestTitleGenerationRequest:
         req = MagicMock(spec=MessagesRequest)
         req.system = [block]
         req.tools = None
+        req.messages = []
 
         assert is_title_generation_request(req) is True
 
@@ -453,6 +458,16 @@ class TestGetTokenCount:
 
         # Double message should have more tokens (including overhead)
         assert count_double > count_single
+
+    def test_inline_system_message_contributes_to_token_count(self):
+        """Mid-conversation system content remains part of the counted transcript."""
+        user_message = Message(role="user", content="Hello")
+        inline_system = Message(role="system", content="New instructions")
+
+        without_inline_system = get_token_count([user_message])
+        with_inline_system = get_token_count([user_message, inline_system])
+
+        assert with_inline_system > without_inline_system
 
     def test_per_message_overhead_four_tokens(self):
         """Per-message overhead is 4 tokens (was 3)."""
