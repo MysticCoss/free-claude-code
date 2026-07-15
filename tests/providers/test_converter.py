@@ -1384,7 +1384,7 @@ def test_demoted_system_with_list_content_collapses_to_wrapped_string():
     the demotion loop — this is pre-existing behavior, so we just
     exercise the wrapper helper directly to confirm the XML markup is
     correct for the list-of-blocks case."""
-    from core.anthropic.conversion import _wrap_as_user_system
+    from free_claude_code.core.anthropic.conversion import _wrap_as_user_system
 
     blocks = [
         {"type": "text", "text": "First block."},

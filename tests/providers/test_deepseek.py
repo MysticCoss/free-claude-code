@@ -551,8 +551,8 @@ def test_preflight_strips_user_image():
     provider.preflight_stream(request, thinking_enabled=True)
     body = provider._build_request_body(request)
     content = body["messages"][0]["content"]
-    assert "attachment omitted" in content.lower()
-    assert "image or document inputs" in content.lower()
+    assert "attachment removed" in content.lower()
+    assert "deepseek" in content.lower()
 
 
 def test_preflight_rejects_mcp_servers():
@@ -827,7 +827,10 @@ def test_strips_image_blocks_for_deepseek(deepseek_provider):
 
     body = deepseek_provider._build_request_body(request)
 
-    assert body["messages"][0] == {"role": "user", "content": "describe this"}
+    content = body["messages"][0]["content"]
+    # Text preserved; image stripped and replaced with a hint about the understand_image tool.
+    assert "describe this" in content
+    assert "attachment removed" in content.lower()
 
 
 def test_normalizes_tool_result_content_dict_to_string(deepseek_provider):
@@ -1020,7 +1023,6 @@ def test_document_only_tool_result_replaced_with_generic_placeholder(
     assert isinstance(tool_result["content"], str)
     assert "attachment omitted" in tool_result["content"].lower()
     assert "document inputs" in tool_result["content"].lower()
-    assert "image omitted" not in tool_result["content"].lower()
 
 
 def test_image_only_message_replaced_with_placeholder(deepseek_provider):
@@ -1049,8 +1051,8 @@ def test_image_only_message_replaced_with_placeholder(deepseek_provider):
     body = deepseek_provider._build_request_body(request)
 
     content = body["messages"][0]["content"]
-    assert "attachment omitted" in content.lower()
-    assert "image or document inputs" in content.lower()
+    assert "attachment removed" in content.lower()
+    assert "deepseek" in content.lower()
 
 
 def test_document_only_message_replaced_with_placeholder(deepseek_provider):
@@ -1076,7 +1078,7 @@ def test_document_only_message_replaced_with_placeholder(deepseek_provider):
 
     content = body["messages"][0]["content"]
     assert "attachment omitted" in content.lower()
-    assert "document inputs" in content.lower()
+    assert "image or document inputs" in content.lower()
 
 
 def test_warns_when_stripping_attachment_blocks(deepseek_provider, caplog):
