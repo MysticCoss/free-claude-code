@@ -1,15 +1,22 @@
-from __future__ import annotations
+from typing import Any
 
 import pytest
 
-from core.openai_responses import OpenAIResponsesAdapter
+from free_claude_code.core.openai_responses import (
+    OpenAIResponsesAdapter,
+    OpenAIResponsesRequest,
+)
 
 _ADAPTER = OpenAIResponsesAdapter()
 _CONVERSION_ERROR = OpenAIResponsesAdapter.ConversionError
 
 
+def _to_anthropic_payload(request: dict[str, Any]) -> dict[str, Any]:
+    return _ADAPTER.to_anthropic_payload(OpenAIResponsesRequest.model_validate(request))
+
+
 def test_responses_string_input_converts_to_anthropic_message() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "instructions": "System instructions",
@@ -31,7 +38,7 @@ def test_responses_string_input_converts_to_anthropic_message() -> None:
 
 
 def test_responses_messages_tools_and_tool_results_convert() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "deepseek/deepseek-chat",
             "input": [
@@ -111,7 +118,7 @@ def test_responses_messages_tools_and_tool_results_convert() -> None:
 
 
 def test_responses_tool_choice_none_disables_forwarded_tools() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "deepseek/deepseek-chat",
             "input": "Reply without tools",
@@ -134,7 +141,7 @@ def test_responses_tool_choice_none_disables_forwarded_tools() -> None:
 
 
 def test_responses_namespace_tools_flatten_for_anthropic() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": "Use JS",
@@ -180,7 +187,7 @@ def test_responses_namespace_tools_flatten_for_anthropic() -> None:
 
 
 def test_responses_namespaced_tool_choice_type_tool_flattens_for_anthropic() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": "Use JS",
@@ -209,7 +216,7 @@ def test_responses_namespaced_tool_choice_type_tool_flattens_for_anthropic() -> 
 
 
 def test_responses_custom_tool_converts_to_anthropic_string_tool() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": "Use apply_patch",
@@ -252,7 +259,7 @@ def test_responses_custom_tool_converts_to_anthropic_string_tool() -> None:
 
 
 def test_responses_namespaced_custom_tool_flattens_for_anthropic() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": "Use shell",
@@ -286,7 +293,7 @@ def test_responses_namespaced_custom_tool_flattens_for_anthropic() -> None:
 
 
 def test_responses_passive_codex_built_in_tools_are_ignored() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": "Hello",
@@ -309,7 +316,7 @@ def test_responses_passive_codex_built_in_tools_are_ignored() -> None:
 
 
 def test_responses_namespaced_prior_function_call_flattens_tool_use_name() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": [
@@ -333,7 +340,7 @@ def test_responses_namespaced_prior_function_call_flattens_tool_use_name() -> No
 
 
 def test_responses_prior_custom_tool_call_flattens_tool_use_name() -> None:
-    payload = _ADAPTER.to_anthropic_payload(
+    payload = _to_anthropic_payload(
         {
             "model": "nvidia_nim/test-model",
             "input": [
@@ -378,9 +385,160 @@ def test_responses_prior_custom_tool_call_flattens_tool_use_name() -> None:
     ]
 
 
+def test_responses_groups_consecutive_prior_tool_calls() -> None:
+    payload = _to_anthropic_payload(
+        {
+            "model": "nvidia_nim/test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "echo",
+                    "arguments": '{"value":"FCC"}',
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch",
+                },
+            ],
+        }
+    )
+
+    assert payload["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "echo",
+                    "input": {"value": "FCC"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_2",
+                    "name": "apply_patch",
+                    "input": {"input": "*** Begin Patch"},
+                },
+            ],
+        }
+    ]
+
+
+def test_responses_groups_consecutive_prior_tool_outputs() -> None:
+    payload = _to_anthropic_payload(
+        {
+            "model": "nvidia_nim/test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "echo",
+                    "arguments": '{"value":"FCC"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_2",
+                    "name": "echo",
+                    "arguments": '{"value":"Codex"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "FCC",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_2",
+                    "output": "Codex",
+                },
+            ],
+        }
+    )
+
+    assert len(payload["messages"]) == 2
+    assert payload["messages"][0]["role"] == "assistant"
+    assert len(payload["messages"][0]["content"]) == 2
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_1",
+                "content": "FCC",
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_2",
+                "content": "Codex",
+            },
+        ],
+    }
+
+
+def test_responses_reasoning_between_tool_call_and_output_attaches_to_tool_message() -> (
+    None
+):
+    payload = _to_anthropic_payload(
+        {
+            "model": "nvidia_nim/test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "echo",
+                    "arguments": '{"value":"FCC"}',
+                },
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "Need the result."}],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "FCC",
+                },
+            ],
+        }
+    )
+
+    assert payload["messages"][0]["reasoning_content"] == "Need the result."
+    assert payload["messages"][0]["content"][0]["id"] == "call_1"
+    assert payload["messages"][1]["content"][0]["tool_use_id"] == "call_1"
+
+
+def test_responses_empty_reasoning_attaches_to_prior_tool_call() -> None:
+    payload = _to_anthropic_payload(
+        {
+            "model": "nvidia_nim/test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "echo",
+                    "arguments": '{"value":"FCC"}',
+                },
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": ""}],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "FCC",
+                },
+            ],
+        }
+    )
+
+    assert payload["messages"][0]["reasoning_content"] == ""
+
+
 def test_responses_unsupported_tool_type_is_clear() -> None:
     with pytest.raises(_CONVERSION_ERROR, match="Unsupported Responses tool type"):
-        _ADAPTER.to_anthropic_payload(
+        _to_anthropic_payload(
             {
                 "model": "nvidia_nim/test-model",
                 "input": "Hello",
@@ -389,18 +547,83 @@ def test_responses_unsupported_tool_type_is_clear() -> None:
         )
 
 
-def test_responses_invalid_function_arguments_are_rejected() -> None:
-    with pytest.raises(_CONVERSION_ERROR, match="invalid JSON"):
-        _ADAPTER.to_anthropic_payload(
+def test_responses_malformed_prior_function_call_is_quarantined() -> None:
+    payload = _to_anthropic_payload(
+        {
+            "model": "nvidia_nim/test-model",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_bad",
+                    "name": "echo",
+                    "arguments": "{",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_bad",
+                    "output": "stale output",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_good",
+                    "name": "echo",
+                    "arguments": '{"value":"ok"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_good",
+                    "output": "ok",
+                },
+                {"role": "user", "content": "continue"},
+            ],
+        }
+    )
+
+    assert payload["messages"] == [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_good",
+                    "name": "echo",
+                    "input": {"value": "ok"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_good",
+                    "content": "ok",
+                }
+            ],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_responses_malformed_only_function_call_still_has_no_routable_message() -> None:
+    with pytest.raises(_CONVERSION_ERROR, match="must contain a message"):
+        _to_anthropic_payload(
             {
                 "model": "nvidia_nim/test-model",
                 "input": [
                     {
                         "type": "function_call",
-                        "call_id": "call_1",
+                        "call_id": "call_bad",
                         "name": "echo",
                         "arguments": "{",
-                    }
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_bad",
+                        "output": "stale output",
+                    },
                 ],
             }
         )

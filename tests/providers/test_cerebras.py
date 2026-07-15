@@ -1,34 +1,17 @@
 """Tests for Cerebras Inference (OpenAI-compatible) provider."""
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from providers.base import ProviderConfig
-from providers.cerebras import CEREBRAS_DEFAULT_BASE, CerebrasProvider
+from free_claude_code.config.provider_catalog import CEREBRAS_DEFAULT_BASE
+from free_claude_code.providers.base import ProviderConfig
+from tests.providers.request_factory import make_messages_request
+from tests.providers.support import passthrough_rate_limiter, profiled_provider
 
 
-class MockMessage:
-    def __init__(self, role, content):
-        self.role = role
-        self.content = content
-
-
-class MockRequest:
-    def __init__(self, **kwargs):
-        self.model = "llama3.1-8b"
-        self.messages = [MockMessage("user", "Hello")]
-        self.max_tokens = 100
-        self.temperature = 0.5
-        self.top_p = 0.9
-        self.system = "System prompt"
-        self.stop_sequences = None
-        self.tools = []
-        self.thinking = MagicMock()
-        self.thinking.enabled = True
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+def make_request(**overrides):
+    return make_messages_request("llama3.1-8b", **overrides)
 
 
 @pytest.fixture
@@ -42,34 +25,21 @@ def cerebras_config():
     )
 
 
-@pytest.fixture(autouse=True)
-def mock_rate_limiter():
-    """Mock the global rate limiter to prevent waiting."""
-
-    @asynccontextmanager
-    async def _slot():
-        yield
-
-    with patch("providers.transports.openai_chat.transport.GlobalRateLimiter") as mock:
-        instance = mock.get_scoped_instance.return_value
-
-        async def _passthrough(fn, *args, **kwargs):
-            return await fn(*args, **kwargs)
-
-        instance.execute_with_retry = AsyncMock(side_effect=_passthrough)
-        instance.concurrency_slot.side_effect = _slot
-        yield instance
-
-
 @pytest.fixture
 def cerebras_provider(cerebras_config):
-    return CerebrasProvider(cerebras_config)
+    return profiled_provider(
+        "cerebras", cerebras_config, rate_limiter=passthrough_rate_limiter()
+    )
 
 
 def test_init(cerebras_config):
     """Test provider initialization."""
-    with patch("providers.transports.openai_chat.transport.AsyncOpenAI") as mock_openai:
-        provider = CerebrasProvider(cerebras_config)
+    with patch(
+        "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
+    ) as mock_openai:
+        provider = profiled_provider(
+            "cerebras", cerebras_config, rate_limiter=passthrough_rate_limiter()
+        )
         assert provider._api_key == "test_cerebras_key"
         assert provider._base_url == CEREBRAS_DEFAULT_BASE
         mock_openai.assert_called_once()
@@ -81,7 +51,7 @@ def test_default_base_url_constant():
 
 def test_build_request_body_basic(cerebras_provider):
     """Basic request body conversion attaches system message from Claude request."""
-    req = MockRequest()
+    req = make_request()
     body = cerebras_provider._build_request_body(req)
 
     assert body["model"] == "llama3.1-8b"
@@ -90,16 +60,18 @@ def test_build_request_body_basic(cerebras_provider):
 
 
 def test_build_request_body_global_disable_blocks_reasoning_mapping():
-    provider = CerebrasProvider(
+    provider = profiled_provider(
+        "cerebras",
         ProviderConfig(
             api_key="test_cerebras_key",
             base_url=CEREBRAS_DEFAULT_BASE,
             rate_limit=10,
             rate_window=60,
             enable_thinking=False,
-        )
+        ),
+        rate_limiter=passthrough_rate_limiter(),
     )
-    req = MockRequest()
+    req = make_request()
     body = provider._build_request_body(req)
 
     roles = [m.get("role") for m in body.get("messages", [])]
@@ -108,13 +80,15 @@ def test_build_request_body_global_disable_blocks_reasoning_mapping():
 
 def test_build_request_body_remaps_max_tokens_preserves_message_name(cerebras_provider):
     """Cerebras does not strip message ``name``; ``max_tokens`` maps to completion field."""
-    with patch("providers.cerebras.request.build_base_request_body") as mock_convert:
+    with patch(
+        "free_claude_code.providers.openai_chat.request_policy.build_base_request_body"
+    ) as mock_convert:
         mock_convert.return_value = {
             "model": "llama3.1-8b",
             "messages": [{"role": "user", "name": "alice", "content": "hi"}],
             "max_tokens": 42,
         }
-        req = MockRequest()
+        req = make_request()
         body = cerebras_provider._build_request_body(req)
 
     assert body["messages"][0].get("name") == "alice"
@@ -123,21 +97,23 @@ def test_build_request_body_remaps_max_tokens_preserves_message_name(cerebras_pr
 
 
 def test_build_request_body_prefers_existing_max_completion_tokens(cerebras_provider):
-    with patch("providers.cerebras.request.build_base_request_body") as mock_convert:
+    with patch(
+        "free_claude_code.providers.openai_chat.request_policy.build_base_request_body"
+    ) as mock_convert:
         mock_convert.return_value = {
             "model": "llama3.1-8b",
             "messages": [{"role": "user", "content": "x"}],
             "max_completion_tokens": 77,
             "max_tokens": 999,
         }
-        body = cerebras_provider._build_request_body(MockRequest())
+        body = cerebras_provider._build_request_body(make_request())
 
     assert body["max_completion_tokens"] == 77
     assert "max_tokens" not in body
 
 
 def test_build_request_body_preserves_caller_extra_body(cerebras_provider):
-    req = MockRequest(extra_body={"clear_thinking": False})
+    req = make_request(extra_body={"clear_thinking": False})
 
     body = cerebras_provider._build_request_body(req)
 
@@ -149,7 +125,7 @@ def test_build_request_body_preserves_caller_extra_body(cerebras_provider):
 @pytest.mark.asyncio
 async def test_stream_response_text(cerebras_provider):
     """Text content deltas are emitted as text blocks."""
-    req = MockRequest()
+    req = make_request()
 
     mock_chunk = MagicMock()
     mock_chunk.choices = [
@@ -182,7 +158,7 @@ async def test_stream_response_text(cerebras_provider):
 @pytest.mark.asyncio
 async def test_stream_response_reasoning_content(cerebras_provider):
     """reasoning_content deltas are emitted as thinking blocks."""
-    req = MockRequest()
+    req = make_request()
 
     mock_chunk = MagicMock()
     mock_chunk.choices = [

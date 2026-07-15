@@ -1,14 +1,16 @@
 """Smoke-suite configuration loaded from the real developer environment."""
 
-from __future__ import annotations
-
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from config.provider_catalog import PROVIDER_CATALOG, SUPPORTED_PROVIDER_IDS
-from config.settings import Settings, get_settings
+from free_claude_code.config.model_refs import parse_model_name, parse_provider_type
+from free_claude_code.config.provider_catalog import (
+    PROVIDER_CATALOG,
+    SUPPORTED_PROVIDER_IDS,
+)
+from free_claude_code.config.settings import Settings, get_settings
 
 DEFAULT_TARGETS = frozenset(
     {
@@ -47,20 +49,29 @@ PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
     "mistral": "mistral/devstral-small-latest",
     "mistral_codestral": "mistral_codestral/codestral-latest",
     "deepseek": "deepseek/deepseek-v4-pro",
+    "ollama_cloud": "ollama_cloud/qwen3-coder:480b",
     "lmstudio": "lmstudio/local-model",
     "llamacpp": "llamacpp/local-model",
     "ollama": "ollama/llama3.1",
     "wafer": "wafer/DeepSeek-V4-Pro",
+    "minimax": "minimax/MiniMax-M3",
     "opencode": "opencode/gpt-5.3-codex",
     "opencode_go": "opencode_go/minimax-m2.7",
-    "zai": "zai/glm-5.1",
+    "vercel": "vercel/openai/gpt-5.5",
+    "huggingface": "huggingface/openai/gpt-oss-120b:fastest",
+    "cohere": "cohere/command-a-plus-05-2026",
+    "github_models": "github_models/openai/gpt-4.1",
+    "zai": "zai/glm-5.2",
     "gemini": "gemini/models/gemini-3.1-flash-lite",
     "groq": "groq/llama-3.3-70b-versatile",
+    "sambanova": "sambanova/Meta-Llama-3.3-70B-Instruct",
     "cerebras": "cerebras/llama3.1-8b",
+    "cloudflare": "cloudflare/@cf/moonshotai/kimi-k2.6",
 }
+MISTRAL_REASONING_SMOKE_DEFAULT_MODEL = "mistral/mistral-medium-3-5"
 
 NVIDIA_NIM_CLI_DEFAULT_MODELS: tuple[str, ...] = (
-    "z-ai/glm-5.1",
+    "z-ai/glm-5.2",
     "moonshotai/kimi-k2.6",
     "minimaxai/minimax-m2.7",
     "nvidia/nemotron-3-super-120b-a12b",
@@ -117,7 +128,7 @@ class ProviderModel:
 
     @property
     def model_name(self) -> str:
-        return Settings.parse_model_name(self.full_model)
+        return parse_model_name(self.full_model)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +170,7 @@ class SmokeConfig:
     def provider_models(self) -> list[ProviderModel]:
         candidates = (
             ("MODEL", self.settings.model),
+            ("MODEL_FABLE", self.settings.model_fable),
             ("MODEL_OPUS", self.settings.model_opus),
             ("MODEL_SONNET", self.settings.model_sonnet),
             ("MODEL_HAIKU", self.settings.model_haiku),
@@ -168,7 +180,7 @@ class SmokeConfig:
         for source, model in candidates:
             if not model or model in seen:
                 continue
-            provider = Settings.parse_provider_type(model)
+            provider = parse_provider_type(model)
             if self.provider_matrix and provider not in self.provider_matrix:
                 continue
             if not self.has_provider_configuration(provider):
@@ -210,11 +222,26 @@ class SmokeConfig:
             for full_model, source in openrouter_free_cli_model_refs().items()
         ]
 
+    def mistral_reasoning_smoke_model(self) -> ProviderModel | None:
+        """Return a Mistral model expected to accept native reasoning input."""
+        if self.provider_matrix and "mistral" not in self.provider_matrix:
+            return None
+        if not self.has_provider_configuration("mistral"):
+            return None
+        override_env = "FCC_SMOKE_MODEL_MISTRAL_REASONING"
+        if override := os.getenv(override_env):
+            full_model = _normalize_provider_model("mistral", override)
+            source = override_env
+        else:
+            full_model = MISTRAL_REASONING_SMOKE_DEFAULT_MODEL
+            source = "mistral_reasoning_default"
+        return ProviderModel(provider="mistral", full_model=full_model, source=source)
+
     def _include_provider_in_smoke(
         self, provider: str, mapped_providers: set[str]
     ) -> bool:
         descriptor = PROVIDER_CATALOG[provider]
-        if "local" not in descriptor.capabilities:
+        if not descriptor.local:
             return True
         if provider in mapped_providers:
             return True
@@ -233,6 +260,8 @@ class SmokeConfig:
             return bool(self.settings.codestral_api_key.strip())
         if provider == "deepseek":
             return bool(self.settings.deepseek_api_key.strip())
+        if provider == "ollama_cloud":
+            return bool(self.settings.ollama_api_key.strip())
         if provider == "kimi":
             return bool(self.settings.kimi_api_key.strip())
         if provider == "lmstudio":
@@ -243,20 +272,37 @@ class SmokeConfig:
             return bool(self.settings.ollama_base_url.strip())
         if provider == "wafer":
             return bool(self.settings.wafer_api_key.strip())
+        if provider == "minimax":
+            return bool(self.settings.minimax_api_key.strip())
         if provider == "fireworks":
             return bool(self.settings.fireworks_api_key.strip())
         if provider == "opencode":
             return bool(self.settings.opencode_api_key.strip())
         if provider == "opencode_go":
             return bool(self.settings.opencode_api_key.strip())
+        if provider == "vercel":
+            return bool(self.settings.vercel_ai_gateway_api_key.strip())
+        if provider == "huggingface":
+            return bool(self.settings.huggingface_api_key.strip())
+        if provider == "cohere":
+            return bool(self.settings.cohere_api_key.strip())
+        if provider == "github_models":
+            return bool(self.settings.github_models_token.strip())
         if provider == "zai":
             return bool(self.settings.zai_api_key.strip())
         if provider == "gemini":
             return bool(self.settings.gemini_api_key.strip())
         if provider == "groq":
             return bool(self.settings.groq_api_key.strip())
+        if provider == "sambanova":
+            return bool(self.settings.sambanova_api_key.strip())
         if provider == "cerebras":
             return bool(self.settings.cerebras_api_key.strip())
+        if provider == "cloudflare":
+            return bool(
+                self.settings.cloudflare_api_token.strip()
+                and self.settings.cloudflare_account_id.strip()
+            )
         return False
 
 
@@ -300,7 +346,7 @@ def _normalize_provider_model(provider: str, raw_model: str) -> str:
         raise ValueError(msg)
     if "/" not in model:
         return f"{provider}/{model}"
-    prefix = Settings.parse_provider_type(model)
+    prefix = parse_provider_type(model)
     if prefix == provider:
         return model
     if prefix in SUPPORTED_PROVIDER_IDS:
@@ -384,7 +430,7 @@ def auth_headers(token: str | None = None) -> dict[str, str]:
         "content-type": "application/json",
     }
     if resolved:
-        headers["x-api-key"] = resolved
+        headers["authorization"] = f"Bearer {resolved}"
     return headers
 
 
