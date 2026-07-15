@@ -680,3 +680,200 @@ def test_convert_assistant_server_tool_blocks_raise(content) -> None:
     messages = [MockMessage("assistant", content)]
     with pytest.raises(OpenAIConversionError, match="server tool"):
         AnthropicToOpenAIConverter.convert_messages(messages)
+
+
+# --- Mid-conversation system message conversion ---
+
+
+def test_all_system_messages_convert_to_user_in_place():
+    """Every system-role message in the array is demoted to user role
+    in place — the position in the array is preserved, and the content
+    is wrapped with an XML marker tag. The top-level Anthropic ``system``
+    field is handled separately by ``build_base_request_body``, which
+    inserts it as a fresh system message at position 0 *after* this
+    loop runs."""
+    messages = [
+        MockMessage("system", "<system-reminder>first reminder</system-reminder>"),
+        MockMessage("user", "hi"),
+        MockMessage("assistant", "hello"),
+        MockMessage("system", "another system msg at position 3"),
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    # Length unchanged
+    assert len(result) == 4
+    # Position 0 — was system, now user, content wrapped
+    assert result[0]["role"] == "user"
+    assert result[0]["content"] == (
+        '<system-msg role="reminder">'
+        "<system-reminder>first reminder</system-reminder>"
+        "</system-msg>"
+    )
+    # Position 1 — user, unchanged
+    assert result[1] == {"role": "user", "content": "hi"}
+    # Position 2 — assistant, unchanged
+    assert result[2] == {"role": "assistant", "content": "hello"}
+    # Position 3 — was system, now user, content wrapped
+    assert result[3]["role"] == "user"
+    assert result[3]["content"] == (
+        '<system-msg role="system">'
+        "another system msg at position 3"
+        "</system-msg>"
+    )
+
+
+def test_multiple_system_messages_all_convert_with_positions_preserved():
+    """Several system messages at different positions all get demoted
+    to user role, each at its own position."""
+    messages = [
+        MockMessage("system", "first"),                          # 0
+        MockMessage("user", "hi"),                               # 1
+        MockMessage("system", "<system-reminder>r</system-reminder>"),  # 2
+        MockMessage("assistant", "hello"),                       # 3
+        MockMessage("system", "another reminder"),               # 4
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert [m["role"] for m in result] == ["user", "user", "user", "assistant", "user"]
+    # Position 0 — was system, now user
+    assert result[0]["content"] == (
+        '<system-msg role="system">first</system-msg>'
+    )
+    # Position 2 — was system with reminder
+    assert result[2]["content"] == (
+        '<system-msg role="reminder">'
+        "<system-reminder>r</system-reminder>"
+        "</system-msg>"
+    )
+    # Position 4 — was system, plain text
+    assert result[4]["content"] == (
+        '<system-msg role="system">another reminder</system-msg>'
+    )
+
+
+def test_non_reminder_system_messages_also_convert_to_user():
+    """All system-role messages are converted, regardless of content."""
+    messages = [
+        MockMessage("system", "real system prompt"),
+        MockMessage("user", "hi"),
+        MockMessage("system", "any text without reminder tag"),
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert result[0]["role"] == "user"
+    assert result[0]["content"] == (
+        '<system-msg role="system">real system prompt</system-msg>'
+    )
+    assert result[2]["role"] == "user"
+    assert result[2]["content"] == (
+        '<system-msg role="system">any text without reminder tag</system-msg>'
+    )
+
+
+def test_no_system_messages_unchanged():
+    """When there are no system messages, nothing changes."""
+    messages = [MockMessage("user", "hi"), MockMessage("assistant", "hello")]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert [m["role"] for m in result] == ["user", "assistant"]
+
+
+def test_demoted_system_content_gets_reminder_role_attribute():
+    """A system message with <system-reminder> in its content gets
+    role=\"reminder\" in the wrapper, not role=\"system\"."""
+    messages = [
+        MockMessage("user", "hi"),
+        MockMessage(
+            "system",
+            "<system-reminder>\nThe task tools haven't been used recently.\n</system-reminder>",
+        ),
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert result[1]["role"] == "user"
+    assert result[1]["content"].startswith(
+        '<system-msg role="reminder">'
+    )
+    assert result[1]["content"].endswith("</system-msg>")
+    # Original content preserved inside the wrapper
+    assert (
+        "<system-reminder>\nThe task tools haven't been used recently.\n</system-reminder>"
+        in result[1]["content"]
+    )
+
+
+def test_demoted_system_content_gets_system_role_attribute():
+    """A system message without <system-reminder> gets role=\"system\"."""
+    messages = [
+        MockMessage("user", "hi"),
+        MockMessage("system", "plain system content"),
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert result[1]["role"] == "user"
+    assert result[1]["content"] == (
+        '<system-msg role="system">'
+        "plain system content"
+        "</system-msg>"
+    )
+
+
+def test_demoted_system_with_list_content_collapses_to_wrapped_string():
+    """A system message whose content is a list of text blocks is
+    dropped by the upstream ``convert_messages`` flow before it reaches
+    the demotion loop — this is pre-existing behavior, so we just
+    exercise the wrapper helper directly to confirm the XML markup is
+    correct for the list-of-blocks case."""
+    from core.anthropic.conversion import _wrap_as_user_system
+
+    blocks = [
+        {"type": "text", "text": "First block."},
+        {"type": "text", "text": "Second block."},
+    ]
+    wrapped = _wrap_as_user_system(blocks, "system")
+    assert wrapped == (
+        '<system-msg role="system">'
+        "First block.\nSecond block."
+        "</system-msg>"
+    )
+
+
+def test_system_at_position_3_stays_at_position_3_after_demotion():
+    """A system message at any position in the array stays at that
+    position when demoted to user role. The role flip is in-place; the
+    messages array is not re-indexed, dropped, or moved."""
+    messages = [
+        MockMessage("user", "turn 1"),                        # 0
+        MockMessage("assistant", "reply 1"),                  # 1
+        MockMessage("user", "turn 2"),                        # 2
+        MockMessage("system", "<system-reminder>at turn 3</system-reminder>"),  # 3
+        MockMessage("user", "turn 4"),                        # 4
+    ]
+    result = AnthropicToOpenAIConverter.convert_messages(messages)
+    # Length is unchanged
+    assert len(result) == 5
+    # The system message at index 3 is now at index 3 (in place)
+    assert result[3]["role"] == "user"
+    assert result[3]["content"] == (
+        '<system-msg role="reminder">'
+        "<system-reminder>at turn 3</system-reminder>"
+        "</system-msg>"
+    )
+    # The other messages keep their roles and positions
+    assert result[0] == {"role": "user", "content": "turn 1"}
+    assert result[1] == {"role": "assistant", "content": "reply 1"}
+    assert result[2] == {"role": "user", "content": "turn 2"}
+    assert result[4] == {"role": "user", "content": "turn 4"}
+
+
+def test_conversion_is_deterministic():
+    """Running the conversion twice on the same input produces the
+    exact same output bytes — no randomness, no state, no time
+    dependency. This is what makes the upstream prefix cache reusable
+    when Claude Code re-sends the same context."""
+    messages = [
+        MockMessage("user", "hi"),
+        MockMessage(
+            "system",
+            "<system-reminder>The task tools haven't been used recently.</system-reminder>",
+        ),
+        MockMessage("assistant", "hello"),
+        MockMessage("system", "another reminder"),
+    ]
+    result_a = AnthropicToOpenAIConverter.convert_messages(messages)
+    result_b = AnthropicToOpenAIConverter.convert_messages(messages)
+    assert result_a == result_b

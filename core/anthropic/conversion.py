@@ -165,6 +165,52 @@ def _assert_no_forbidden_assistant_block(block: Any) -> None:
         )
 
 
+# Tag for messages that started out as a system-role message and were
+# demoted to user role by the mid-conversation system→user conversion.
+# The wrapper is closed and well-formed XML so the model can see both
+# that the content is a system message and where it ends. The ``role``
+# attribute distinguishes ``<system-reminder>`` injections (``"reminder"``)
+# from other system content (``"system"``).
+_SYSTEM_AS_USER_TAG = "system-msg"
+
+
+def _wrap_as_user_system(content: Any, kind: str) -> Any:
+    """Wrap a demoted system message's content with an XML marker tag.
+
+    The kind is one of ``"reminder"`` (content includes
+    ``<system-reminder>``) or ``"system"`` (any other system content).
+    String content is wrapped directly. List-of-blocks content is
+    collapsed to a single wrapped string by joining the text portions —
+    unusual but consistent, and keeps the upstream payload's structure
+    simple.
+    """
+    if isinstance(content, str):
+        return f'<{_SYSTEM_AS_USER_TAG} role="{kind}">{content}</{_SYSTEM_AS_USER_TAG}>'
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                else:
+                    # Non-text blocks (image, tool_use, etc.) — best-effort
+                    # stringify so the model can still see them.
+                    parts.append(str(block))
+            else:
+                btype = getattr(block, "type", None)
+                if btype == "text":
+                    parts.append(str(getattr(block, "text", "") or ""))
+                else:
+                    parts.append(str(block))
+        joined = "\n".join(p for p in parts if p)
+        return f'<{_SYSTEM_AS_USER_TAG} role="{kind}">{joined}</{_SYSTEM_AS_USER_TAG}>'
+
+    # Unknown shape — fall back to a stringified wrapper so the markup
+    # is always present, even if the model sees something unexpected.
+    return f'<{_SYSTEM_AS_USER_TAG} role="{kind}">{content}</{_SYSTEM_AS_USER_TAG}>'
+
+
 class AnthropicToOpenAIConverter:
     """Convert Anthropic message format to OpenAI-compatible format."""
 
@@ -283,17 +329,41 @@ class AnthropicToOpenAIConverter:
                 AnthropicToOpenAIConverter._deferred_post_tool_to_messages(pending)
             )
 
-        # Convert system-role <system-reminder> messages to user role in-place.
-        # Mid-conversation system messages confuse providers that don't expect them.
-        # We change the role in-place (do NOT reorder) because the DeepSeek V4
-        # encoder uses positional indices and inter-message transition tokens —
-        # any insertion, deletion, or reordering shifts byte sequences downstream
-        # and invalidates the prefix cache for all subsequent messages.
+        # Convert system-role messages to user role in-place, leaving the
+        # array length and positions unchanged.
+        #
+        # OpenAI Chat Completions providers don't expect system messages
+        # after the first one — most reject them outright, and the rest
+        # become positionally unstable. Claude Code (and similar clients)
+        # often inject ``<system-reminder>`` and other system content
+        # mid-conversation; we demote every system-role message we see in
+        # the array to user role. The role flip is in-place: we do not
+        # reorder, drop, or insert. That keeps the byte sequence stable
+        # for the DeepSeek V4 encoder (positional indices and
+        # inter-message transition tokens) and lets upstream prefix
+        # caching reuse the prefix for repeated runs of the same context.
+        #
+        # The top-level Anthropic ``system`` field is inserted as a fresh
+        # system message at position 0 by ``build_base_request_body``
+        # after this loop runs, so the only "real" system message in the
+        # upstream payload is the one Claude Code asked us to send.
+        #
+        # Demoted messages get an XML wrapper so the model (and anyone
+        # reading the upstream payload in the log) can still tell that
+        # the content was originally a system message. The ``role``
+        # attribute distinguishes ``<system-reminder>`` injections from
+        # other system content.
         for msg in result:
-            if msg.get("role") == "system" and "<system-reminder>" in str(
-                msg.get("content", "")
-            ):
+            if msg.get("role") == "system":
                 msg["role"] = "user"
+                content = msg.get("content")
+                if content:
+                    kind = (
+                        "reminder"
+                        if "<system-reminder>" in str(content)
+                        else "system"
+                    )
+                    msg["content"] = _wrap_as_user_system(content, kind)
 
         return result
 
