@@ -123,12 +123,29 @@ class OpenAIChatProvider(BaseProvider):
         self, request: MessagesRequest, thinking_enabled: bool | None = None
     ) -> dict[str, Any]:
         """Build a provider request from the immutable profile."""
-        return build_openai_chat_request_body(
+        body = build_openai_chat_request_body(
             request,
             thinking_enabled=self._is_thinking_enabled(request, thinking_enabled),
             policy=self._profile.request_policy,
             postprocessors=self._profile.postprocessors,
         )
+        # Inject per-request x-opencode-* headers for OpenCode providers so
+        # the billing dashboard correlates requests from the same Claude session.
+        if self._provider_name in ("OPENCODE", "OPENCODE_GO"):
+            from free_claude_code.core.session_id import claude_to_opencode_session_id
+
+            session_id = claude_to_opencode_session_id(
+                getattr(request, "fcc_session_id", None)
+            )
+            extra_headers: dict[str, str] = {
+                "x-opencode-client": "fcc",
+                "x-opencode-session": session_id,
+            }
+            request_id = getattr(request, "fcc_request_id", None)
+            if request_id:
+                extra_headers["x-opencode-request"] = request_id
+            body["extra_headers"] = extra_headers
+        return body
 
     def preflight_stream(
         self, request: MessagesRequest, *, thinking_enabled: bool | None = None
