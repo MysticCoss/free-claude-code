@@ -37,14 +37,7 @@ def test_messages_request_rejects_null_stream() -> None:
         )
 
 
-def test_messages_request_preserves_system_role_messages_in_place():
-    """System-role messages stay in-place at their original array positions.
-
-    FCC intentionally does NOT normalize system-role messages out of messages[] into
-    the top-level system field: doing so would re-order the prefix and bust Anthropic
-    prompt caching for in-flight conversations. The system→user demotion happens at
-    request-conversion time in core.anthropic.conversion, not at parse time.
-    """
+def test_messages_request_preserves_system_role_message_order():
     request = MessagesRequest.model_validate(
         {
             "model": "claude-3-opus",
@@ -57,12 +50,16 @@ def test_messages_request_preserves_system_role_messages_in_place():
         }
     )
 
-    assert [message.role for message in request.messages] == ["user", "system", "user"]
+    assert [message.role for message in request.messages] == [
+        "user",
+        "system",
+        "user",
+    ]
+    assert request.messages[1].content == "system prompt"
     assert request.system is None
 
 
-def test_messages_request_keeps_system_role_messages_with_existing_system():
-    """System-role messages stay in array; top-level system field is untouched."""
+def test_messages_request_keeps_top_level_and_inline_system_content_distinct():
     request = MessagesRequest.model_validate(
         {
             "model": "claude-3-opus",
@@ -75,16 +72,12 @@ def test_messages_request_keeps_system_role_messages_with_existing_system():
         }
     )
 
-    assert [message.role for message in request.messages] == ["system", "user"]
     assert request.system == "existing system"
+    assert [message.role for message in request.messages] == ["system", "user"]
+    assert request.messages[0].content == "message system"
 
 
-def test_messages_request_preserves_system_block_cache_control_in_place():
-    """Cache-control annotations on in-array system blocks are preserved verbatim.
-
-    Since system-role messages are not extracted into the top-level system field,
-    cache_control metadata on those blocks travels with them through conversion.
-    """
+def test_messages_request_preserves_inline_system_block_metadata():
     request = MessagesRequest.model_validate(
         {
             "model": "claude-3-opus",
@@ -113,13 +106,16 @@ def test_messages_request_preserves_system_block_cache_control_in_place():
     )
 
     assert len(request.messages) == 2
-    assert [message.role for message in request.messages] == ["system", "user"]
     assert isinstance(request.system, list)
     assert [block.text for block in request.system] == ["existing system"]
     assert request.system[0].model_dump()["cache_control"] == {"type": "ephemeral"}
-    system_msg = request.messages[0]
-    assert isinstance(system_msg.content, list)
-    assert system_msg.content[0].model_dump()["cache_control"] == {"type": "ephemeral"}
+    inline_content = request.messages[0].content
+    assert isinstance(inline_content, list)
+    assert inline_content[0].model_dump() == {
+        "type": "text",
+        "text": "message system",
+        "cache_control": {"type": "ephemeral"},
+    }
 
 
 def test_messages_request_ignores_internal_routing_fields_when_supplied():
@@ -146,9 +142,7 @@ def test_token_count_request_parses_without_model_mapping_side_effects():
     assert request.model == "claude-3-sonnet"
 
 
-def test_token_count_request_preserves_system_role_messages_in_place():
-    """System-role messages stay in-place; the cache-preserving demotion happens
-    in the request converter, not at parse time."""
+def test_token_count_request_preserves_system_role_messages():
     request = TokenCountRequest.model_validate(
         {
             "model": "claude-3-sonnet",
@@ -159,8 +153,8 @@ def test_token_count_request_preserves_system_role_messages_in_place():
         }
     )
 
-    assert len(request.messages) == 2
     assert [message.role for message in request.messages] == ["system", "user"]
+    assert request.messages[0].content == "counting system"
     assert request.system is None
 
 

@@ -1,15 +1,8 @@
 """Pydantic models for the Anthropic Messages protocol."""
 
-from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-
-class Role(StrEnum):
-    user = "user"
-    assistant = "assistant"
-    system = "system"  # accepted at parse time but filtered before provider dispatch
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _AnthropicBlockBase(BaseModel):
@@ -85,49 +78,8 @@ class SystemContent(_AnthropicBlockBase):
     text: str
 
 
-def _text_system_block(text: str) -> dict[str, str]:
-    return {"type": "text", "text": text}
-
-
-def _merge_system_values(existing: Any, additions: list[Any]) -> Any:
-    values = [existing] if existing is not None else []
-    values.extend(additions)
-
-    if all(isinstance(value, str) for value in values):
-        return "\n\n".join(value for value in values if value)
-
-    blocks: list[Any] = []
-    for value in values:
-        if isinstance(value, str):
-            blocks.append(_text_system_block(value))
-        elif isinstance(value, list):
-            blocks.extend(value)
-        else:
-            blocks.append(value)
-    return blocks
-
-
-def _normalize_system_role_messages(data: Any) -> Any:
-    """Keep system-role messages in the array instead of merging into ``system``.
-
-    When system-role messages (e.g. ``<system-reminder>`` tags injected by
-    Claude Code mid-conversation) are extracted and merged into the top-level
-    ``system`` field, the system prompt changes between requests, which
-    invalidates upstream prefix caches on the entire system payload.
-
-    Leaving them in-place keeps the ``system`` field byte-stable so the
-    provider cache can re-use the prefix across requests.  Both Anthropic and
-    OpenAI-compatible providers accept system-role messages at any position.
-    """
-    return data
-
-
 class Message(BaseModel):
-    role: Literal[
-        "user",
-        "assistant",
-        "system",
-    ]  # system accepted at parse, filtered before provider dispatch
+    role: Literal["user", "assistant", "system"]
     content: (
         str
         | list[
@@ -162,11 +114,6 @@ class ThinkingConfig(BaseModel):
 class MessagesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_system_role_messages(cls, data: Any) -> Any:
-        return _normalize_system_role_messages(data)
-
     model: str
     original_model: str | None = Field(default=None, exclude=True)
     resolved_provider_model: str | None = Field(default=None, exclude=True)
@@ -187,19 +134,10 @@ class MessagesRequest(BaseModel):
     mcp_servers: list[dict[str, Any]] | None = None
     extra_body: dict[str, Any] | None = None
     betas: list[str] | None = Field(default=None, exclude=True)
-    # Session / request identity forwarded as x-opencode-* headers by the
-    # OpenCode Zen provider so the billing dashboard correlates requests.
-    fcc_session_id: str | None = Field(default=None, exclude=True)
-    fcc_request_id: str | None = Field(default=None, exclude=True)
 
 
 class TokenCountRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_system_role_messages(cls, data: Any) -> Any:
-        return _normalize_system_role_messages(data)
 
     model: str
     original_model: str | None = Field(default=None, exclude=True)
