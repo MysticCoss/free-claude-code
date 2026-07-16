@@ -143,6 +143,26 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         description="Select None to use the Default Model for Haiku requests.",
     ),
     ConfigFieldSpec(
+        "MODEL_COMPACT",
+        "Compaction Model",
+        "models",
+        "optional_model",
+        settings_attr="model_compact",
+        description="Optional provider/model for compaction/summarization requests. "
+        "Falls back to normal routing when unset.",
+    ),
+    ConfigFieldSpec(
+        "FCC_1M_MODELS",
+        "1M Context Models",
+        "models",
+        "textarea",
+        settings_attr="fcc_1m_models",
+        default="",
+        description="Comma-separated provider/model refs (e.g. opencode_go/deepseek-v4-pro). "
+        "Each matching model gets a [1m]-suffixed variant in /v1/models "
+        "so Claude Code grants the 1M-token context window.",
+    ),
+    ConfigFieldSpec(
         "ENABLE_MODEL_THINKING",
         "Enable Thinking",
         "thinking",

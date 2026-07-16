@@ -927,6 +927,270 @@ def test_preserves_extra_body_for_openai_chat_request(deepseek_provider):
     assert body["extra_body"] == {"note": 1, "thinking": {"type": "enabled"}}
 
 
+# ----------------- DeepSeek native reminder + system role promotion -----------------
+
+
+def _build_body_with_demoted_system(
+    deepseek_provider, model: str, mid_messages: list[dict]
+) -> dict:
+    """Build a request body containing a top-level system + a mid-conversation
+    ``role: system`` message. Returns the body for assertions.
+    """
+    request = MessagesRequest.model_validate(
+        {
+            "model": model,
+            "max_tokens": 100,
+            "system": "You are a helpful assistant.",
+            "messages": mid_messages,
+        }
+    )
+    return deepseek_provider._build_request_body(request)
+
+
+def test_promote_demoted_reminder_to_latest_reminder(deepseek_provider):
+    """Mid-conversation <system-reminder> content is sent as role latest_reminder."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {"role": "user", "content": "first turn"},
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<system-reminder>locale=en-US</system-reminder>",
+                    }
+                ],
+            },
+            {"role": "user", "content": "second turn"},
+        ],
+    )
+
+    assert body["model"] == "deepseek-v4-pro"
+    # Position 0 is the top-level system — unchanged.
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+    }
+    # Mid-conversation reminder: promoted to latest_reminder, content unwrapped.
+    promoted = body["messages"][2]
+    assert promoted["role"] == "latest_reminder"
+    assert promoted["content"] == "<system-reminder>locale=en-US</system-reminder>"
+    # No XML wrapper survived.
+    assert "<system-msg" not in promoted["content"]
+
+
+def test_normal_system_message_stays_demoted_for_deepseek(deepseek_provider):
+    """Mid-conversation non-reminder system stays demoted to role user (no promotion).
+
+    Per the design: for DeepSeek models, only ``<system-reminder>``-tagged
+    content is re-promoted to ``role: latest_reminder``. Other system
+    messages keep the generic OpenAI Chat demotion (role user with the
+    ``<system-msg role="system">`` wrapper) — DeepSeek still accepts that
+    shape fine, and the wrapper keeps the byte sequence stable for cache
+    prefix portability with other OpenAI Chat providers.
+    """
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {"role": "user", "content": "first"},
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "internal note"}],
+            },
+            {"role": "user", "content": "second"},
+        ],
+    )
+
+    demoted = body["messages"][2]
+    assert demoted["role"] == "user"
+    assert demoted["content"].startswith('<system-msg role="system">')
+    assert demoted["content"].endswith("</system-msg>")
+    assert "internal note" in demoted["content"]
+
+
+def test_top_level_system_not_re_wrapped(deepseek_provider):
+    """The top-level system field is already role=system; the promotion is a no-op for it."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [{"role": "user", "content": "x"}],
+    )
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+    }
+    assert body["messages"][0]["role"] != "latest_reminder"
+
+
+def test_promotion_does_not_touch_genuine_user_messages(deepseek_provider):
+    """Genuine user messages that happen to contain <system-msg> as text are left alone."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {
+                "role": "user",
+                "content": 'ignore the literal text: <system-msg role="reminder">not a real wrapper</system-msg>',
+            }
+        ],
+    )
+
+    # The genuine user message is not promoted — wrapper is mid-string, not anchored.
+    user_msg = body["messages"][1]
+    assert user_msg["role"] == "user"
+    assert "<system-msg" in user_msg["content"]
+
+
+def test_promotion_does_not_touch_assistant_messages(deepseek_provider):
+    """Assistant messages are never demoted, so promotion is a no-op for them.
+
+    The promotion only looks at ``role: user`` messages — anything else is
+    skipped. Verifying with an assistant message guards against a future
+    change that accidentally broadens the match (e.g. matching any role).
+    """
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {"role": "assistant", "content": "thinking out loud"},
+            {"role": "user", "content": "go"},
+        ],
+    )
+    assert body["messages"][1]["role"] == "assistant"
+    assert "system-msg" not in str(body["messages"][1].get("content", ""))
+
+
+def test_promotion_skipped_for_non_deepseek_model(deepseek_provider):
+    """Non-DeepSeek models keep the XML wrapper (they don't understand latest_reminder)."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "nvidia_nim/llama-3.3-70b-instruct",
+        [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<system-reminder>date=today</system-reminder>",
+                    }
+                ],
+            }
+        ],
+    )
+
+    # Demoted as usual: role=user, wrapper intact.
+    demoted = body["messages"][1]
+    assert demoted["role"] == "user"
+    assert demoted["content"].startswith('<system-msg role="reminder">')
+    assert demoted["content"].endswith("</system-msg>")
+
+
+def test_promotion_handles_case_insensitive_model_name(deepseek_provider):
+    """Model name match is case-insensitive (DeepSeek-V4-Pro, DEEPSEEK-CHAT, etc.)."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "DeepSeek-V4-Pro",
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "<system-reminder>x</system-reminder>"}
+                ],
+            }
+        ],
+    )
+    assert body["messages"][1]["role"] == "latest_reminder"
+
+
+def test_promotion_handles_namespaced_model_name(deepseek_provider):
+    """OpenRouter-style namespaced names like deepseek/deepseek-chat still match."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek/deepseek-chat",
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "<system-reminder>x</system-reminder>"}
+                ],
+            }
+        ],
+    )
+    assert body["messages"][1]["role"] == "latest_reminder"
+
+
+def test_promotion_handles_empty_reminder_body(deepseek_provider):
+    """Empty reminder body still promotes (model sees an empty latest_reminder)."""
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "<system-reminder></system-reminder>"}
+                ],
+            }
+        ],
+    )
+    promoted = body["messages"][1]
+    assert promoted["role"] == "latest_reminder"
+    assert promoted["content"] == "<system-reminder></system-reminder>"
+
+
+def test_promotion_handles_multiline_reminder_body(deepseek_provider):
+    """Multi-line reminder body is preserved (DOTALL regex)."""
+    multiline = "<system-reminder>line1\nline2\nline3</system-reminder>"
+    body = _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [{"role": "system", "content": [{"type": "text", "text": multiline}]}],
+    )
+    assert body["messages"][1]["role"] == "latest_reminder"
+    assert body["messages"][1]["content"] == multiline
+
+
+def test_promotion_logs_count(deepseek_provider, caplog):
+    """The log line counts only reminders, not other demoted system messages.
+
+    Sends a request with two reminders and one non-reminder system message.
+    Only the two reminders are promoted; the log should report ``count=2``.
+    """
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="free_claude_code")
+    _build_body_with_demoted_system(
+        deepseek_provider,
+        "deepseek-v4-pro",
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "<system-reminder>a</system-reminder>"}
+                ],
+            },
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "plain system note"}],
+            },
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "<system-reminder>b</system-reminder>"}
+                ],
+            },
+        ],
+    )
+    promoted_logs = [
+        rec for rec in caplog.records if "DEEPSEEK_NATIVE_REMINDER" in rec.message
+    ]
+    assert len(promoted_logs) == 1
+    assert "count=2" in promoted_logs[0].message
+
+
 def test_normalizes_tool_result_content_array_to_string(deepseek_provider):
     """Test that tool_result content arrays are normalized to strings for DeepSeek API."""
     request = MessagesRequest.model_validate(
