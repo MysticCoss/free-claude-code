@@ -21,6 +21,8 @@ def settings():
     settings.model_opus = None
     settings.model_sonnet = None
     settings.model_haiku = None
+    settings.model_compact = None
+    settings.fcc_1m_models = ""
     settings.enable_model_thinking = True
     settings.enable_fable_thinking = None
     settings.enable_opus_thinking = None
@@ -253,3 +255,183 @@ def test_model_router_preserves_typed_error_for_unknown_mapped_provider(settings
     assert str(exc_info.value) == (
         f"Unknown provider_type: 'unknown'. Supported: '{supported}'"
     )
+
+
+# ----------------- [1m] suffix stripping -----------------
+
+
+def test_resolve_strips_1m_suffix_from_direct_provider_model(settings):
+    """Direct provider model with [1m] suffix is stripped before upstream send."""
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="anthropic/opencode_go/deepseek-v4-pro[1m]",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert routed.resolved.provider_id == "opencode_go"
+    assert routed.resolved.provider_model == "deepseek-v4-pro"
+    assert (
+        routed.resolved.provider_model_ref
+        == "anthropic/opencode_go/deepseek-v4-pro[1m]"
+    )
+    assert routed.request.model == "deepseek-v4-pro"
+
+
+def test_resolve_strips_1m_suffix_from_mapped_model(settings):
+    """A configured MODEL_SONNET that ends in [1m] is stripped before upstream send."""
+    settings.model_sonnet = "opencode_go/deepseek-v4-pro[1m]"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert routed.resolved.provider_id == "opencode_go"
+    assert routed.resolved.provider_model == "deepseek-v4-pro"
+    assert routed.resolved.provider_model_ref == "opencode_go/deepseek-v4-pro[1m]"
+    assert routed.request.model == "deepseek-v4-pro"
+
+
+def test_resolve_preserves_1m_in_provider_model_ref(settings):
+    """The [1m] suffix is preserved in provider_model_ref for catalog advertisement."""
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="anthropic/opencode_go/deepseek-v4-pro[1m]",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert "[1m]" in routed.resolved.provider_model_ref
+    assert "[1m]" not in routed.resolved.provider_model
+
+
+# ----------------- MODEL_COMPACT override -----------------
+
+
+def test_resolve_messages_request_uses_compact_model_on_compaction_request(settings):
+    """Compaction-shaped request is rerouted to settings.model_compact."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant summarizing conversations.",
+            messages=[Message(role="user", content="Summarize this thread")],
+        )
+    )
+
+    assert routed.is_compaction_override is True
+    assert routed.resolved.provider_id == "opencode_go"
+    assert routed.resolved.provider_model == "deepseek-v4-flash"
+    assert routed.resolved.provider_model_ref == "opencode_go/deepseek-v4-flash"
+    assert routed.request.model == "deepseek-v4-flash"
+
+
+def test_resolve_messages_request_falls_back_when_compact_unset(settings):
+    """Compaction-shaped request falls through to normal routing when MODEL_COMPACT is unset."""
+    assert settings.model_compact is None
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant summarizing conversations.",
+            messages=[Message(role="user", content="Summarize this thread")],
+        )
+    )
+
+    assert routed.is_compaction_override is False
+    # Default model in the test fixture is "nvidia_nim/fallback-model".
+    assert routed.resolved.provider_id == "nvidia_nim"
+    assert routed.resolved.provider_model == "fallback-model"
+
+
+def test_resolve_messages_request_no_compaction_when_marker_absent(settings):
+    """Non-compaction request with MODEL_COMPACT set still uses normal routing."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant.",
+            messages=[Message(role="user", content="Hello, world")],
+        )
+    )
+
+    assert routed.is_compaction_override is False
+    assert routed.resolved.provider_model_ref == "nvidia_nim/fallback-model"
+
+
+def test_resolve_messages_request_detects_compact_user_marker(settings):
+    """Last user message starting with 'CRITICAL: Respond with TEXT ONLY' triggers override."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant.",
+            messages=[
+                Message(
+                    role="user",
+                    content="CRITICAL: Respond with TEXT ONLY. Do not use tools.",
+                )
+            ],
+        )
+    )
+
+    assert routed.is_compaction_override is True
+    assert routed.resolved.provider_model == "deepseek-v4-flash"
+
+
+def test_resolve_messages_request_preserves_request_body_for_compaction(settings):
+    """Compaction request body is passed through unchanged (no sanitization)."""
+    from free_claude_code.core.anthropic.models import (
+        ContentBlockToolUse,
+        Tool,
+    )
+
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    request = MessagesRequest(
+        model="claude-sonnet-4-20250514",
+        max_tokens=100,
+        system="You are a helpful assistant summarizing conversations.",
+        tools=[Tool(name="search", description="search the web")],
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    ContentBlockToolUse(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="search",
+                        input={"q": "weather"},
+                    )
+                ],
+            )
+        ],
+    )
+
+    original_tools = request.tools
+    original_content = request.messages[0].content
+
+    routed = ModelRouter(settings).resolve_messages_request(request)
+
+    # Model is replaced, but tools and tool blocks are NOT stripped.
+    assert routed.request.model == "deepseek-v4-flash"
+    assert routed.request.tools == original_tools
+    assert isinstance(routed.request.messages[0].content, list)
+    assert isinstance(routed.request.messages[0].content[0], ContentBlockToolUse)
+    # Original request is untouched.
+    assert request.model == "claude-sonnet-4-20250514"
+    assert request.tools is not None
+    assert request.messages[0].content is original_content

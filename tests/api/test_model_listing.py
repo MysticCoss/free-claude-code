@@ -11,6 +11,8 @@ def _settings(
     model_fable: str | None = None,
     model_opus: str | None = "open_router/anthropic/claude-opus",
     model_haiku: str | None = "deepseek/deepseek-chat",
+    fcc_1m_models: str = "",
+    opencode_api_key: str = "",
 ) -> Settings:
     return Settings.model_construct(
         model=model,
@@ -18,10 +20,12 @@ def _settings(
         model_opus=model_opus,
         model_sonnet=None,
         model_haiku=model_haiku,
+        fcc_1m_models=fcc_1m_models,
         anthropic_auth_token="",
         deepseek_api_key="deepseek-key",
         open_router_api_key="open-router-key",
         wafer_api_key="wafer-key",
+        opencode_api_key=opencode_api_key,
     )
 
 
@@ -148,3 +152,78 @@ def test_models_list_works_with_empty_discovery_catalog():
         "claude-3-freecc-no-thinking/open_router/anthropic/claude-opus",
     ]
     assert "claude-sonnet-4-20250514" in ids
+
+
+# ----------------- [1m] variants -----------------
+
+
+def test_models_list_includes_1m_suffixed_variants_for_configured_refs():
+    """Configured ref in FCC_1M_MODELS gets a [1m]-suffixed variant in /v1/models."""
+    app = create_test_app(
+        _settings(
+            model="opencode_go/deepseek-v4-pro",
+            model_opus=None,
+            model_haiku=None,
+            fcc_1m_models="opencode_go/deepseek-v4-pro",
+        )
+    )
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "anthropic/opencode_go/deepseek-v4-pro[1m]" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro[1m]" in ids
+
+
+def test_models_list_includes_1m_suffixed_variants_for_cached_models():
+    """Cached provider model in FCC_1M_MODELS also gets a [1m] variant."""
+    from free_claude_code.application.model_metadata import ProviderModelInfo
+
+    app = create_test_app(
+        _settings(
+            fcc_1m_models="opencode_go/deepseek-v4-pro",
+            opencode_api_key="opencode-key",
+        )
+    )
+    provider_manager_for_app(app).cache_model_infos(
+        "opencode_go", {ProviderModelInfo("deepseek-v4-pro")}
+    )
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "anthropic/opencode_go/deepseek-v4-pro[1m]" in ids
+    assert "claude-3-freecc-no-thinking/opencode_go/deepseek-v4-pro[1m]" in ids
+
+
+def test_models_list_no_1m_variants_when_not_configured():
+    """Empty FCC_1M_MODELS produces no [1m] variants in /v1/models."""
+    app = create_test_app(_settings(fcc_1m_models=""))
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert not any("[1m]" in id_ for id_ in ids)
+
+
+def test_models_list_1m_variants_deduped_against_configured_chat_models():
+    """A configured chat model ref also in FCC_1M_MODELS does not produce duplicates."""
+    app = create_test_app(
+        _settings(
+            model="opencode_go/deepseek-v4-pro",
+            model_opus=None,
+            model_haiku=None,
+            fcc_1m_models="opencode_go/deepseek-v4-pro",
+        )
+    )
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    # Both the standard variant and the [1m] variant are present, each once.
+    assert ids.count("anthropic/opencode_go/deepseek-v4-pro") == 1
+    assert ids.count("anthropic/opencode_go/deepseek-v4-pro[1m]") == 1
