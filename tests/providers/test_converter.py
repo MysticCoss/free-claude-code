@@ -1281,9 +1281,7 @@ def test_all_system_messages_convert_to_user_in_place():
     # Position 3 — was system, now user, content wrapped
     assert result[3]["role"] == "user"
     assert result[3]["content"] == (
-        '<system-msg role="system">'
-        "another system msg at position 3"
-        "</system-msg>"
+        '<system-msg role="system">another system msg at position 3</system-msg>'
     )
 
 
@@ -1291,23 +1289,19 @@ def test_multiple_system_messages_all_convert_with_positions_preserved():
     """Several system messages at different positions all get demoted
     to user role, each at its own position."""
     messages = [
-        MockMessage("system", "first"),                          # 0
-        MockMessage("user", "hi"),                               # 1
+        MockMessage("system", "first"),  # 0
+        MockMessage("user", "hi"),  # 1
         MockMessage("system", "<system-reminder>r</system-reminder>"),  # 2
-        MockMessage("assistant", "hello"),                       # 3
-        MockMessage("system", "another reminder"),               # 4
+        MockMessage("assistant", "hello"),  # 3
+        MockMessage("system", "another reminder"),  # 4
     ]
     result = AnthropicToOpenAIConverter.convert_messages(messages)
     assert [m["role"] for m in result] == ["user", "user", "user", "assistant", "user"]
     # Position 0 — was system, now user
-    assert result[0]["content"] == (
-        '<system-msg role="system">first</system-msg>'
-    )
+    assert result[0]["content"] == ('<system-msg role="system">first</system-msg>')
     # Position 2 — was system with reminder
     assert result[2]["content"] == (
-        '<system-msg role="reminder">'
-        "<system-reminder>r</system-reminder>"
-        "</system-msg>"
+        '<system-msg role="reminder"><system-reminder>r</system-reminder></system-msg>'
     )
     # Position 4 — was system, plain text
     assert result[4]["content"] == (
@@ -1352,9 +1346,7 @@ def test_demoted_system_content_gets_reminder_role_attribute():
     ]
     result = AnthropicToOpenAIConverter.convert_messages(messages)
     assert result[1]["role"] == "user"
-    assert result[1]["content"].startswith(
-        '<system-msg role="reminder">'
-    )
+    assert result[1]["content"].startswith('<system-msg role="reminder">')
     assert result[1]["content"].endswith("</system-msg>")
     # Original content preserved inside the wrapper
     assert (
@@ -1372,9 +1364,7 @@ def test_demoted_system_content_gets_system_role_attribute():
     result = AnthropicToOpenAIConverter.convert_messages(messages)
     assert result[1]["role"] == "user"
     assert result[1]["content"] == (
-        '<system-msg role="system">'
-        "plain system content"
-        "</system-msg>"
+        '<system-msg role="system">plain system content</system-msg>'
     )
 
 
@@ -1392,9 +1382,7 @@ def test_demoted_system_with_list_content_collapses_to_wrapped_string():
     ]
     wrapped = _wrap_as_user_system(blocks, "system")
     assert wrapped == (
-        '<system-msg role="system">'
-        "First block.\nSecond block."
-        "</system-msg>"
+        '<system-msg role="system">First block.\nSecond block.</system-msg>'
     )
 
 
@@ -1403,11 +1391,11 @@ def test_system_at_position_3_stays_at_position_3_after_demotion():
     position when demoted to user role. The role flip is in-place; the
     messages array is not re-indexed, dropped, or moved."""
     messages = [
-        MockMessage("user", "turn 1"),                        # 0
-        MockMessage("assistant", "reply 1"),                  # 1
-        MockMessage("user", "turn 2"),                        # 2
+        MockMessage("user", "turn 1"),  # 0
+        MockMessage("assistant", "reply 1"),  # 1
+        MockMessage("user", "turn 2"),  # 2
         MockMessage("system", "<system-reminder>at turn 3</system-reminder>"),  # 3
-        MockMessage("user", "turn 4"),                        # 4
+        MockMessage("user", "turn 4"),  # 4
     ]
     result = AnthropicToOpenAIConverter.convert_messages(messages)
     # Length is unchanged
