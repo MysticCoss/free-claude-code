@@ -134,6 +134,10 @@ class MessagesRequest(BaseModel):
     mcp_servers: list[dict[str, Any]] | None = None
     extra_body: dict[str, Any] | None = None
     betas: list[str] | None = Field(default=None, exclude=True)
+    # Session / request identity forwarded as x-opencode-* headers by the
+    # OpenCode Zen provider so the billing dashboard correlates requests.
+    fcc_session_id: str | None = Field(default=None, exclude=True)
+    fcc_request_id: str | None = Field(default=None, exclude=True)
 
 
 class TokenCountRequest(BaseModel):

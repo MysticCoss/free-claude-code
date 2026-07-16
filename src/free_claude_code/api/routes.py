@@ -13,7 +13,10 @@ from free_claude_code.core.anthropic import (
     get_token_count,
 )
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
-from free_claude_code.core.trace import trace_event
+from free_claude_code.core.trace import (
+    extract_claude_session_id_from_headers,
+    trace_event,
+)
 
 from .dependencies import (
     get_services,
@@ -110,6 +113,9 @@ async def create_message(
     _auth=Depends(require_proxy_auth),
 ):
     """Create a message (JSON by default; stream=true returns Anthropic SSE)."""
+    session_id = extract_claude_session_id_from_headers(request.headers)
+    if session_id:
+        request_data.fcc_session_id = session_id
     return await _create_messages_response(
         services,
         request_data,
