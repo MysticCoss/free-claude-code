@@ -55,6 +55,7 @@ class TestSettings:
         assert settings.log_raw_sse_events is False
         assert settings.debug_platform_edits is False
         assert settings.debug_subagent_stack is False
+        assert settings.log_level == "INFO"
         assert settings.open_admin_browser is True
 
     def test_open_admin_browser_loads_from_environment(self, monkeypatch):

@@ -1191,6 +1191,11 @@ without requiring raw transport logs by default.
 
 Logging defaults are conservative:
 
+- The JSON file sink defaults to `INFO`. Detailed structured request traces use
+  `DEBUG`, so normal customer logs retain lifecycle and failure events without
+  recording request-by-request trace payloads.
+- The active server log rotates at 50 MB and retains five rotated files,
+  bounding normal on-disk usage to roughly 300 MB.
 - API payloads and SSE events are not logged raw unless explicitly enabled.
 - Provider and application errors log metadata by default; verbose traceback and
   message logging are opt-in.
