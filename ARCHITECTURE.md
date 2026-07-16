@@ -569,7 +569,12 @@ Ollama's standard `reasoning` delta and history field are profile data rather
 than a specialized adapter. DeepSeek intentionally uses its
 OpenAI-compatible Chat Completions endpoint because that is the endpoint that
 reports prompt-cache hit/miss counters; the provider maps those counters back
-into Anthropic usage fields for Claude-compatible clients. Cloudflare uses its
+into Anthropic usage fields for Claude-compatible clients. DeepSeek reasoning
+history is serialized per assistant turn: non-tool reasoning is omitted from
+its first replay, while tool-call reasoning is retained independently of the
+next generation's thinking mode. Append-only conversations therefore keep an
+identical message prefix without violating DeepSeek's tool-call replay contract.
+Cloudflare uses its
 account-scoped Workers AI OpenAI-compatible Chat Completions endpoint for
 `@cf/...` model IDs, while account ID composition, model search, and
 Cloudflare-specific reasoning deltas stay in the Cloudflare provider client.
@@ -643,6 +648,14 @@ usage quirks such as DeepSeek prompt-cache counters.
 - stream lifecycle through `src/free_claude_code/core/anthropic/streaming`, including the neutral
   stream ledger, Anthropic SSE emitter, continuation-body construction, and tool repair;
 - token counting and Anthropic-owned failure-kind-to-wire mapping.
+
+Anthropic request models validate transcript data without merging, hoisting, or
+reordering semantically meaningful message roles. Top-level `system` content
+stays distinct from inline `system` messages. Target-protocol conversion owns
+their representation: neutral OpenAI Chat conversion preserves inline role and
+order, and rejects unrepresentable blocks instead of dropping them. Any
+provider-specific deviation belongs in an explicit request policy backed by a
+known upstream incompatibility.
 
 User image conversion is a pure protocol operation. Core maps Anthropic base64
 and URL image sources to ordered OpenAI `image_url` content parts without
@@ -771,6 +784,10 @@ common low-value client requests before they reach a provider:
 - title generation;
 - suggestion mode;
 - filepath extraction.
+
+Detection derives a read-only semantic view: inline `system` messages contribute
+system context but are not counted as conversational turns. The original
+request remains ordered and unchanged for provider execution.
 
 The Messages handler runs these only after model routing and after local server-tool
 handling. Each optimization is controlled by settings flags.
