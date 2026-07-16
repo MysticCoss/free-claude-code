@@ -59,7 +59,7 @@ def test_convert_system_prompt_none():
     assert AnthropicToOpenAIConverter.convert_system_prompt(None) is None
 
 
-def test_openai_build_preserves_top_level_and_inline_system_message_order() -> None:
+def test_openai_build_demotes_inline_system_to_user_with_xml_marker() -> None:
     request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -75,16 +75,21 @@ def test_openai_build_preserves_top_level_and_inline_system_message_order() -> N
 
     body = build_base_request_body(request)
 
-    assert body["messages"] == [
-        {"role": "system", "content": "Conversation-wide instructions"},
-        {"role": "user", "content": "First question"},
-        {"role": "assistant", "content": "First answer"},
-        {"role": "system", "content": "Instructions from this point"},
-        {"role": "user", "content": "Second question"},
-    ]
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": "Conversation-wide instructions",
+    }
+    assert body["messages"][1] == {"role": "user", "content": "First question"}
+    assert body["messages"][2] == {"role": "assistant", "content": "First answer"}
+    # Inline system is demoted to user with XML wrapper
+    assert body["messages"][3]["role"] == "user"
+    assert body["messages"][3]["content"] == (
+        '<system-msg role="system">Instructions from this point</system-msg>'
+    )
+    assert body["messages"][4] == {"role": "user", "content": "Second question"}
 
 
-def test_openai_build_joins_inline_system_text_blocks_without_repositioning() -> None:
+def test_openai_build_joins_inline_system_text_blocks_and_demotes_to_user() -> None:
     request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -105,12 +110,16 @@ def test_openai_build_joins_inline_system_text_blocks_without_repositioning() ->
     body = build_base_request_body(request)
 
     assert body["messages"][1] == {
-        "role": "system",
-        "content": "First instruction\n\nSecond instruction",
+        "role": "user",
+        "content": (
+            '<system-msg role="system">'
+            "First instruction\nSecond instruction"
+            "</system-msg>"
+        ),
     }
 
 
-def test_inline_system_message_preserves_existing_openai_cache_prefix() -> None:
+def test_demoted_system_message_preserves_existing_openai_cache_prefix() -> None:
     prefix_request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -138,13 +147,17 @@ def test_inline_system_message_preserves_existing_openai_cache_prefix() -> None:
     continued = build_base_request_body(continued_request)["messages"]
 
     assert continued[: len(prefix)] == prefix
+    # The new system message is demoted but position-preserving
     assert continued[len(prefix) :] == [
-        {"role": "system", "content": "Instructions from this point"},
+        {
+            "role": "user",
+            "content": '<system-msg role="system">Instructions from this point</system-msg>',
+        },
         {"role": "user", "content": "Second question"},
     ]
 
 
-def test_inline_system_message_follows_completed_tool_result() -> None:
+def test_demoted_system_message_follows_completed_tool_result() -> None:
     request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -177,14 +190,19 @@ def test_inline_system_message_follows_completed_tool_result() -> None:
 
     body = build_base_request_body(request)
 
+    # System is demoted to user with XML wrapper, still follows the tool result
     assert [message["role"] for message in body["messages"]] == [
         "assistant",
         "tool",
-        "system",
+        "user",
     ]
+    assert (
+        '<system-msg role="system">New instructions</system-msg>'
+        in body["messages"][2]["content"]
+    )
 
 
-def test_openai_build_rejects_non_text_inline_system_blocks() -> None:
+def test_openai_build_wraps_non_text_inline_system_blocks_as_string() -> None:
     request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -205,14 +223,18 @@ def test_openai_build_rejects_non_text_inline_system_blocks() -> None:
         }
     )
 
-    with pytest.raises(
-        OpenAIConversionError,
-        match="inline Anthropic system message content block 'image' without data loss",
-    ):
-        build_base_request_body(request)
+    """Non-text inline system blocks are wrapped as their string
+    representation instead of raising — the demote-to-user path is
+    lenient because the XML wrapper carries enough context for the
+    model without requiring structural enforcement at the gateway."""
+    body = build_base_request_body(request)
+
+    assert body["messages"][0]["role"] == "user"
+    assert body["messages"][0]["content"].startswith('<system-msg role="system">')
+    assert body["messages"][0]["content"].endswith("</system-msg>")
 
 
-def test_openai_build_rejects_empty_inline_system_content() -> None:
+def test_openai_build_demotes_empty_system_content_to_user() -> None:
     request = MessagesRequest.model_validate(
         {
             "model": "model",
@@ -220,8 +242,13 @@ def test_openai_build_rejects_empty_inline_system_content() -> None:
         }
     )
 
-    with pytest.raises(OpenAIConversionError, match="contain text"):
-        build_base_request_body(request)
+    """Empty system content is demoted to user with XML wrapper."""
+    body = build_base_request_body(request)
+
+    assert body["messages"][0]["role"] == "user"
+    assert body["messages"][0]["content"] == (
+        '<system-msg role="system"></system-msg>'
+    )
 
 
 # --- Tool Conversion Tests ---
@@ -1413,13 +1440,12 @@ def test_convert_assistant_server_tool_blocks_raise(content) -> None:
         AnthropicToOpenAIConverter.convert_messages(messages)
 
 
-# Note: Mid-conversation system message demotion tests lived here before
-# upstream PR #1125 ("Preserve mid-conversation system messages through
-# provider conversion") was merged. That PR replaced the local
-# demote-to-user with XML wrapper approach by keeping system-role
-# messages as system role in OpenAI output. The dead tests were removed
-# in favor of upstream's own coverage in
-# tests/providers/test_converter.py and tests/core/anthropic/test_models.py.
+# Note: Mid-conversation system message demotion tests previously lived here.
+# Upstream PR #1125 kept system messages as role: "system", but the local
+# #1122 approach (demote-to-user with <system-msg> XML wrapper) was re-applied
+# on top. The 6 upstream tests at the top of the file have been updated to
+# expect the demotion behavior. The deterministic test below verifies the
+# demoted output is stable for cache-prefix purposes.
 
 
 def test_conversion_is_deterministic():
