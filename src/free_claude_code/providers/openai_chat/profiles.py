@@ -192,7 +192,9 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             provider_name="CEREBRAS",
             include_extra_body=True,
             max_tokens_field="max_completion_tokens",
-        )
+            reasoning_replay=ReasoningReplayMode.THINK_TAGS,
+        ),
+        reasoning_delta_field="reasoning",
     ),
     "groq": OpenAIChatProfile(
         OpenAIChatRequestPolicy(

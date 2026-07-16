@@ -10,8 +10,40 @@ from tests.providers.request_factory import make_messages_request
 from tests.providers.support import passthrough_rate_limiter, profiled_provider
 
 
-def make_request(**overrides):
-    return make_messages_request("llama3.1-8b", **overrides)
+def make_request(model="llama3.1-8b", **overrides):
+    return make_messages_request(model, **overrides)
+
+
+def make_reasoning_tool_history_request():
+    return make_request(
+        "zai-glm-4.7",
+        messages=[
+            {"role": "user", "content": "Inspect the file."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "I need to read it first."},
+                    {"type": "text", "text": "I will inspect the file."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "read_file",
+                        "input": {"path": "example.py"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "print('hello')",
+                    }
+                ],
+            },
+        ],
+    )
 
 
 @pytest.fixture
@@ -59,6 +91,27 @@ def test_build_request_body_basic(cerebras_provider):
     assert "max_completion_tokens" in body
 
 
+def test_build_request_body_replays_reasoning_as_tagged_content(cerebras_provider):
+    body = cerebras_provider._build_request_body(make_reasoning_tool_history_request())
+
+    assistant = next(
+        message for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["content"] == (
+        "<think>\nI need to read it first.\n</think>\n\nI will inspect the file."
+    )
+    assert assistant["tool_calls"][0]["id"] == "toolu_1"
+    assert body["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": "print('hello')",
+    }
+    assert all(
+        "reasoning_content" not in message and "reasoning" not in message
+        for message in body["messages"]
+    )
+
+
 def test_build_request_body_global_disable_blocks_reasoning_mapping():
     provider = profiled_provider(
         "cerebras",
@@ -71,11 +124,19 @@ def test_build_request_body_global_disable_blocks_reasoning_mapping():
         ),
         rate_limiter=passthrough_rate_limiter(),
     )
-    req = make_request()
-    body = provider._build_request_body(req)
+    body = provider._build_request_body(make_reasoning_tool_history_request())
 
-    roles = [m.get("role") for m in body.get("messages", [])]
-    assert "assistant_reasoning_content" not in roles
+    assistant = next(
+        message for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["content"] == "I will inspect the file."
+    assert assistant["tool_calls"][0]["id"] == "toolu_1"
+    assert all(
+        "<think>" not in str(message.get("content", ""))
+        and "reasoning_content" not in message
+        and "reasoning" not in message
+        for message in body["messages"]
+    )
 
 
 def test_build_request_body_remaps_max_tokens_preserves_message_name(cerebras_provider):
@@ -156,8 +217,8 @@ async def test_stream_response_text(cerebras_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning_content(cerebras_provider):
-    """reasoning_content deltas are emitted as thinking blocks."""
+async def test_stream_response_reasoning(cerebras_provider):
+    """Cerebras reasoning deltas are emitted as thinking blocks."""
     req = make_request()
 
     mock_chunk = MagicMock()
@@ -165,7 +226,7 @@ async def test_stream_response_reasoning_content(cerebras_provider):
         MagicMock(
             delta=MagicMock(
                 content=None,
-                reasoning_content="Thinking...",
+                reasoning="Thinking...",
                 tool_calls=None,
             ),
             finish_reason="stop",
