@@ -20,6 +20,7 @@ class ChatModelConfig(Protocol):
     model_opus: str | None
     model_sonnet: str | None
     model_haiku: str | None
+    model_compact: str | None
 
 
 def parse_provider_type(model_ref: str) -> str:

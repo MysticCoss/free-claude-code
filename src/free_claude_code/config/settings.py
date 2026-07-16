@@ -132,6 +132,18 @@ class Settings(BaseSettings):
     model_sonnet: str | None = Field(default=None, validation_alias="MODEL_SONNET")
     model_haiku: str | None = Field(default=None, validation_alias="MODEL_HAIKU")
 
+    # Optional override for compaction/summarization requests.
+    # Detected when the system prompt contains "summarizing conversations" or
+    # the last user message starts with "CRITICAL: Respond with TEXT ONLY".
+    # Falls back to normal model resolution when unset.
+    model_compact: str | None = Field(default=None, validation_alias="MODEL_COMPACT")
+
+    # Comma-separated provider/model refs whose upstream supports >= 1M tokens.
+    # Each matching ref also gets a [1m]-suffixed variant in /v1/models so
+    # Claude Code grants the 1M-token context window.
+    # Example: opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash
+    fcc_1m_models: str = Field(default="", validation_alias="FCC_1M_MODELS")
+
     # ==================== Per-Provider Proxy ====================
     nvidia_nim_proxy: str = Field(default="", validation_alias="NVIDIA_NIM_PROXY")
     open_router_proxy: str = Field(default="", validation_alias="OPENROUTER_PROXY")
@@ -299,6 +311,7 @@ class Settings(BaseSettings):
         "model_opus",
         "model_sonnet",
         "model_haiku",
+        "model_compact",
         "enable_fable_thinking",
         "enable_opus_thinking",
         "enable_sonnet_thinking",
@@ -364,7 +377,12 @@ class Settings(BaseSettings):
         return ",".join(schemes)
 
     @field_validator(
-        "model", "model_fable", "model_opus", "model_sonnet", "model_haiku"
+        "model",
+        "model_fable",
+        "model_opus",
+        "model_sonnet",
+        "model_haiku",
+        "model_compact",
     )
     @classmethod
     def validate_model_format(cls, v: str | None) -> str | None:
@@ -381,6 +399,20 @@ class Settings(BaseSettings):
             supported = ", ".join(f"'{p}'" for p in SUPPORTED_PROVIDER_IDS)
             raise ValueError(f"Invalid provider: '{provider}'. Supported: {supported}")
         return v
+
+    def one_m_model_refs(self) -> frozenset[str]:
+        """Return provider/model refs tagged for [1m] context variants.
+
+        Parses ``fcc_1m_models`` (comma-separated). Whitespace around each
+        entry is trimmed, empty entries are skipped, and any existing
+        ``[1m]`` suffix is stripped so the config is idempotent.
+        """
+        refs: set[str] = set()
+        for part in self.fcc_1m_models.split(","):
+            stripped = part.strip()
+            if stripped:
+                refs.add(stripped.removesuffix("[1m]"))
+        return frozenset(refs)
 
     @model_validator(mode="after")
     def check_nvidia_nim_api_key(self) -> Settings:

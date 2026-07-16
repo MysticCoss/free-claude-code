@@ -873,6 +873,106 @@ class TestPerModelMapping:
         with pytest.raises(ValidationError, match="Invalid provider"):
             Settings()
 
+    def test_model_compact_default_is_none(self, monkeypatch):
+        """MODEL_COMPACT defaults to None when env is unset."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.delenv("MODEL_COMPACT", raising=False)
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.model_compact is None
+
+    def test_model_compact_loaded_from_env(self, monkeypatch):
+        """MODEL_COMPACT env var is loaded into settings."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("MODEL_COMPACT", "opencode_go/anthropic/claude-fable-5")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.model_compact == "opencode_go/anthropic/claude-fable-5"
+
+    def test_model_compact_empty_string_becomes_none(self, monkeypatch):
+        """Empty MODEL_COMPACT env value coerces to None."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("MODEL_COMPACT", "")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.model_compact is None
+
+    def test_model_compact_invalid_provider_raises(self, monkeypatch):
+        """MODEL_COMPACT with invalid provider prefix raises ValidationError."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("MODEL_COMPACT", "invalid/model")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        with pytest.raises(ValidationError, match="Invalid provider"):
+            Settings()
+
+    def test_fcc_1m_models_default_is_empty(self, monkeypatch):
+        """FCC_1M_MODELS defaults to empty string when env is unset."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.delenv("FCC_1M_MODELS", raising=False)
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.fcc_1m_models == ""
+
+    def test_fcc_1m_models_loaded_from_env(self, monkeypatch):
+        """FCC_1M_MODELS env var is loaded into settings."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv(
+            "FCC_1M_MODELS",
+            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+        )
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.fcc_1m_models == (
+            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash"
+        )
+
+    def test_one_m_model_refs_parses_csv(self, monkeypatch):
+        """one_m_model_refs returns a frozenset of trimmed refs from the CSV env var."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv(
+            "FCC_1M_MODELS",
+            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+        )
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.one_m_model_refs() == frozenset(
+            {"opencode_go/deepseek-v4-pro", "opencode_go/deepseek-v4-flash"}
+        )
+
+    def test_one_m_model_refs_strips_existing_1m_suffix(self, monkeypatch):
+        """one_m_model_refs strips any pre-existing [1m] suffix for idempotency."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("FCC_1M_MODELS", "opencode_go/deepseek-v4-pro[1m]")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.one_m_model_refs() == frozenset({"opencode_go/deepseek-v4-pro"})
+
+    def test_one_m_model_refs_handles_whitespace(self, monkeypatch):
+        """one_m_model_refs trims whitespace around CSV entries."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("FCC_1M_MODELS", " a/b , c/d ")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.one_m_model_refs() == frozenset({"a/b", "c/d"})
+
+    def test_one_m_model_refs_empty_returns_empty_set(self, monkeypatch):
+        """one_m_model_refs returns an empty frozenset when FCC_1M_MODELS is empty."""
+        from free_claude_code.config.settings import Settings
+
+        monkeypatch.setenv("FCC_1M_MODELS", "")
+        monkeypatch.setitem(Settings.model_config, "env_file", ())
+        s = Settings()
+        assert s.one_m_model_refs() == frozenset()
+
     def test_resolve_model_fable_override(self):
         """ModelRouter returns model_fable for Fable model names."""
         from free_claude_code.application.routing import ModelRouter

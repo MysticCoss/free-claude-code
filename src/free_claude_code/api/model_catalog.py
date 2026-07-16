@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from free_claude_code.application.ports import RequestRuntimePort
+from free_claude_code.application.routing import ONE_M_CONTEXT_SUFFIX
 from free_claude_code.config.model_refs import configured_chat_model_refs
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
@@ -102,6 +103,28 @@ def build_models_list_response(
             model_info.model_id,
             supports_thinking=model_info.supports_thinking,
         )
+
+    one_m_refs = settings.one_m_model_refs()
+    if one_m_refs:
+        for ref in configured_chat_model_refs(settings):
+            if ref.model_ref in one_m_refs:
+                supports_thinking = runtime.cached_model_supports_thinking(
+                    ref.provider_id, ref.model_id
+                )
+                _append_provider_model_variants(
+                    models,
+                    seen,
+                    f"{ref.model_ref}{ONE_M_CONTEXT_SUFFIX}",
+                    supports_thinking=supports_thinking,
+                )
+        for model_info in runtime.cached_prefixed_model_infos():
+            if model_info.model_id in one_m_refs:
+                _append_provider_model_variants(
+                    models,
+                    seen,
+                    f"{model_info.model_id}{ONE_M_CONTEXT_SUFFIX}",
+                    supports_thinking=model_info.supports_thinking,
+                )
 
     for model in SUPPORTED_CLAUDE_MODELS:
         _append_unique_model(models, seen, model)

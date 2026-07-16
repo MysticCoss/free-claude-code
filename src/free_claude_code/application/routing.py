@@ -14,6 +14,41 @@ from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
 from free_claude_code.core.gateway_model_ids import decode_gateway_model_id
 
+# Markers Claude Code injects into compaction / summarization requests.
+# When either marker is present, the request is redirected to ``model_compact``
+# (if configured) so a cheaper model handles context summarization.
+COMPACT_SYSTEM_MARKER = "summarizing conversations"
+COMPACT_USER_MARKER = "CRITICAL: Respond with TEXT ONLY"
+
+# Suffix Claude Code reads in /v1/models to grant the 1M-token context window.
+# Stripped from ``provider_model`` before sending to upstream so the real
+# provider only sees the bare model id.
+ONE_M_CONTEXT_SUFFIX = "[1m]"
+
+
+def _strip_1m_suffix(model: str) -> str:
+    """Remove the ``[1m]`` context-window marker so upstream receives the real model id."""
+    return model.removesuffix(ONE_M_CONTEXT_SUFFIX)
+
+
+def _is_compaction_request(request: MessagesRequest) -> bool:
+    """True when the request looks like a Claude Code compaction/summarization call."""
+    system = request.system
+    if isinstance(system, str) and COMPACT_SYSTEM_MARKER in system:
+        return True
+    if isinstance(system, list):
+        for block in system:
+            text = getattr(block, "text", None)
+            if text is None and isinstance(block, dict):
+                text = block.get("text")
+            if text and COMPACT_SYSTEM_MARKER in text:
+                return True
+    if request.messages:
+        last = request.messages[-1]
+        if last.role == "user" and isinstance(last.content, str):
+            return last.content.startswith(COMPACT_USER_MARKER)
+    return False
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedModel:
@@ -28,6 +63,7 @@ class ResolvedModel:
 class RoutedMessagesRequest:
     request: MessagesRequest
     resolved: ResolvedModel
+    is_compaction_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +85,7 @@ class ModelRouter:
             force_thinking_enabled,
         ) = self._direct_provider_model(claude_model_name)
         if direct_provider_id is not None and direct_provider_model is not None:
+            stripped_provider_model = _strip_1m_suffix(direct_provider_model)
             thinking_enabled = (
                 force_thinking_enabled
                 if force_thinking_enabled is not None
@@ -58,13 +95,13 @@ class ModelRouter:
                 "MODEL DIRECT: '{}' -> provider='{}' model='{}' thinking={}",
                 claude_model_name,
                 direct_provider_id,
-                direct_provider_model,
+                stripped_provider_model,
                 thinking_enabled,
             )
             return ResolvedModel(
                 original_model=claude_model_name,
                 provider_id=direct_provider_id,
-                provider_model=direct_provider_model,
+                provider_model=stripped_provider_model,
                 provider_model_ref=claude_model_name,
                 thinking_enabled=thinking_enabled,
             )
@@ -73,7 +110,7 @@ class ModelRouter:
         thinking_enabled = self._resolve_thinking(claude_model_name)
         provider_id = parse_provider_type(provider_model_ref)
         self._validate_provider_id(provider_id)
-        provider_model = parse_model_name(provider_model_ref)
+        provider_model = _strip_1m_suffix(parse_model_name(provider_model_ref))
         if provider_model != claude_model_name:
             logger.debug(
                 "MODEL MAPPING: '{}' -> '{}'", claude_model_name, provider_model
@@ -84,6 +121,21 @@ class ModelRouter:
             provider_model=provider_model,
             provider_model_ref=provider_model_ref,
             thinking_enabled=thinking_enabled,
+        )
+
+    def _resolve_compact_override(self) -> ResolvedModel | None:
+        """Resolve ``settings.model_compact`` into a ResolvedModel, validating the provider."""
+        ref = self._settings.model_compact
+        if ref is None:
+            return None
+        provider_id = parse_provider_type(ref)
+        self._validate_provider_id(provider_id)
+        return ResolvedModel(
+            original_model="<compact>",
+            provider_id=provider_id,
+            provider_model=_strip_1m_suffix(parse_model_name(ref)),
+            provider_model_ref=ref,
+            thinking_enabled=self._settings.enable_model_thinking,
         )
 
     @staticmethod
@@ -145,6 +197,21 @@ class ModelRouter:
         self, request: MessagesRequest
     ) -> RoutedMessagesRequest:
         """Return an internal routed request context."""
+        if self._settings.model_compact is not None and _is_compaction_request(request):
+            resolved = self._resolve_compact_override()
+            if resolved is not None:
+                routed = request.model_copy(deep=True)
+                routed.model = resolved.provider_model
+                logger.debug(
+                    "MODEL COMPACT: routing compaction request -> provider='{}' model='{}'",
+                    resolved.provider_id,
+                    resolved.provider_model,
+                )
+                return RoutedMessagesRequest(
+                    request=routed,
+                    resolved=resolved,
+                    is_compaction_override=True,
+                )
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
         routed.model = resolved.provider_model
