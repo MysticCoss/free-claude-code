@@ -1,6 +1,7 @@
 """Message and tool format converters."""
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -200,6 +201,46 @@ def _wrap_as_user_system(content: Any, kind: str) -> str:
         content = joined
     s = str(content) if not isinstance(content, str) else content
     return f'<{_SYSTEM_AS_USER_TAG} role="{kind}">{s}</{_SYSTEM_AS_USER_TAG}>'
+
+
+# Regex matching the reminder wrapper emitted by ``_wrap_as_user_system``.
+# Anchored on both ends so a ``<system-msg>`` substring that appears inside
+# genuine user content is left alone. ``re.DOTALL`` lets the body span
+# newlines. Only the ``reminder`` kind is matched here — non-reminder
+# system messages keep the generic OpenAI Chat demotion.
+_DEMOTED_REMINDER_RE = re.compile(
+    r'^<system-msg role="reminder">(?P<body>.*)</system-msg>$',
+    re.DOTALL,
+)
+
+
+def promote_demoted_reminders(messages: list[Any]) -> int:
+    """Rewrite ``<system-msg role="reminder">`` wrappers to ``role: latest_reminder``.
+
+    The base OpenAI Chat demotion in
+    :func:`AnthropicToOpenAIConverter.convert_messages` downgrades mid-conversation
+    ``role: system`` messages to ``role: user`` and wraps the content in
+    ``<system-msg role="…">`` so the byte sequence stays stable for upstream
+    prefix caching. DeepSeek V4 understands a dedicated ``latest_reminder``
+    role natively, so this function unwraps the reminder variant and
+    rewrites the role. Non-reminder system wrappers (kind="system") are
+    left untouched — they keep the demotion. The list is mutated in place.
+    Returns the number of reminders promoted.
+    """
+    promoted = 0
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        match = _DEMOTED_REMINDER_RE.match(content)
+        if match is None:
+            continue
+        message["role"] = "latest_reminder"
+        message["content"] = match.group("body")
+        promoted += 1
+    return promoted
 
 
 def _openai_system_text(
