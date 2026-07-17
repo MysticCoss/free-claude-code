@@ -79,6 +79,7 @@ def apply_nim_request_options(
         extra_body.update(deepcopy(request_extra))
     for key in (
         "reasoning",
+        "reasoning_budget",
         "reasoning_effort",
         "reasoning_tokens",
         "thinking",
@@ -98,8 +99,8 @@ def apply_nim_request_options(
             enabled = reasoning.control is not ReasoningControl.OFF
             chat_template_kwargs["thinking"] = enabled
             chat_template_kwargs["enable_thinking"] = enabled
-            if enabled and reasoning.budget_tokens is not None:
-                chat_template_kwargs["reasoning_budget"] = reasoning.budget_tokens
+            if enabled and (budget := reasoning.numeric_budget_tokens) is not None:
+                chat_template_kwargs["reasoning_budget"] = budget
 
     req_top_k = request_data.top_k
     top_k = req_top_k if req_top_k is not None else nim.top_k
