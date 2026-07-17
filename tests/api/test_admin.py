@@ -61,6 +61,94 @@ def test_admin_page_is_loopback_only(monkeypatch, tmp_path):
     assert remote_client.get("/admin").status_code == 403
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/admin",
+        "/admin/assets/admin.css",
+        "/admin/assets/admin.js",
+        "/admin/api/config",
+    ),
+)
+def test_admin_responses_are_never_cached(monkeypatch, tmp_path, path):
+    _set_home(monkeypatch, tmp_path)
+    response = _local_client(create_test_app()).get(path)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("path", "client_host", "expected_status"),
+    (
+        ("/admin", "203.0.113.10", 403),
+        ("/admin/assets/missing.js", "127.0.0.1", 404),
+    ),
+)
+def test_admin_http_errors_are_never_cached(
+    monkeypatch,
+    tmp_path,
+    path,
+    client_host,
+    expected_status,
+):
+    _set_home(monkeypatch, tmp_path)
+    client = TestClient(create_test_app(), client=(client_host, 50000))
+
+    response = client.get(path)
+
+    assert response.status_code == expected_status
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_validation_errors_are_never_cached(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/validate",
+        content="{",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_unexpected_errors_are_never_cached(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    client = TestClient(
+        create_test_app(),
+        client=("127.0.0.1", 50000),
+        raise_server_exceptions=False,
+    )
+
+    with patch(
+        "free_claude_code.api.admin_routes.load_config_response",
+        side_effect=RuntimeError("test error"),
+    ):
+        response = client.get("/admin/api/config")
+
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_cache_policy_does_not_match_similar_public_paths(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+
+    response = _local_client(create_test_app()).get("/administrator")
+
+    assert response.status_code == 404
+    assert "cache-control" not in response.headers
+
+
+def test_admin_api_fetches_bypass_browser_cache():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'cache: "no-store"' in script
+
+
 def test_admin_page_no_longer_renders_generated_env_panel(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     app = create_test_app()
