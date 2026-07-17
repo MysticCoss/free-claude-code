@@ -213,6 +213,30 @@ _DEMOTED_REMINDER_RE = re.compile(
     re.DOTALL,
 )
 
+# Matches a user message whose entire content is a single ``<system-msg>``
+# wrapper — the result of demoting a system message to user role. Used by
+# ``_coalesce_openai_user_messages`` to keep such messages as separate
+# entries, so ``promote_demoted_reminders`` can still re-promote the
+# reminder variant to DeepSeek V4's native ``latest_reminder`` role.
+_DEMOTED_USER_ONLY_RE = re.compile(
+    r'^<system-msg role="[^"]*">.*</system-msg>$',
+    re.DOTALL,
+)
+
+
+def _is_pure_demoted_user_message(message: dict[str, Any]) -> bool:
+    """Return True if *message* is a user message whose content is a single
+    ``<system-msg>...</system-msg>`` wrapper produced by the system→user
+    demotion in ``convert_messages``. Pure wrappers must not be coalesced
+    with adjacent user content, because the regex used by
+    ``promote_demoted_reminders`` is anchored and only matches when the
+    wrapper occupies the full content.
+    """
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return isinstance(content, str) and _DEMOTED_USER_ONLY_RE.match(content) is not None
+
 
 def promote_demoted_reminders(messages: list[Any]) -> int:
     """Rewrite ``<system-msg role="reminder">`` wrappers to ``role: latest_reminder``.
@@ -296,6 +320,63 @@ def _openai_user_image_part(block: Any) -> dict[str, Any]:
         )
 
     return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _openai_user_content_parts(content: Any) -> list[dict[str, Any]]:
+    """Return an owned content-part list for one converted user message."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list) and all(isinstance(part, dict) for part in content):
+        return deepcopy(content)
+    raise OpenAIConversionError(
+        "OpenAI chat conversion produced unsupported user message content."
+    )
+
+
+def _merge_openai_user_content(first: Any, second: Any) -> str | list[dict[str, Any]]:
+    """Combine adjacent user content while preserving multimodal part order."""
+    if isinstance(first, str) and isinstance(second, str):
+        return f"{first}\n\n{second}"
+
+    first_parts = _openai_user_content_parts(first)
+    second_parts = _openai_user_content_parts(second)
+    first_ends_in_text = bool(first_parts) and first_parts[-1].get("type") == "text"
+    second_starts_with_text = (
+        bool(second_parts) and second_parts[0].get("type") == "text"
+    )
+    if first_ends_in_text and second_starts_with_text:
+        first_text = first_parts[-1].get("text", "")
+        second_text = second_parts.pop(0).get("text", "")
+        first_parts[-1]["text"] = f"{first_text}\n\n{second_text}"
+    return [*first_parts, *second_parts]
+
+
+def _coalesce_openai_user_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine adjacent user messages after transcript ordering is complete.
+
+    Pure ``<system-msg>...</system-msg>`` wrapper messages (produced by
+    the system→user demotion in :func:`convert_messages`) are preserved as
+    separate entries so :func:`promote_demoted_reminders` can re-promote
+    the reminder variant to DeepSeek V4's native ``latest_reminder`` role.
+    """
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        if (
+            message.get("role") == "user"
+            and result
+            and result[-1].get("role") == "user"
+            and not _is_pure_demoted_user_message(message)
+            and not _is_pure_demoted_user_message(result[-1])
+        ):
+            previous = result[-1]
+            previous["content"] = _merge_openai_user_content(
+                previous.get("content"), message.get("content")
+            )
+            continue
+        result.append(message)
+    return result
 
 
 class _OpenAIChatHistoryLedger:
@@ -476,7 +557,7 @@ class AnthropicToOpenAIConverter:
                 else:
                     ledger.add_tool_turn(segment)
 
-        return ledger.finish()
+        return _coalesce_openai_user_messages(ledger.finish())
 
     @staticmethod
     def _convert_message_to_segments(
@@ -496,7 +577,8 @@ class AnthropicToOpenAIConverter:
                     "OpenAI chat conversion requires an inline Anthropic system "
                     "message to contain text."
                 )
-            return [_PlainSegment([{"role": "system", "content": system_text}])]
+            # Reserve the downstream system role for request.system at index zero.
+            return [_PlainSegment([{"role": "user", "content": system_text}])]
         if role == "assistant" and isinstance(content, list):
             if (first_i := _index_first_tool_use(content)) is not None:
                 for block in content:
