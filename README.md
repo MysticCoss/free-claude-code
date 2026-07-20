@@ -40,18 +40,6 @@ Run your coding agents with free, paid, or local models. Choose and validate pro
   <p><em>Codex native <code>/model</code> picker with the generated FCC catalog.</em></p>
 </div>
 
-## Star History
-
-<div align="center">
-  <a href="https://star-history.com/#Alishahryar1/free-claude-code&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Alishahryar1/free-claude-code&type=Date&theme=dark">
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Alishahryar1/free-claude-code&type=Date">
-      <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Alishahryar1/free-claude-code&type=Date" width="700">
-    </picture>
-  </a>
-</div>
-
 ## What You Get
 
 - Launch Claude Code with `fcc-claude`, Codex with `fcc-codex`, or Pi with `fcc-pi`.
@@ -172,17 +160,20 @@ Enter the listed setting in the Admin UI, open **Model Config**, then search the
 | [NVIDIA NIM](https://build.nvidia.com/settings/api-keys) | `NVIDIA_NIM_API_KEY` | `nvidia_nim/nvidia/nemotron-3-super-120b-a12b` |
 | [OpenRouter](https://openrouter.ai/keys) | `OPENROUTER_API_KEY` | `open_router/openrouter/free` |
 | [Google AI Studio (Gemini)](https://aistudio.google.com/apikey) | `GEMINI_API_KEY` | `gemini/models/gemini-3.1-flash-lite` |
+| [Google Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | `VERTEX_PROJECT_ID` + ADC | `vertex/google/gemini-3.5-flash` |
 | [DeepSeek](https://platform.deepseek.com/api_keys) | `DEEPSEEK_API_KEY` | `deepseek/deepseek-chat` |
 | [Mistral La Plateforme](https://console.mistral.ai/) | `MISTRAL_API_KEY` | `mistral/devstral-small-latest` |
 | [Mistral Codestral](https://console.mistral.ai/) | `CODESTRAL_API_KEY` | `mistral_codestral/codestral-latest` |
 | [OpenCode Zen](https://opencode.ai/auth) | `OPENCODE_API_KEY` | `opencode/gpt-5.3-codex` |
 | [OpenCode Go](https://opencode.ai/auth) | `OPENCODE_API_KEY` | `opencode_go/minimax-m2.7` |
 | [Vercel AI Gateway](https://vercel.com/docs/ai-gateway/models-and-providers) | `AI_GATEWAY_API_KEY` | `vercel/openai/gpt-5.5` |
+| [Amazon Bedrock](https://console.aws.amazon.com/bedrock/) | `AWS_BEARER_TOKEN_BEDROCK` | `bedrock/openai.gpt-oss-120b` |
 | [Hugging Face Inference Providers](https://huggingface.co/settings/tokens) | `HUGGINGFACE_API_KEY` | `huggingface/Qwen/Qwen3-Coder-480B-A35B-Instruct:fastest` |
 | [Cohere](https://dashboard.cohere.com/api-keys) | `COHERE_API_KEY` | `cohere/command-a-plus-05-2026` |
 | [GitHub Models](https://github.com/marketplace?type=models) | `GITHUB_MODELS_TOKEN` | `github_models/openai/gpt-4.1` |
 | [Wafer](https://wafer.ai/) | `WAFER_API_KEY` | `wafer/DeepSeek-V4-Pro` |
-| [Kimi](https://platform.moonshot.ai/console/api-keys) | `KIMI_API_KEY` | `kimi/kimi-k2.5` |
+| [Kimi API](https://platform.moonshot.ai/console/api-keys) | `KIMI_API_KEY` | `kimi/kimi-k2.5` |
+| [Kimi Code](https://www.kimi.com/code/console) | `KIMI_CODE_API_KEY` | `kimi_code/k3` |
 | [MiniMax](https://platform.minimax.io/user-center/basic-information/interface-key) | `MINIMAX_API_KEY` | `minimax/MiniMax-M3` |
 | [Cerebras Inference](https://cloud.cerebras.ai/) | `CEREBRAS_API_KEY` | `cerebras/gpt-oss-120b` |
 | [Groq](https://console.groq.com/keys) | `GROQ_API_KEY` | `groq/llama-3.3-70b-versatile` |
@@ -198,7 +189,18 @@ Enter the listed setting in the Admin UI, open **Model Config**, then search the
 Important provider notes:
 
 - Mistral Codestral uses a separate key from Mistral La Plateforme.
+- Kimi Code subscription keys use `kimi_code/`; Kimi API credit keys use
+  `kimi/`. Kimi Code plans are for personal interactive coding-agent use under
+  [Kimi's community guidelines](https://www.kimi.com/code/docs/en/kimi-code/community-guidelines.html).
 - OpenCode Zen and OpenCode Go share `OPENCODE_API_KEY` but use different model prefixes.
+- Amazon Bedrock uses its Mantle OpenAI-compatible endpoint. Set
+  `BEDROCK_BASE_URL` to the endpoint for the same region as the API key and
+  select one of the models returned by FCC's model picker.
+- Vertex AI uses Google Application Default Credentials instead of an API key.
+  Locally, run `gcloud auth application-default login` once; service-account
+  files and attached service accounts also work. Set `VERTEX_PROJECT_ID`, and
+  optionally change `VERTEX_LOCATION` from its `global` default. FCC refreshes
+  expiring access tokens automatically.
 - Cloudflare requires both its API token and account ID.
 - Ollama Cloud connects directly to `ollama.com`; use the exact model IDs shown
   by FCC's model picker. Local Ollama remains available through the separate
@@ -232,6 +234,12 @@ Use the tag shown by `ollama list` with the `ollama/` prefix. `OLLAMA_BASE_URL` 
 `MODEL` is the fallback for every request. Select a model for `MODEL_FABLE`, `MODEL_OPUS`, `MODEL_SONNET`, or `MODEL_HAIKU` to override an individual Claude Code tier; select **None** to use `MODEL`.
 
 For example, route Opus to `nvidia_nim/moonshotai/kimi-k2.6`, Sonnet to `open_router/openrouter/free`, Haiku to `lmstudio/qwen3.5-coder`, and keep `MODEL` on `zai/glm-5.2`.
+
+### Reasoning Control
+
+Open **Admin UI → Model Config → Reasoning** to choose how FCC handles client reasoning controls. The default **From client** option preserves reasoning effort sent by Claude Code, Codex, or Pi; when the client sends no control, the provider keeps its own default.
+
+You can instead select **Off**, **Low**, **Medium**, **High**, **X-High**, or **Max**. Fable, Opus, Sonnet, and Haiku each have the same choices plus **Inherit**, which uses the root policy. Providers with named effort receive those names; numeric-budget providers map **Low=512**, **Medium=1,024**, **High=2,048**, **X-High=4,096**, and **Max=8,192** reasoning tokens; boolean providers receive on or off. Unsupported controls safely remain provider-defined.
 
 <a id="connect-your-client"></a>
 

@@ -3,36 +3,45 @@
 from typing import Any
 
 from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import (
+    NO_REASONING,
     OpenAIChatProfile,
     OpenAIChatProvider,
-    OpenAIChatRequestPolicy,
     usage_int,
 )
-from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
-from .compat import build_deepseek_request_body
+from .compat import DEEPSEEK_REQUEST_POLICY, build_deepseek_request_body
 
-_PROFILE = OpenAIChatProfile(OpenAIChatRequestPolicy(provider_name="DEEPSEEK"))
+_PROFILE = OpenAIChatProfile(
+    DEEPSEEK_REQUEST_POLICY,
+    NO_REASONING,
+)
 
 
 class DeepSeekProvider(OpenAIChatProvider):
     """DeepSeek using ``https://api.deepseek.com`` Chat Completions."""
 
-    def __init__(self, config: ProviderConfig, *, rate_limiter: ProviderRateLimiter):
+    def __init__(
+        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+    ):
         super().__init__(
             config,
             profile=_PROFILE,
-            rate_limiter=rate_limiter,
+            admission=admission,
         )
 
     def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
+        self,
+        request: MessagesRequest,
+        *,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> dict:
         return build_deepseek_request_body(
             request,
-            thinking_enabled=self._is_thinking_enabled(request, thinking_enabled),
+            reasoning=reasoning,
         )
 
     def _anthropic_usage_fields(self, usage_info: Any) -> dict[str, int]:

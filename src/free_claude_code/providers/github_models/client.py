@@ -6,7 +6,8 @@ from typing import Any
 import httpx
 
 from free_claude_code.application.model_metadata import ProviderModelInfo
-from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.http import maybe_await_aclose
 from free_claude_code.providers.model_listing import (
@@ -14,27 +15,29 @@ from free_claude_code.providers.model_listing import (
     model_infos_from_ids,
 )
 from free_claude_code.providers.openai_chat import (
+    NO_REASONING,
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
-    build_openai_chat_request_body,
 )
-from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
 GITHUB_MODELS_CATALOG_URL = "https://models.github.ai/catalog/models"
 GITHUB_MODELS_API_VERSION = "2026-03-10"
 
 _REQUEST_POLICY = OpenAIChatRequestPolicy(
     provider_name="GITHUB_MODELS",
+    reasoning_replay=ReasoningReplayMode.THINK_TAGS,
 )
-_PROFILE = OpenAIChatProfile(_REQUEST_POLICY)
+_PROFILE = OpenAIChatProfile(_REQUEST_POLICY, NO_REASONING)
 _REQUIRED_MODEL_CAPABILITIES = frozenset({"streaming", "tool-calling"})
 
 
 class GitHubModelsProvider(OpenAIChatProvider):
     """GitHub Models OpenAI-compatible inference provider."""
 
-    def __init__(self, config: ProviderConfig, *, rate_limiter: ProviderRateLimiter):
+    def __init__(
+        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+    ):
         self._catalog_url = GITHUB_MODELS_CATALOG_URL
         self._model_list_client = httpx.AsyncClient(
             proxy=config.proxy or None,
@@ -48,7 +51,7 @@ class GitHubModelsProvider(OpenAIChatProvider):
         super().__init__(
             config,
             profile=_PROFILE,
-            rate_limiter=rate_limiter,
+            admission=admission,
             default_headers=_github_models_default_headers(),
         )
 
@@ -63,12 +66,21 @@ class GitHubModelsProvider(OpenAIChatProvider):
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """Return stream/tool-capable GitHub Models catalog ids."""
-        response = await self._model_list_client.get(
-            self._catalog_url,
-            headers=self._model_list_headers(),
-        )
+
+        async def request() -> httpx.Response:
+            response = await self._model_list_client.get(
+                self._catalog_url,
+                headers=self._model_list_headers(),
+            )
+            try:
+                response.raise_for_status()
+            except Exception:
+                await maybe_await_aclose(response)
+                raise
+            return response
+
+        response = await self._admission.run_with_retry(request)
         try:
-            response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError as exc:
@@ -80,15 +92,6 @@ class GitHubModelsProvider(OpenAIChatProvider):
             )
         finally:
             await maybe_await_aclose(response)
-
-    def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
-    ) -> dict:
-        return build_openai_chat_request_body(
-            request,
-            thinking_enabled=self._is_thinking_enabled(request, thinking_enabled),
-            policy=_REQUEST_POLICY,
-        )
 
     def _model_list_headers(self) -> dict[str, str]:
         return _github_models_api_headers(self._api_key)

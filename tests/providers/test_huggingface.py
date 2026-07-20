@@ -7,9 +7,10 @@ import pytest
 
 from free_claude_code.config.provider_catalog import HUGGINGFACE_DEFAULT_BASE
 from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
 from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import passthrough_rate_limiter, profiled_provider
+from tests.providers.support import immediate_admission, profiled_provider
 
 
 def make_request(**overrides):
@@ -23,14 +24,13 @@ def huggingface_config():
         base_url=HUGGINGFACE_DEFAULT_BASE,
         rate_limit=10,
         rate_window=60,
-        enable_thinking=True,
     )
 
 
 @pytest.fixture
 def huggingface_provider(huggingface_config):
     return profiled_provider(
-        "huggingface", huggingface_config, rate_limiter=passthrough_rate_limiter()
+        "huggingface", huggingface_config, admission=immediate_admission()
     )
 
 
@@ -43,7 +43,7 @@ def test_init_uses_default_base_url_and_api_key(huggingface_config):
         "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
     ) as mock_openai:
         provider = profiled_provider(
-            "huggingface", huggingface_config, rate_limiter=passthrough_rate_limiter()
+            "huggingface", huggingface_config, admission=immediate_admission()
         )
 
     assert provider._api_key == "test_hf_key"
@@ -56,7 +56,7 @@ def test_init_strips_trailing_slash(huggingface_config):
 
     with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
         provider = profiled_provider(
-            "huggingface", config, rate_limiter=passthrough_rate_limiter()
+            "huggingface", config, admission=immediate_admission()
         )
 
     assert provider._base_url == HUGGINGFACE_DEFAULT_BASE
@@ -93,6 +93,28 @@ def test_build_request_body_preserves_caller_extra_body(huggingface_provider):
     assert body["extra_body"] == extra_body
     assert body["extra_body"] is not extra_body
     assert body["extra_body"]["routing"] is not extra_body["routing"]
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    (
+        ReasoningPolicy.off(),
+        ReasoningPolicy.on(effort=ReasoningEffort.MAX),
+        ReasoningPolicy.on(budget_tokens=4096),
+    ),
+)
+def test_build_request_body_leaves_reasoning_control_to_selected_upstream(
+    huggingface_provider, reasoning
+):
+    body = huggingface_provider._build_request_body(
+        make_request(),
+        reasoning=reasoning,
+    )
+
+    assert "reasoning_effort" not in body
+    assert "reasoning" not in body
+    assert "thinking" not in body
+    assert "extra_body" not in body
 
 
 def test_build_request_body_does_not_replay_prior_thinking_blocks(

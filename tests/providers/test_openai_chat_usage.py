@@ -8,14 +8,17 @@ import openai
 import pytest
 from httpx import Request, Response
 
+from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.anthropic.stream_contracts import parse_sse_text
+from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import (
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
 )
+from free_claude_code.providers.openai_chat.reasoning import NO_REASONING
 from free_claude_code.providers.openai_chat.usage import (
     clone_without_stream_usage,
     is_stream_usage_rejection,
@@ -23,7 +26,7 @@ from free_claude_code.providers.openai_chat.usage import (
     usage_int,
 )
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import passthrough_rate_limiter
+from tests.providers.support import immediate_admission
 
 
 class _UsageTestProvider(OpenAIChatProvider):
@@ -36,13 +39,20 @@ class _UsageTestProvider(OpenAIChatProvider):
                 rate_window=60,
             ),
             profile=OpenAIChatProfile(
-                OpenAIChatRequestPolicy(provider_name="USAGE_TEST")
+                OpenAIChatRequestPolicy(
+                    provider_name="USAGE_TEST",
+                    reasoning_replay=ReasoningReplayMode.DISABLED,
+                ),
+                NO_REASONING,
             ),
-            rate_limiter=passthrough_rate_limiter(),
+            admission=immediate_admission(),
         )
 
     def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
+        self,
+        request: MessagesRequest,
+        *,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> dict:
         return {"model": request.model, "messages": [{"role": "user", "content": "x"}]}
 
@@ -206,7 +216,11 @@ async def test_openai_chat_stream_retries_without_usage_when_option_is_rejected(
     )
 
     with patch.object(provider._client.chat.completions, "create", create):
-        _stream_obj, used_body = await provider._create_stream(body)
+        _stream_obj, used_body, attempt = await provider._create_stream(
+            body,
+            provider._admission.new_retry_session(),
+        )
+        await attempt.aclose()
 
     assert create.await_count == 2
     assert create.await_args_list[0].kwargs["stream_options"] == {"include_usage": True}

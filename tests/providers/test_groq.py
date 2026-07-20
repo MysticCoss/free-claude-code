@@ -7,7 +7,7 @@ import pytest
 from free_claude_code.config.provider_catalog import GROQ_DEFAULT_BASE
 from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import passthrough_rate_limiter, profiled_provider
+from tests.providers.support import immediate_admission, profiled_provider
 
 
 def make_request(**overrides):
@@ -21,15 +21,12 @@ def groq_config():
         base_url=GROQ_DEFAULT_BASE,
         rate_limit=10,
         rate_window=60,
-        enable_thinking=True,
     )
 
 
 @pytest.fixture
 def groq_provider(groq_config):
-    return profiled_provider(
-        "groq", groq_config, rate_limiter=passthrough_rate_limiter()
-    )
+    return profiled_provider("groq", groq_config, admission=immediate_admission())
 
 
 def test_init(groq_config):
@@ -38,7 +35,7 @@ def test_init(groq_config):
         "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
     ) as mock_openai:
         provider = profiled_provider(
-            "groq", groq_config, rate_limiter=passthrough_rate_limiter()
+            "groq", groq_config, admission=immediate_admission()
         )
         assert provider._api_key == "test_groq_key"
         assert provider._base_url == GROQ_DEFAULT_BASE
@@ -67,9 +64,8 @@ def test_build_request_body_global_disable_blocks_reasoning_mapping():
             base_url=GROQ_DEFAULT_BASE,
             rate_limit=10,
             rate_window=60,
-            enable_thinking=False,
         ),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     req = make_request()
     body = provider._build_request_body(req)

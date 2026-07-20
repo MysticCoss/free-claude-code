@@ -37,6 +37,19 @@ _PROVIDER_FIELD_OVERRIDES: dict[str, dict[str, Any]] = {
             "ai-gateway.vercel.sh/v1."
         ),
     },
+    "AWS_BEARER_TOKEN_BEDROCK": {
+        "label": "Amazon Bedrock API Key",
+        "description": (
+            "Amazon Bedrock bearer API key for the region-specific Mantle "
+            "OpenAI-compatible endpoint."
+        ),
+    },
+    "BEDROCK_BASE_URL": {
+        "description": (
+            "Amazon Bedrock Mantle OpenAI base URL for the same region as the "
+            "API key and selected models."
+        ),
+    },
     "HUGGINGFACE_API_KEY": {
         "label": "Hugging Face API Key",
         "description": (
@@ -68,6 +81,13 @@ _PROVIDER_FIELD_OVERRIDES: dict[str, dict[str, Any]] = {
         "description": (
             "MiniMax API key for the OpenAI-compatible Chat Completions API at "
             "free_claude_code.api.minimax.io/v1."
+        ),
+    },
+    "KIMI_CODE_API_KEY": {
+        "label": "Kimi Code API Key",
+        "description": (
+            "Personal Kimi Code subscription key from kimi.com/code/console; "
+            "separate from KIMI_API_KEY credits on the Kimi API platform."
         ),
     },
     "CLOUDFLARE_API_TOKEN": {
@@ -123,7 +143,8 @@ def provider_field_specs() -> tuple[dict[str, Any], ...]:
     return (
         *_credential_field_specs(),
         *_cloudflare_account_field_specs(),
-        *_local_base_url_field_specs(),
+        *_vertex_field_specs(),
+        *_base_url_field_specs(),
         *_proxy_field_specs(),
     )
 
@@ -150,20 +171,21 @@ def _credential_field_specs() -> tuple[dict[str, Any], ...]:
     return tuple(specs)
 
 
-def _local_base_url_field_specs() -> tuple[dict[str, Any], ...]:
+def _base_url_field_specs() -> tuple[dict[str, Any], ...]:
     specs: list[dict[str, Any]] = []
     for descriptor in PROVIDER_CATALOG.values():
         if descriptor.base_url_attr is None:
             continue
-        specs.append(
-            {
-                "key": _settings_env_key(descriptor.base_url_attr),
-                "label": f"{descriptor.display_name} Base URL",
-                "section_id": "providers",
-                "settings_attr": descriptor.base_url_attr,
-                "default": descriptor.default_base_url or "",
-            }
-        )
+        key = _settings_env_key(descriptor.base_url_attr)
+        spec = {
+            "key": key,
+            "label": f"{descriptor.display_name} Base URL",
+            "section_id": "providers",
+            "settings_attr": descriptor.base_url_attr,
+            "default": descriptor.default_base_url or "",
+        }
+        spec.update(_PROVIDER_FIELD_OVERRIDES.get(key, {}))
+        specs.append(spec)
     return tuple(specs)
 
 
@@ -176,6 +198,32 @@ def _cloudflare_account_field_specs() -> tuple[dict[str, Any], ...]:
             "settings_attr": "cloudflare_account_id",
             "description": (
                 "Cloudflare account ID used to build the /accounts/{id}/ai/v1 endpoint."
+            ),
+        },
+    )
+
+
+def _vertex_field_specs() -> tuple[dict[str, Any], ...]:
+    return (
+        {
+            "key": "VERTEX_PROJECT_ID",
+            "label": "Google Cloud Project ID",
+            "section_id": "providers",
+            "settings_attr": "vertex_project_id",
+            "description": (
+                "Google Cloud project used for Vertex AI. Authentication uses "
+                "Application Default Credentials (ADC)."
+            ),
+        },
+        {
+            "key": "VERTEX_LOCATION",
+            "label": "Vertex AI Location",
+            "section_id": "providers",
+            "settings_attr": "vertex_location",
+            "default": "global",
+            "description": (
+                "Use global for the global Vertex AI endpoint or a region such as "
+                "us-central1."
             ),
         },
     )

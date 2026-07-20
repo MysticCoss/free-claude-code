@@ -8,6 +8,11 @@ from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.core.anthropic.stream_contracts import parse_sse_text
 from free_claude_code.core.anthropic.streaming import format_sse_event
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.reasoning import (
+    ReasoningControl,
+    ReasoningEffort,
+    ReasoningPolicy,
+)
 from tests.api.support import create_test_app
 
 
@@ -103,6 +108,34 @@ def test_create_response_stream_routes_through_provider(
     assert routed.messages[0].content == "Hello"
     assert routed.max_tokens == 32
     assert provider.stream_kwargs[0]["request_id"] == response.headers["request-id"]
+
+
+def test_create_response_stream_preserves_output_limit_as_incomplete() -> None:
+    provider = FakeProvider(
+        _anthropic_text_stream("partial output", stop_reason="max_tokens")
+    )
+    app = create_test_app()
+    with (
+        patch("free_claude_code.api.routes.resolve_provider", return_value=provider),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "nvidia_nim/test-model",
+                "input": "Keep working",
+                "max_output_tokens": 32,
+            },
+        )
+
+    assert response.status_code == 200
+    events = parse_sse_text(response.text)
+    assert events[-1].event == "response.incomplete"
+    incomplete = events[-1].data["response"]
+    assert incomplete["id"] == events[0].data["response"]["id"]
+    assert incomplete["status"] == "incomplete"
+    assert incomplete["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert incomplete["output"][0]["content"][0]["text"] == "partial output"
 
 
 def test_create_response_preflight_rejection_stays_an_ordinary_http_error() -> None:
@@ -590,16 +623,21 @@ def test_create_response_quarantines_malformed_prior_function_call() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reasoning", "expected_type", "expected_enabled"),
+    ("reasoning", "expected_policy"),
     [
-        ({"effort": "none"}, "disabled", False),
-        ({"effort": "low"}, "enabled", True),
+        ({"effort": "none"}, ReasoningPolicy.off()),
+        (
+            {"effort": "low"},
+            ReasoningPolicy(
+                control=ReasoningControl.DEFAULT,
+                effort=ReasoningEffort.LOW,
+            ),
+        ),
     ],
 )
-def test_create_response_maps_reasoning_effort_to_thinking_request(
+def test_create_response_preserves_and_resolves_reasoning_effort(
     reasoning: dict[str, str],
-    expected_type: str,
-    expected_enabled: bool,
+    expected_policy: ReasoningPolicy,
 ) -> None:
     provider = FakeProvider(_anthropic_text_stream("done"))
     app = create_test_app()
@@ -618,9 +656,11 @@ def test_create_response_maps_reasoning_effort_to_thinking_request(
         )
 
     assert response.status_code == 200
-    thinking = provider.requests[0].thinking
-    assert thinking.type == expected_type
-    assert thinking.enabled is expected_enabled
+    routed = provider.requests[0]
+    assert routed.thinking is None
+    assert routed.output_config == reasoning
+    assert provider.stream_kwargs[0]["reasoning"] == expected_policy
+    assert provider.preflight_stream.call_args.kwargs["reasoning"] == expected_policy
 
 
 def test_create_response_maps_redacted_thinking_to_encrypted_reasoning() -> None:
@@ -673,7 +713,7 @@ def test_create_response_unsupported_tool_returns_openai_error(
     assert "Unsupported Responses tool type" in payload["error"]["message"]
 
 
-def _anthropic_text_stream(text: str) -> list[str]:
+def _anthropic_text_stream(text: str, *, stop_reason: str = "end_turn") -> list[str]:
     return [
         format_sse_event("message_start", {"type": "message_start", "message": {}}),
         format_sse_event(
@@ -700,7 +740,7 @@ def _anthropic_text_stream(text: str) -> list[str]:
             "message_delta",
             {
                 "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
                 "usage": {"input_tokens": 3, "output_tokens": 4},
             },
         ),
