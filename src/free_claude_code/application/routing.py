@@ -74,8 +74,8 @@ class ResolvedModel:
 class RoutedMessagesRequest:
     request: MessagesRequest
     resolved: ResolvedModel
-    is_compaction_override: bool = False
     reasoning: ReasoningPolicy
+    is_compaction_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +147,7 @@ class ModelRouter:
             provider_id=provider_id,
             provider_model=_strip_1m_suffix(parse_model_name(ref)),
             provider_model_ref=ref,
-            thinking_enabled=self._settings.enable_model_thinking,
+            reasoning_preference=self._settings.reasoning_policy,
         )
 
     @staticmethod
@@ -224,6 +224,10 @@ class ModelRouter:
                 return RoutedMessagesRequest(
                     request=routed,
                     resolved=resolved,
+                    reasoning=resolve_reasoning_policy(
+                        routed,
+                        resolved.reasoning_preference,
+                    ),
                     is_compaction_override=True,
                 )
         resolved = self.resolve(request.model)
