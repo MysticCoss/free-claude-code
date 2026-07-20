@@ -31,6 +31,9 @@ def _clear_process_config(monkeypatch) -> None:
         "NVIDIA_NIM_API_KEY",
         "HUGGINGFACE_API_KEY",
         "OPENROUTER_API_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "BEDROCK_BASE_URL",
+        "BEDROCK_PROXY",
         "OLLAMA_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "TELEGRAM_PROXY_URL",
@@ -59,6 +62,103 @@ def test_admin_page_is_loopback_only(monkeypatch, tmp_path):
     assert _local_client(app).get("/admin").status_code == 200
     remote_client = TestClient(app, client=("203.0.113.10", 50000))
     assert remote_client.get("/admin").status_code == 403
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/admin",
+        "/admin/assets/admin.css",
+        "/admin/assets/admin.js",
+        "/admin/api/config",
+    ),
+)
+def test_admin_responses_are_never_cached(monkeypatch, tmp_path, path):
+    _set_home(monkeypatch, tmp_path)
+    response = _local_client(create_test_app()).get(path)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("path", "client_host", "expected_status"),
+    (
+        ("/admin", "203.0.113.10", 403),
+        ("/admin/assets/missing.js", "127.0.0.1", 404),
+    ),
+)
+def test_admin_http_errors_are_never_cached(
+    monkeypatch,
+    tmp_path,
+    path,
+    client_host,
+    expected_status,
+):
+    _set_home(monkeypatch, tmp_path)
+    client = TestClient(create_test_app(), client=(client_host, 50000))
+
+    response = client.get(path)
+
+    assert response.status_code == expected_status
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_validation_errors_are_never_cached(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/validate",
+        content="{",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_unexpected_errors_are_never_cached(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    client = TestClient(
+        create_test_app(),
+        client=("127.0.0.1", 50000),
+        raise_server_exceptions=False,
+    )
+
+    with patch(
+        "free_claude_code.api.admin_routes.load_config_response",
+        side_effect=RuntimeError("test error"),
+    ):
+        response = client.get("/admin/api/config")
+
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_admin_cache_policy_does_not_match_similar_public_paths(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+
+    response = _local_client(create_test_app()).get("/administrator")
+
+    assert response.status_code == 404
+    assert "cache-control" not in response.headers
+
+
+def test_admin_api_fetches_bypass_browser_cache():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'cache: "no-store"' in script
+
+
+def test_admin_provider_cards_support_non_key_configuration():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"missing_config"' in script
+    assert ": provider.configuration;" in script
 
 
 def test_admin_page_no_longer_renders_generated_env_panel(monkeypatch, tmp_path):
@@ -107,14 +207,48 @@ def test_admin_static_hides_managed_source_label():
     assert "sourceEl.textContent = source" in script
 
 
-def test_admin_static_loads_searchable_model_options_and_maps_none_to_unset():
+def test_admin_static_places_reasoning_fields_in_model_config():
     script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'sections: ["models", "reasoning", "web_tools"]' in script
+    assert 'sections: ["models", "thinking", "web_tools"]' not in script
+
+
+def test_admin_static_model_combobox_owns_dropdown_and_search_behavior():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+    styles = Path("src/free_claude_code/api/admin_static/admin.css").read_text(
         encoding="utf-8"
     )
 
     assert 'api("/admin/api/models" + (refresh ? "/refresh" : "")' in script
     assert 'field.type === "model" || field.type === "optional_model"' in script
-    assert '"optional-model-options", ["None", ...state.modelOptions]' in script
+    assert 'input.setAttribute("role", "combobox")' in script
+    assert 'listbox.setAttribute("role", "listbox")' in script
+    assert 'toggle.className = "model-combobox-toggle"' in script
+    assert "class ModelCombobox" in script
+    assert 'input.addEventListener("click", () => this.open())' in script
+    assert "value.toLocaleLowerCase().includes(normalizedQuery)" in script
+    assert 'event.key === "ArrowDown" || event.key === "ArrowUp"' in script
+    assert "this.setActive(this.visibleOptions.length - 1)" in script
+    assert 'event.key === "Enter"' in script
+    assert 'event.key === "Escape"' in script
+    assert 'document.createElement("datalist")' not in script
+    assert ".model-combobox-list" in styles
+    assert ".model-combobox-option.active" in styles
+    assert styles.count("background-image: var(--dropdown-chevron)") == 2
+
+
+def test_admin_static_model_combobox_preserves_custom_slugs_and_none_semantics():
+    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert '? ["None", ...state.modelOptions]' in script
+    assert "You can still enter a custom slug." in script
     assert 'input.dataset.fieldType === "optional_model"' in script
     assert 'return "";' in script
     assert "await hydrateModelOptions();" in script
@@ -134,9 +268,11 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
     body = response.json()
     keys = {field["key"] for field in body["fields"]}
     assert "MODEL_FABLE" in keys
-    assert "ENABLE_FABLE_THINKING" in keys
+    assert "REASONING_FABLE" in keys
     assert "ANTHROPIC_AUTH_TOKEN" in keys
     assert "OPENROUTER_API_KEY" in keys
+    assert "AWS_BEARER_TOKEN_BEDROCK" in keys
+    assert "BEDROCK_BASE_URL" in keys
     assert "FIREWORKS_API_KEY" in keys
     assert "CLOUDFLARE_API_TOKEN" in keys
     assert "CLOUDFLARE_ACCOUNT_ID" in keys
@@ -181,6 +317,28 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
         "MODEL_SONNET": "optional_model",
         "MODEL_HAIKU": "optional_model",
     }
+    reasoning_policy = next(
+        field for field in body["fields"] if field["key"] == "REASONING_POLICY"
+    )
+    assert reasoning_policy["section"] == "reasoning"
+    assert reasoning_policy["type"] == "select"
+    assert reasoning_policy["value"] == "client"
+    assert reasoning_policy["options"] == [
+        {"value": "off", "label": "Off"},
+        {"value": "client", "label": "From client"},
+        {"value": "low", "label": "Low"},
+        {"value": "medium", "label": "Medium"},
+        {"value": "high", "label": "High"},
+        {"value": "xhigh", "label": "X-High"},
+        {"value": "max", "label": "Max"},
+    ]
+    route_reasoning = next(
+        field for field in body["fields"] if field["key"] == "REASONING_FABLE"
+    )
+    assert route_reasoning["options"] == [
+        {"value": "inherit", "label": "Inherit"},
+        *reasoning_policy["options"],
+    ]
     restart_required = {
         field["key"] for field in body["fields"] if field["restart_required"] is True
     }
@@ -505,6 +663,33 @@ def test_admin_apply_writes_cerebras_key_and_masks_preview(monkeypatch, tmp_path
     text = env_file.read_text(encoding="utf-8")
     assert "MODEL=cerebras/llama3.1-8b" in text
     assert "CEREBRAS_API_KEY=cb-secret" in text
+
+
+def test_admin_apply_writes_bedrock_region_config_and_masks_key(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={
+            "values": {
+                "MODEL": "bedrock/openai.gpt-oss-120b",
+                "AWS_BEARER_TOKEN_BEDROCK": "bedrock-secret",
+                "BEDROCK_BASE_URL": ("https://bedrock-mantle.us-west-2.api.aws/v1"),
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is True
+    assert "AWS_BEARER_TOKEN_BEDROCK=********" in body["env_preview"]
+    env_file = tmp_path / ".fcc" / ".env"
+    text = env_file.read_text(encoding="utf-8")
+    assert "MODEL=bedrock/openai.gpt-oss-120b" in text
+    assert "AWS_BEARER_TOKEN_BEDROCK=bedrock-secret" in text
+    assert "BEDROCK_BASE_URL=https://bedrock-mantle.us-west-2.api.aws/v1" in text
 
 
 def test_admin_apply_writes_cloudflare_fields_and_masks_preview(monkeypatch, tmp_path):

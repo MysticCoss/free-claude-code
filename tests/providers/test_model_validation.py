@@ -16,6 +16,7 @@ from free_claude_code.config.provider_catalog import (
     WAFER_DEFAULT_BASE,
 )
 from free_claude_code.config.settings import Settings
+from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.deepseek import DeepSeekProvider
 from free_claude_code.providers.model_listing import ModelListResponseError
@@ -25,7 +26,7 @@ from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from free_claude_code.providers.runtime import ProviderRuntime
 from free_claude_code.providers.runtime.model_cache import ProviderModelCache
 from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
-from tests.providers.support import passthrough_rate_limiter, profiled_provider
+from tests.providers.support import immediate_admission, profiled_provider
 
 
 def _settings(
@@ -41,6 +42,7 @@ def _settings(
     wafer_api_key: str = "",
     opencode_api_key: str = "",
     zai_api_key: str = "",
+    vertex_project_id: str = "",
 ) -> Settings:
     return Settings.model_construct(
         model=model,
@@ -54,6 +56,7 @@ def _settings(
         wafer_api_key=wafer_api_key,
         opencode_api_key=opencode_api_key,
         zai_api_key=zai_api_key,
+        vertex_project_id=vertex_project_id,
         log_api_error_tracebacks=False,
     )
 
@@ -74,7 +77,7 @@ async def test_nim_lists_openai_compatible_model_ids() -> None:
     config = ProviderConfig(api_key="test-key", base_url=NVIDIA_NIM_DEFAULT_BASE)
     with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
         provider = NvidiaNimProvider(
-            config, nim_settings=NimSettings(), rate_limiter=passthrough_rate_limiter()
+            config, nim_settings=NimSettings(), admission=immediate_admission()
         )
 
     with patch.object(
@@ -93,12 +96,12 @@ async def test_nim_lists_openai_compatible_model_ids() -> None:
         profiled_provider(
             "llamacpp",
             ProviderConfig(api_key="llamacpp", base_url="http://localhost:8080/v1"),
-            rate_limiter=passthrough_rate_limiter(),
+            admission=immediate_admission(),
         ),
         profiled_provider(
             "ollama",
             ProviderConfig(api_key="ollama", base_url="http://localhost:11434"),
-            rate_limiter=passthrough_rate_limiter(),
+            admission=immediate_admission(),
         ),
     ],
 )
@@ -120,7 +123,7 @@ async def test_local_openai_chat_providers_list_model_ids(
 async def test_deepseek_lists_models_from_root_endpoint() -> None:
     provider = DeepSeekProvider(
         ProviderConfig(api_key="deepseek-key", base_url=DEEPSEEK_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with patch.object(
         provider._client.models,
@@ -138,7 +141,7 @@ async def test_wafer_lists_models_from_default_models_endpoint() -> None:
     provider = profiled_provider(
         "wafer",
         ProviderConfig(api_key="wafer-key", base_url=WAFER_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with patch.object(
         provider._client.models,
@@ -155,7 +158,7 @@ async def test_wafer_lists_models_from_default_models_endpoint() -> None:
 async def test_openrouter_lists_only_tool_capable_models() -> None:
     provider = OpenRouterProvider(
         ProviderConfig(api_key="open-router-key", base_url=OPENROUTER_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with patch.object(
         provider._client.models,
@@ -190,7 +193,7 @@ async def test_openrouter_lists_only_tool_capable_models() -> None:
 async def test_openrouter_lists_tool_metadata_with_thinking_support() -> None:
     provider = OpenRouterProvider(
         ProviderConfig(api_key="open-router-key", base_url=OPENROUTER_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with patch.object(
         provider._client.models,
@@ -231,7 +234,7 @@ async def test_openrouter_lists_tool_metadata_with_thinking_support() -> None:
 async def test_openrouter_lists_empty_set_when_no_tool_capable_models() -> None:
     provider = OpenRouterProvider(
         ProviderConfig(api_key="open-router-key", base_url=OPENROUTER_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with patch.object(
         provider._client.models,
@@ -251,7 +254,7 @@ async def test_openrouter_lists_empty_set_when_no_tool_capable_models() -> None:
 async def test_openrouter_model_metadata_rejects_malformed_ids() -> None:
     provider = OpenRouterProvider(
         ProviderConfig(api_key="open-router-key", base_url=OPENROUTER_DEFAULT_BASE),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with (
         patch.object(
@@ -272,7 +275,7 @@ async def test_model_listing_rejects_malformed_payload() -> None:
     provider = profiled_provider(
         "llamacpp",
         ProviderConfig(api_key="llamacpp", base_url="http://localhost:8080/v1"),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with (
         patch.object(
@@ -291,7 +294,7 @@ async def test_model_listing_propagates_upstream_errors() -> None:
     provider = profiled_provider(
         "llamacpp",
         ProviderConfig(api_key="llamacpp", base_url="http://localhost:8080/v1"),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
     with (
         patch.object(
@@ -326,7 +329,10 @@ class FakeProvider(BaseProvider):
         self.cleaned = False
 
     def preflight_stream(
-        self, request: Any, *, thinking_enabled: bool | None = None
+        self,
+        request: Any,
+        *,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> None:
         return None
 
@@ -359,7 +365,7 @@ class FakeProvider(BaseProvider):
         input_tokens: int = 0,
         *,
         request_id: str | None = None,
-        thinking_enabled: bool | None = None,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> AsyncIterator[str]:
         if False:
             yield ""
@@ -479,6 +485,28 @@ async def test_runtime_refresh_model_list_cache_uses_configured_remote_keys_and_
         "lmstudio": frozenset({"local-qwen"}),
     }
     assert result.refreshed_provider_ids == ("open_router", "lmstudio")
+    assert result.failed_provider_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_refresh_model_list_cache_treats_vertex_project_as_configuration() -> (
+    None
+):
+    settings = _settings(
+        model="nvidia_nim/nim-model",
+        vertex_project_id="vertex-project",
+    )
+    runtime = _manager(
+        settings,
+        {"vertex": FakeProvider(frozenset({"google/gemini-3.5-flash"}))},
+    )
+
+    result = await runtime.refresh_model_list_cache()
+
+    assert runtime.cached_model_ids() == {
+        "vertex": frozenset({"google/gemini-3.5-flash"})
+    }
+    assert result.refreshed_provider_ids == ("vertex",)
     assert result.failed_provider_ids == ()
 
 

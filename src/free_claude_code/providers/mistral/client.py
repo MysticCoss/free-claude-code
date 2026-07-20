@@ -4,15 +4,18 @@ from typing import Any
 
 from loguru import logger
 
+from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import (
+    NO_REASONING,
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
     build_openai_chat_request_body,
 )
-from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
 from .reasoning import (
     apply_mistral_reasoning_request_shape,
@@ -21,34 +24,37 @@ from .reasoning import (
     normalize_mistral_stream,
 )
 
-_REQUEST_POLICY = OpenAIChatRequestPolicy(provider_name="MISTRAL")
-_PROFILE = OpenAIChatProfile(_REQUEST_POLICY)
+_REQUEST_POLICY = OpenAIChatRequestPolicy(
+    provider_name="MISTRAL",
+    reasoning_replay=ReasoningReplayMode.REASONING_CONTENT,
+)
+_PROFILE = OpenAIChatProfile(_REQUEST_POLICY, NO_REASONING)
 
 
 class MistralProvider(OpenAIChatProvider):
     """Mistral API using ``https://api.mistral.ai/v1/chat/completions``."""
 
-    def __init__(self, config: ProviderConfig, *, rate_limiter: ProviderRateLimiter):
+    def __init__(
+        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+    ):
         super().__init__(
             config,
             profile=_PROFILE,
-            rate_limiter=rate_limiter,
+            admission=admission,
         )
 
     def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
+        self,
+        request: MessagesRequest,
+        *,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> dict:
-        effective_thinking_enabled = self._is_thinking_enabled(
-            request, thinking_enabled
-        )
         body = build_openai_chat_request_body(
             request,
-            thinking_enabled=effective_thinking_enabled,
+            reasoning=reasoning,
             policy=_REQUEST_POLICY,
         )
-        apply_mistral_reasoning_request_shape(
-            body, thinking_enabled=effective_thinking_enabled
-        )
+        apply_mistral_reasoning_request_shape(body, reasoning=reasoning)
         return body
 
     def _get_retry_request_body(self, error: Exception, body: dict) -> dict | None:
@@ -63,6 +69,5 @@ class MistralProvider(OpenAIChatProvider):
         )
         return retry_body
 
-    async def _create_stream(self, body: dict) -> tuple[Any, dict]:
-        stream, final_body = await super()._create_stream(body)
-        return normalize_mistral_stream(stream), final_body
+    def _normalize_stream(self, stream: Any) -> Any:
+        return normalize_mistral_stream(stream)

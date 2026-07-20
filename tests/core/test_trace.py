@@ -56,9 +56,10 @@ def _json_log_rows(log_file: str) -> list[dict]:
 
 def test_trace_payload_merged_into_json_line(tmp_path) -> None:
     log_file = str(tmp_path / "t.log")
-    configure_logging(log_file, force=True)
+    configure_logging(log_file, force=True, level="DEBUG")
     trace_event(stage="s", event="e.v1", source="unit", hello="world", n=42)
     row = _json_log_rows(log_file)[-1]
+    assert row["level"] == "DEBUG"
     assert row["trace"] is True
     assert row["stage"] == "s"
     assert row["event"] == "e.v1"
@@ -66,6 +67,17 @@ def test_trace_payload_merged_into_json_line(tmp_path) -> None:
     assert row["hello"] == "world"
     assert row["n"] == 42
     assert TRACE_PAYLOAD_BINDING == "trace_payload"
+
+
+def test_trace_payload_excluded_from_default_info_logs(tmp_path) -> None:
+    log_file = str(tmp_path / "default.log")
+    configure_logging(log_file, force=True)
+
+    trace_event(stage="s", event="hidden", source="unit")
+    logger.info("visible lifecycle event")
+
+    rows = _json_log_rows(log_file)
+    assert [row["message"] for row in rows] == ["visible lifecycle event"]
 
 
 def test_sanitize_masks_nested_api_key_strings() -> None:
@@ -82,7 +94,7 @@ def test_sanitize_masks_nested_api_key_strings() -> None:
 @pytest.mark.asyncio
 async def test_traced_async_stream_logs_completion(tmp_path) -> None:
     log_file = str(tmp_path / "complete.log")
-    configure_logging(log_file, force=True)
+    configure_logging(log_file, force=True, level="DEBUG")
 
     source = _CloseTrackingIterator(["hello", " world"])
 
@@ -111,7 +123,7 @@ async def test_traced_async_stream_logs_completion(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_traced_async_stream_logs_real_exception(tmp_path) -> None:
     log_file = str(tmp_path / "error.log")
-    configure_logging(log_file, force=True)
+    configure_logging(log_file, force=True, level="DEBUG")
 
     source = _CloseTrackingIterator(
         ["before"],
@@ -151,7 +163,7 @@ async def test_traced_async_stream_logs_real_exception(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_traced_async_stream_closes_quietly_on_generator_exit(tmp_path) -> None:
     log_file = str(tmp_path / "generator_exit.log")
-    configure_logging(log_file, force=True)
+    configure_logging(log_file, force=True, level="DEBUG")
 
     source = _CloseTrackingIterator(["first", "second"])
 

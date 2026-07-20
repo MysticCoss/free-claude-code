@@ -10,7 +10,8 @@ import httpx
 from free_claude_code.application.errors import ApplicationUnavailableError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.provider_catalog import CLOUDFLARE_AI_REST_ROOT
-from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.http import maybe_await_aclose
 from free_claude_code.providers.model_listing import (
@@ -19,19 +20,21 @@ from free_claude_code.providers.model_listing import (
     model_infos_from_ids,
 )
 from free_claude_code.providers.openai_chat import (
+    ChatTemplateReasoning,
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
-    build_openai_chat_request_body,
+    validate_extra_body_does_not_override_canonical_fields,
 )
-from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
 _REQUEST_POLICY = OpenAIChatRequestPolicy(
     provider_name="CLOUDFLARE",
+    reasoning_replay=ReasoningReplayMode.REASONING_CONTENT,
     include_extra_body=True,
+    extra_body_validator=validate_extra_body_does_not_override_canonical_fields,
     max_tokens_field="max_completion_tokens",
 )
-_PROFILE = OpenAIChatProfile(_REQUEST_POLICY)
+_PROFILE = OpenAIChatProfile(_REQUEST_POLICY, ChatTemplateReasoning())
 
 
 def cloudflare_ai_base_url(api_root: str | None, account_id: str) -> str:
@@ -67,7 +70,7 @@ class CloudflareProvider(OpenAIChatProvider):
         config: ProviderConfig,
         *,
         account_id: str,
-        rate_limiter: ProviderRateLimiter,
+        admission: ProviderAdmissionController,
     ):
         base_url = cloudflare_ai_base_url(config.base_url, account_id)
         self._model_search_url = _cloudflare_model_search_url(
@@ -85,7 +88,7 @@ class CloudflareProvider(OpenAIChatProvider):
         super().__init__(
             replace(config, base_url=base_url),
             profile=_PROFILE,
-            rate_limiter=rate_limiter,
+            admission=admission,
         )
 
     async def cleanup(self) -> None:
@@ -99,13 +102,22 @@ class CloudflareProvider(OpenAIChatProvider):
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """Return Cloudflare Workers AI model ids from account model search."""
-        response = await self._model_list_client.get(
-            self._model_search_url,
-            params={"format": "openrouter"},
-            headers=self._model_list_headers(),
-        )
+
+        async def request() -> httpx.Response:
+            response = await self._model_list_client.get(
+                self._model_search_url,
+                params={"format": "openrouter"},
+                headers=self._model_list_headers(),
+            )
+            try:
+                response.raise_for_status()
+            except Exception:
+                await maybe_await_aclose(response)
+                raise
+            return response
+
+        response = await self._admission.run_with_retry(request)
         try:
-            response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError as exc:
@@ -118,40 +130,18 @@ class CloudflareProvider(OpenAIChatProvider):
         finally:
             await maybe_await_aclose(response)
 
-    def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
-    ) -> dict:
-        return build_openai_chat_request_body(
-            request,
-            thinking_enabled=self._is_thinking_enabled(request, thinking_enabled),
-            policy=_REQUEST_POLICY,
-            postprocessors=(_apply_cloudflare_request_quirks,),
-        )
-
     def _handle_extra_reasoning(
-        self, delta: Any, ledger: Any, *, thinking_enabled: bool
+        self, delta: Any, ledger: Any, *, output_reasoning: bool
     ) -> Iterator[str]:
         """Map Cloudflare's ``reasoning`` delta field to Anthropic thinking."""
         reasoning = _cloudflare_reasoning(delta)
-        if not thinking_enabled or not reasoning:
+        if not output_reasoning or not reasoning:
             return
         yield from ledger.ensure_thinking_block()
         yield ledger.emit_thinking_delta(reasoning)
 
     def _model_list_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"}
-
-
-def _apply_cloudflare_request_quirks(
-    body: dict[str, Any], _request: MessagesRequest, thinking_enabled: bool
-) -> None:
-    """Attach Cloudflare Workers AI chat-template thinking control."""
-    extra_body = body.setdefault("extra_body", {})
-    if not isinstance(extra_body, dict):
-        return
-    chat_template_kwargs = extra_body.setdefault("chat_template_kwargs", {})
-    if isinstance(chat_template_kwargs, dict):
-        chat_template_kwargs.setdefault("thinking", thinking_enabled)
 
 
 def _cloudflare_reasoning(delta: Any) -> str | None:

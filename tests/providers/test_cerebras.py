@@ -7,11 +7,48 @@ import pytest
 from free_claude_code.config.provider_catalog import CEREBRAS_DEFAULT_BASE
 from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import passthrough_rate_limiter, profiled_provider
+from tests.providers.support import (
+    REASONING_OFF,
+    immediate_admission,
+    profiled_provider,
+    reasoning_for,
+)
 
 
-def make_request(**overrides):
-    return make_messages_request("llama3.1-8b", **overrides)
+def make_request(model="llama3.1-8b", **overrides):
+    return make_messages_request(model, **overrides)
+
+
+def make_reasoning_tool_history_request():
+    return make_request(
+        "zai-glm-4.7",
+        messages=[
+            {"role": "user", "content": "Inspect the file."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "I need to read it first."},
+                    {"type": "text", "text": "I will inspect the file."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "read_file",
+                        "input": {"path": "example.py"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "print('hello')",
+                    }
+                ],
+            },
+        ],
+    )
 
 
 @pytest.fixture
@@ -21,14 +58,13 @@ def cerebras_config():
         base_url=CEREBRAS_DEFAULT_BASE,
         rate_limit=10,
         rate_window=60,
-        enable_thinking=True,
     )
 
 
 @pytest.fixture
 def cerebras_provider(cerebras_config):
     return profiled_provider(
-        "cerebras", cerebras_config, rate_limiter=passthrough_rate_limiter()
+        "cerebras", cerebras_config, admission=immediate_admission()
     )
 
 
@@ -38,7 +74,7 @@ def test_init(cerebras_config):
         "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
     ) as mock_openai:
         provider = profiled_provider(
-            "cerebras", cerebras_config, rate_limiter=passthrough_rate_limiter()
+            "cerebras", cerebras_config, admission=immediate_admission()
         )
         assert provider._api_key == "test_cerebras_key"
         assert provider._base_url == CEREBRAS_DEFAULT_BASE
@@ -52,14 +88,35 @@ def test_default_base_url_constant():
 def test_build_request_body_basic(cerebras_provider):
     """Basic request body conversion attaches system message from Claude request."""
     req = make_request()
-    body = cerebras_provider._build_request_body(req)
+    body = cerebras_provider._build_request_body(req, reasoning=reasoning_for(req))
 
     assert body["model"] == "llama3.1-8b"
     assert body["messages"][0]["role"] == "system"
     assert "max_completion_tokens" in body
 
 
-def test_build_request_body_global_disable_blocks_reasoning_mapping():
+def test_build_request_body_replays_reasoning_as_tagged_content(cerebras_provider):
+    body = cerebras_provider._build_request_body(make_reasoning_tool_history_request())
+
+    assistant = next(
+        message for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["content"] == (
+        "<think>\nI need to read it first.\n</think>\n\nI will inspect the file."
+    )
+    assert assistant["tool_calls"][0]["id"] == "toolu_1"
+    assert body["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "toolu_1",
+        "content": "print('hello')",
+    }
+    assert all(
+        "reasoning_content" not in message and "reasoning" not in message
+        for message in body["messages"]
+    )
+
+
+def test_replay_is_independent_of_current_turn_reasoning_control():
     provider = profiled_provider(
         "cerebras",
         ProviderConfig(
@@ -67,15 +124,21 @@ def test_build_request_body_global_disable_blocks_reasoning_mapping():
             base_url=CEREBRAS_DEFAULT_BASE,
             rate_limit=10,
             rate_window=60,
-            enable_thinking=False,
         ),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
-    req = make_request()
-    body = provider._build_request_body(req)
+    body = provider._build_request_body(
+        make_reasoning_tool_history_request(), reasoning=REASONING_OFF
+    )
 
-    roles = [m.get("role") for m in body.get("messages", [])]
-    assert "assistant_reasoning_content" not in roles
+    assistant = next(
+        message for message in body["messages"] if message["role"] == "assistant"
+    )
+    assert assistant["content"] == (
+        "<think>\nI need to read it first.\n</think>\n\nI will inspect the file."
+    )
+    assert assistant["tool_calls"][0]["id"] == "toolu_1"
+    assert body["reasoning_effort"] == "none"
 
 
 def test_build_request_body_remaps_max_tokens_preserves_message_name(cerebras_provider):
@@ -89,7 +152,7 @@ def test_build_request_body_remaps_max_tokens_preserves_message_name(cerebras_pr
             "max_tokens": 42,
         }
         req = make_request()
-        body = cerebras_provider._build_request_body(req)
+        body = cerebras_provider._build_request_body(req, reasoning=reasoning_for(req))
 
     assert body["messages"][0].get("name") == "alice"
     assert body.get("max_tokens") is None
@@ -115,7 +178,7 @@ def test_build_request_body_prefers_existing_max_completion_tokens(cerebras_prov
 def test_build_request_body_preserves_caller_extra_body(cerebras_provider):
     req = make_request(extra_body={"clear_thinking": False})
 
-    body = cerebras_provider._build_request_body(req)
+    body = cerebras_provider._build_request_body(req, reasoning=reasoning_for(req))
 
     eb = body.get("extra_body")
     assert isinstance(eb, dict)
@@ -156,8 +219,8 @@ async def test_stream_response_text(cerebras_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning_content(cerebras_provider):
-    """reasoning_content deltas are emitted as thinking blocks."""
+async def test_stream_response_reasoning(cerebras_provider):
+    """Cerebras reasoning deltas are emitted as thinking blocks."""
     req = make_request()
 
     mock_chunk = MagicMock()
@@ -165,7 +228,7 @@ async def test_stream_response_reasoning_content(cerebras_provider):
         MagicMock(
             delta=MagicMock(
                 content=None,
-                reasoning_content="Thinking...",
+                reasoning="Thinking...",
                 tool_calls=None,
             ),
             finish_reason="stop",

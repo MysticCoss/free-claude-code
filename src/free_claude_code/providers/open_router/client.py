@@ -6,8 +6,11 @@ from typing import Any
 
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
-from free_claude_code.core.anthropic.models import MessagesRequest, ThinkingConfig
+from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.anthropic.streaming import AnthropicStreamLedger
+from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
+from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.model_listing import (
     extract_openrouter_tool_model_ids,
@@ -17,91 +20,63 @@ from free_claude_code.providers.openai_chat import (
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
-    build_openai_chat_request_body,
+    ReasoningObject,
     validate_extra_body_does_not_override_canonical_fields,
 )
-from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
 _REQUEST_POLICY = OpenAIChatRequestPolicy(
     provider_name="OPENROUTER",
+    reasoning_replay=ReasoningReplayMode.REASONING_CONTENT,
     include_extra_body=True,
     extra_body_validator=validate_extra_body_does_not_override_canonical_fields,
     default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
 )
-_PROFILE = OpenAIChatProfile(_REQUEST_POLICY)
 
 
 class OpenRouterProvider(OpenAIChatProvider):
     """OpenRouter provider using the OpenAI-compatible Chat Completions API."""
 
-    def __init__(self, config: ProviderConfig, *, rate_limiter: ProviderRateLimiter):
+    def __init__(
+        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+    ):
         super().__init__(
             config,
             profile=_PROFILE,
-            rate_limiter=rate_limiter,
-        )
-
-    def _build_request_body(
-        self, request: MessagesRequest, thinking_enabled: bool | None = None
-    ) -> dict:
-        effective_thinking_enabled = self._is_thinking_enabled(
-            request, thinking_enabled
-        )
-        return build_openai_chat_request_body(
-            request,
-            thinking_enabled=effective_thinking_enabled,
-            policy=_REQUEST_POLICY,
-            postprocessors=(
-                _apply_openrouter_reasoning_policy,
-                _apply_openrouter_reasoning_details_replay,
-            ),
+            admission=admission,
         )
 
     async def list_model_ids(self) -> frozenset[str]:
         """Only advertise OpenRouter models that can run Claude Code tools."""
-        payload = await self._client.models.list()
+        payload = await self._list_models_payload()
         return extract_openrouter_tool_model_ids(
             payload, provider_name=self._provider_name
         )
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """Advertise OpenRouter tool models with reasoning capability metadata."""
-        payload = await self._client.models.list()
+        payload = await self._list_models_payload()
         return extract_openrouter_tool_model_infos(
             payload, provider_name=self._provider_name
         )
 
+    async def _list_models_payload(self) -> Any:
+        return await self._admission.run_with_retry(
+            self._client.models.list,
+            provider_failure_override=self._provider_failure_override,
+        )
+
     def _handle_extra_reasoning(
-        self, delta: Any, ledger: AnthropicStreamLedger, *, thinking_enabled: bool
+        self, delta: Any, ledger: AnthropicStreamLedger, *, output_reasoning: bool
     ) -> Iterator[str]:
         """Map OpenRouter reasoning details onto Anthropic thinking blocks."""
-        if not thinking_enabled:
+        if not output_reasoning:
             return iter(())
         return _iter_openrouter_reasoning_detail_events(delta, ledger)
 
 
-def _apply_openrouter_reasoning_policy(
-    body: dict[str, Any], request: MessagesRequest, thinking_enabled: bool
-) -> None:
-    if not thinking_enabled:
-        return
-    extra_body = body.setdefault("extra_body", {})
-    if not isinstance(extra_body, dict):
-        return
-    reasoning = extra_body.setdefault("reasoning", {"enabled": True})
-    if not isinstance(reasoning, dict):
-        return
-    reasoning.setdefault("enabled", True)
-    budget_tokens = _thinking_budget_tokens(request.thinking)
-    if isinstance(budget_tokens, int):
-        reasoning.setdefault("max_tokens", budget_tokens)
-
-
 def _apply_openrouter_reasoning_details_replay(
-    body: dict[str, Any], request: MessagesRequest, thinking_enabled: bool
+    body: dict[str, Any], request: MessagesRequest, _policy: ReasoningPolicy
 ) -> None:
-    if not thinking_enabled:
-        return
     assistant_details = _assistant_reasoning_details(request.messages)
     if not assistant_details:
         return
@@ -122,6 +97,13 @@ def _apply_openrouter_reasoning_details_replay(
                 message["reasoning_details"] = list(details)
             cursor = index + 1
             break
+
+
+_PROFILE = OpenAIChatProfile(
+    _REQUEST_POLICY,
+    ReasoningObject(tuple((effort, effort.value) for effort in ReasoningEffort)),
+    postprocessors=(_apply_openrouter_reasoning_details_replay,),
+)
 
 
 def _assistant_reasoning_details(messages: Any) -> list[list[dict[str, Any]]]:
@@ -155,11 +137,6 @@ def _redacted_reasoning_details(content: Any) -> list[dict[str, Any]]:
         else:
             details.append({"type": "reasoning.encrypted", "data": data})
     return details
-
-
-def _thinking_budget_tokens(thinking: ThinkingConfig | None) -> int | None:
-    value = thinking.budget_tokens if thinking is not None else None
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _iter_openrouter_reasoning_detail_events(

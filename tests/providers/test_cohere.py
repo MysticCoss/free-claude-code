@@ -9,7 +9,11 @@ from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.config.provider_catalog import COHERE_DEFAULT_BASE
 from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import passthrough_rate_limiter, profiled_provider
+from tests.providers.support import (
+    immediate_admission,
+    profiled_provider,
+    reasoning_for,
+)
 
 
 def make_request(**overrides):
@@ -23,15 +27,12 @@ def cohere_config():
         base_url=COHERE_DEFAULT_BASE,
         rate_limit=10,
         rate_window=60,
-        enable_thinking=True,
     )
 
 
 @pytest.fixture
 def cohere_provider(cohere_config):
-    return profiled_provider(
-        "cohere", cohere_config, rate_limiter=passthrough_rate_limiter()
-    )
+    return profiled_provider("cohere", cohere_config, admission=immediate_admission())
 
 
 def test_default_base_url_constant():
@@ -43,7 +44,7 @@ def test_init_uses_default_base_url_and_api_key(cohere_config):
         "free_claude_code.providers.openai_chat.provider.AsyncOpenAI"
     ) as mock_openai:
         provider = profiled_provider(
-            "cohere", cohere_config, rate_limiter=passthrough_rate_limiter()
+            "cohere", cohere_config, admission=immediate_admission()
         )
 
     assert provider._api_key == "test_cohere_key"
@@ -55,9 +56,7 @@ def test_init_strips_trailing_slash(cohere_config):
     config = replace(cohere_config, base_url=f"{COHERE_DEFAULT_BASE}/")
 
     with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
-        provider = profiled_provider(
-            "cohere", config, rate_limiter=passthrough_rate_limiter()
-        )
+        provider = profiled_provider("cohere", config, admission=immediate_admission())
 
     assert provider._base_url == COHERE_DEFAULT_BASE
 
@@ -102,8 +101,11 @@ def test_build_request_body_sanitizes_documented_unsupported_fields(cohere_provi
         assert key not in body
 
 
-def test_build_request_body_maps_thinking_enabled_to_reasoning_high(cohere_provider):
-    body = cohere_provider._build_request_body(make_request())
+def test_build_request_body_maps_reasoning_on_to_high(cohere_provider):
+    request = make_request()
+    body = cohere_provider._build_request_body(
+        request, reasoning=reasoning_for(request)
+    )
 
     assert body["reasoning_effort"] == "high"
 
@@ -123,7 +125,10 @@ def test_build_request_body_preserves_replayed_reasoning_content(cohere_provider
             ],
         }
 
-        body = cohere_provider._build_request_body(make_request())
+        request = make_request()
+        body = cohere_provider._build_request_body(
+            request, reasoning=reasoning_for(request)
+        )
 
     assert body["messages"] == [
         {
@@ -135,7 +140,7 @@ def test_build_request_body_preserves_replayed_reasoning_content(cohere_provider
     assert body["reasoning_effort"] == "high"
 
 
-def test_build_request_body_maps_thinking_disabled_to_reasoning_none():
+def test_build_request_body_maps_reasoning_off_to_none():
     provider = profiled_provider(
         "cohere",
         ProviderConfig(
@@ -143,12 +148,12 @@ def test_build_request_body_maps_thinking_disabled_to_reasoning_none():
             base_url=COHERE_DEFAULT_BASE,
             rate_limit=10,
             rate_window=60,
-            enable_thinking=False,
         ),
-        rate_limiter=passthrough_rate_limiter(),
+        admission=immediate_admission(),
     )
 
-    body = provider._build_request_body(make_request())
+    request = make_request(thinking={"type": "disabled"})
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
 
     assert body["reasoning_effort"] == "none"
 
@@ -163,7 +168,7 @@ def test_build_request_body_promotes_allowed_extra_body(cohere_provider):
         }
     )
 
-    body = cohere_provider._build_request_body(req)
+    body = cohere_provider._build_request_body(req, reasoning=reasoning_for(req))
 
     assert body["frequency_penalty"] == 0.1
     assert body["presence_penalty"] == 0.2
@@ -176,7 +181,7 @@ def test_build_request_body_rejects_unsupported_extra_body(cohere_provider):
     req = make_request(extra_body={"documents": [{"text": "x"}]})
 
     with pytest.raises(InvalidRequestError, match="Unsupported"):
-        cohere_provider._build_request_body(req)
+        cohere_provider._build_request_body(req, reasoning=reasoning_for(req))
 
 
 @pytest.mark.asyncio
