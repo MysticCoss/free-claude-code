@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 FCC_COMMANDS = (
+    "fcc-desktop",
     "fcc-server",
     "fcc-claude",
     "fcc-codex",
@@ -95,6 +96,7 @@ if [ "${{1:-}}" = "tool" ] && [ "${{2:-}}" = "install" ]; then
     fi
     mkdir -p "$FAKE_TOOL_BIN"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-server"
+    cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-desktop"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-claude"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-pi"
     if [ "$FAIL_STEP" != "fcc-missing" ]; then
@@ -293,6 +295,12 @@ if [ "$name" = "fcc-server" ] && [ "${1:-}" = "--version" ]; then
 fi
 """,
     )
+    _write_executable(
+        bin_dir / "uname",
+        """#!/bin/sh
+printf '%s\n' "${FAKE_UNAME:-Linux}"
+""",
+    )
 
     env = os.environ.copy()
     env.update(
@@ -305,6 +313,7 @@ fi
             "FCC_PROCESS_MARKER": str(tmp_path / "fcc-process-ready"),
             "FCC_RUNNING_COMMAND": "",
             "FCC_RUNNING_PHASE": "early",
+            "FAKE_UNAME": "Linux",
             "FAIL_STEP": "",
         }
     )
@@ -336,6 +345,71 @@ def test_install_sh_fresh_install_is_verified(posix_harness: PosixHarness) -> No
         "uv:tool dir --bin",
         "fcc-server:--version",
     ]
+
+
+def test_install_sh_creates_native_macos_app_and_desktop_link(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    tool_bin = posix_harness.root / "tool's bin"
+    posix_harness.env["FAKE_TOOL_BIN"] = str(tool_bin)
+
+    result = posix_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    app = posix_harness.root / "home" / "Applications" / "Free Claude Code.app"
+    plist = app / "Contents" / "Info.plist"
+    owner_file = app / "Contents" / ".free-claude-code-owner"
+    launcher = app / "Contents" / "MacOS" / "fcc-desktop"
+    desktop_link = posix_harness.root / "home" / "Desktop" / "Free Claude Code.app"
+    assert owner_file.read_text(encoding="utf-8").strip() == (
+        "io.github.alishahryar1.free-claude-code"
+    )
+    assert "<key>LSUIElement</key>" in plist.read_text(encoding="utf-8")
+    assert "<key>LSMultipleInstancesProhibited</key>" in plist.read_text(
+        encoding="utf-8"
+    )
+    assert launcher.stat().st_mode & 0o111
+    expected_command = str(tool_bin / "fcc-desktop").replace("'", "'\\''")
+    assert f"exec '{expected_command}'" in launcher.read_text(encoding="utf-8")
+    assert desktop_link.is_symlink()
+    assert desktop_link.readlink() == app
+
+
+def test_install_sh_rejects_unowned_macos_app_bundle(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    app = posix_harness.root / "home" / "Applications" / "Free Claude Code.app"
+    contents = app / "Contents"
+    contents.mkdir(parents=True)
+    plist = contents / "Info.plist"
+    plist.write_text("foreign app", encoding="utf-8")
+
+    result = posix_harness.run()
+
+    assert result.returncode != 0
+    assert "not managed by Free Claude Code" in result.stderr
+    assert plist.read_text(encoding="utf-8") == "foreign app"
+    assert not (contents / ".free-claude-code-owner").exists()
+
+
+def test_install_sh_preserves_unrelated_macos_desktop_link(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    desktop = posix_harness.root / "home" / "Desktop"
+    desktop.mkdir()
+    unrelated = posix_harness.root / "Unrelated.app"
+    unrelated.mkdir()
+    desktop_link = desktop / "Free Claude Code.app"
+    desktop_link.symlink_to(unrelated, target_is_directory=True)
+
+    result = posix_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    assert "non-FCC link" in result.stdout
+    assert desktop_link.readlink() == unrelated
 
 
 @pytest.mark.parametrize("uv_version", ("0.11.16", "0.11.16+build.1"))
@@ -593,6 +667,35 @@ def _powershells() -> tuple[str, ...]:
     return tuple(dict.fromkeys(path for path in candidates if path is not None))
 
 
+def _create_windows_shortcut(
+    powershell: str,
+    shortcut_path: Path,
+    target_path: Path,
+) -> None:
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ | {
+        "FCC_TEST_SHORTCUT": str(shortcut_path),
+        "FCC_TEST_TARGET": str(target_path),
+    }
+    subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-Command",
+            (
+                "$shell = New-Object -ComObject WScript.Shell; "
+                "$shortcut = $shell.CreateShortcut($env:FCC_TEST_SHORTCUT); "
+                "$shortcut.TargetPath = $env:FCC_TEST_TARGET; "
+                "$shortcut.Save()"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
 def _batch_client(name: str) -> str:
     help_output = (
         "echo   --extension, -e ^<path^>  Load an extension\n"
@@ -637,6 +740,7 @@ exit /b 0
 if "%FAIL_STEP%"=="fcc-install" exit /b 53
 if not exist "%FAKE_TOOL_BIN%" mkdir "%FAKE_TOOL_BIN%"
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-server.cmd" >nul
+copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-desktop.cmd" >nul
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-claude.cmd" >nul
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-pi.cmd" >nul
 if not "%FAIL_STEP%"=="fcc-missing" copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-codex.cmd" >nul
@@ -887,6 +991,39 @@ def test_install_ps1_fresh_install_is_verified(
         "uv:tool dir --bin",
         "fcc-server:--version",
     ]
+    home = Path(powershell_harness.env["USERPROFILE"])
+    app_data = Path(powershell_harness.env["APPDATA"])
+    assert (home / "Desktop" / "Free Claude Code.lnk").is_file()
+    assert (
+        app_data
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Free Claude Code.lnk"
+    ).is_file()
+
+
+def test_install_ps1_preserves_unowned_desktop_shortcut(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    desktop_shortcut = (
+        Path(powershell_harness.env["USERPROFILE"]) / "Desktop" / "Free Claude Code.lnk"
+    )
+    unrelated_target = powershell_harness.root / "unrelated.cmd"
+    unrelated_target.write_text("@echo off\n", encoding="utf-8")
+    _create_windows_shortcut(
+        powershell_harness.powershell,
+        desktop_shortcut,
+        unrelated_target,
+    )
+    original_shortcut = desktop_shortcut.read_bytes()
+
+    result = powershell_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    assert "not managed by Free Claude Code" in result.stdout
+    assert desktop_shortcut.read_bytes() == original_shortcut
 
 
 @pytest.mark.parametrize("uv_version", ("0.11.16", "0.11.16+build.1"))

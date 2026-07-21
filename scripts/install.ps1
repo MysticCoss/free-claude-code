@@ -22,6 +22,7 @@ $PiInstallUrl = "https://pi.dev/install.ps1"
 $UvInstallUrl = "https://astral.sh/uv/install.ps1"
 $FccCommands = @(
     # Include retired entry points so updates reject older FCC processes before replacement.
+    "fcc-desktop",
     "fcc-server",
     "fcc-claude",
     "fcc-codex",
@@ -502,8 +503,9 @@ function Configure-AndConfirmFreeClaudeCode {
     if ($DryRun) {
         Write-Host "+ uv tool update-shell"
         Write-Host "+ uv tool dir --bin"
-        Write-Host "+ verify fcc-server, fcc-claude, fcc-codex, and fcc-pi in the uv tool bin directory"
+        Write-Host "+ verify fcc-desktop, fcc-server, fcc-claude, fcc-codex, and fcc-pi in the uv tool bin directory"
         Write-Host "+ fcc-server --version"
+        Install-FccDesktopShortcuts -DesktopCommand "<uv-tool-bin>\fcc-desktop.exe"
         return
     }
 
@@ -523,7 +525,7 @@ function Configure-AndConfirmFreeClaudeCode {
         [IO.Path]::AltDirectorySeparatorChar
     )
     $installedCommands = @{}
-    foreach ($commandName in @("fcc-server", "fcc-claude", "fcc-codex", "fcc-pi")) {
+    foreach ($commandName in @("fcc-desktop", "fcc-server", "fcc-claude", "fcc-codex", "fcc-pi")) {
         $command = Get-ApplicationCommand $commandName
         if (-not $command) {
             throw "Free Claude Code installation did not create '$commandName'."
@@ -539,6 +541,68 @@ function Configure-AndConfirmFreeClaudeCode {
     }
 
     Invoke-NativeCommand -FilePath $installedCommands["fcc-server"] -Arguments @("--version")
+    Install-FccDesktopShortcuts -DesktopCommand $installedCommands["fcc-desktop"]
+}
+
+function Test-EquivalentPath {
+    param(
+        [string] $Left,
+        [string] $Right
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    try {
+        return [string]::Equals(
+            [IO.Path]::GetFullPath($Left),
+            [IO.Path]::GetFullPath($Right),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Install-FccDesktopShortcuts {
+    param([string] $DesktopCommand)
+
+    $shortcutPaths = @(
+        (Join-Path $env:USERPROFILE "Desktop\Free Claude Code.lnk"),
+        (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Free Claude Code.lnk")
+    )
+    foreach ($shortcutPath in $shortcutPaths) {
+        Write-Host "+ create shortcut $(Format-Argument $shortcutPath) -> $(Format-Argument $DesktopCommand)"
+    }
+    if ($DryRun) {
+        return
+    }
+
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($shortcutPath in $shortcutPaths) {
+        if (Test-Path -LiteralPath $shortcutPath) {
+            try {
+                $existingShortcut = $shell.CreateShortcut($shortcutPath)
+                $isFccShortcut = Test-EquivalentPath -Left $existingShortcut.TargetPath -Right $DesktopCommand
+            }
+            catch {
+                $isFccShortcut = $false
+            }
+            if (-not $isFccShortcut) {
+                Write-Host "A shortcut not managed by Free Claude Code already exists at $shortcutPath; leaving it unchanged."
+                continue
+            }
+        }
+        $parent = Split-Path -Parent $shortcutPath
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $DesktopCommand
+        $shortcut.WorkingDirectory = $env:USERPROFILE
+        $shortcut.IconLocation = "$DesktopCommand,0"
+        $shortcut.Description = "Run Free Claude Code in the background"
+        $shortcut.Save()
+    }
 }
 
 if ($Help) {
@@ -583,7 +647,8 @@ if ($DryRun) {
     Write-Host "Dry run complete. No changes were made."
 }
 else {
-    Write-Host "Free Claude Code is installed and verified. Start the proxy with: fcc-server"
+    Write-Host "Free Claude Code is installed and verified. Open the Free Claude Code desktop shortcut to run it in the background."
+    Write-Host "For terminal use, start the proxy with: fcc-server"
     Write-Host "Run Claude Code with: fcc-claude"
     Write-Host "Run Codex with: fcc-codex"
     Write-Host "Run Pi with: fcc-pi"
