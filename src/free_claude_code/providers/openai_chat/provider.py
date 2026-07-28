@@ -57,6 +57,7 @@ from free_claude_code.providers.stream_recovery import (
 
 from .output_cap import clamp_output_tokens, parse_output_token_cap
 from .profiles import OpenAIChatProfile
+from .reasoning_details import StructuredReasoningStream
 from .request_policy import build_openai_chat_request_body
 from .tool_calls import (
     OpenAIToolCallAssembler,
@@ -138,11 +139,16 @@ class OpenAIChatProvider(BaseProvider):
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """Return model metadata from the OpenAI-compatible models endpoint."""
+        payload = await self._list_models_payload()
+        return extract_openai_model_infos(payload, provider_name=self._provider_name)
+
+    async def _list_models_payload(self) -> Any:
+        """Fetch one OpenAI-compatible model-list payload with shared retries."""
         payload = await self._admission.run_with_retry(
             self._client.models.list,
             provider_failure_override=self._provider_failure_override,
         )
-        return extract_openai_model_infos(payload, provider_name=self._provider_name)
+        return payload
 
     def _build_request_body(
         self,
@@ -402,6 +408,11 @@ class _OpenAIChatStreamRunner:
         tool_argument_alias_buffers: dict[int, str] = {}
 
         while True:
+            structured_reasoning = (
+                StructuredReasoningStream()
+                if self._provider._profile.structured_reasoning_details
+                else None
+            )
             if not ledger.message_started:
                 for event in hold_event(ledger.message_start()):
                     yield event
@@ -435,14 +446,23 @@ class _OpenAIChatStreamRunner:
                         logger.debug("{} finish_reason: {}", tag, finish_reason)
 
                     reasoning = self._provider._profile.reasoning_delta(delta)
-                    if output_reasoning and reasoning is not None:
-                        for event in hold_events(ledger.ensure_thinking_block()):
-                            yield event
-                        if reasoning:
-                            for event in hold_event(
-                                ledger.emit_thinking_delta(reasoning)
+                    if output_reasoning:
+                        if structured_reasoning is not None:
+                            for event in structured_reasoning.events(
+                                delta,
+                                ledger,
+                                native_reasoning=reasoning,
                             ):
+                                for out_event in hold_event(event):
+                                    yield out_event
+                        elif reasoning is not None:
+                            for event in hold_events(ledger.ensure_thinking_block()):
                                 yield event
+                            if reasoning:
+                                for event in hold_event(
+                                    ledger.emit_thinking_delta(reasoning)
+                                ):
+                                    yield event
 
                     for event in self._provider._handle_extra_reasoning(
                         delta,

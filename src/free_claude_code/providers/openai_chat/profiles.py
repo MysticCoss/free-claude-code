@@ -65,6 +65,7 @@ class OpenAIChatProfile:
     reasoning_delta_field: Literal["reasoning_content", "reasoning"] = (
         "reasoning_content"
     )
+    structured_reasoning_details: bool = False
     user_agent: str | None = None
 
     @property
@@ -294,15 +295,6 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             _LOW_MEDIUM_HIGH,
             enabled_value="medium",
         ),
-    ),
-    "kilo": OpenAIChatProfile(
-        _policy(
-            "KILO",
-            ReasoningReplayMode.REASONING_CONTENT,
-            include_extra_body=True,
-            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
-        ),
-        ReasoningObject(_ALL_EFFORTS),
     ),
     "fireworks": OpenAIChatProfile(
         _policy(
