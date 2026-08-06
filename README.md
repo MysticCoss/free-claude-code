@@ -1,6 +1,11 @@
 <div align="center">
 
-# 🤖 Free Claude Code
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/free-claude-code-wordmark-light.svg">
+    <img src="assets/free-claude-code-wordmark-dark.svg" alt="Free Claude Code" width="610">
+  </picture>
+</h1>
 
 Use Claude Code, Codex, Pi, or their IDE extensions through your own provider-backed proxy.
 
@@ -43,7 +48,8 @@ Run your coding agents with free, paid, or local models. Choose and validate pro
 ## What You Get
 
 - Launch Claude Code with `fcc-claude`, Codex with `fcc-codex`, or Pi with `fcc-pi`.
-- Switch among 25 cloud and local providers from the Admin UI.
+- Run FCC in the background from a desktop launcher on Windows or macOS.
+- Switch among 31 cloud and local providers from the Admin UI.
 - Use each coding agent's native model picker.
 - Route Fable, Opus, Sonnet, Haiku, and fallback traffic to different models.
 - Keep streaming, tool use, reasoning, and image input across compatible models.
@@ -91,17 +97,36 @@ Windows PowerShell:
 
 Re-run the same command whenever you want to update. You can review the installers before running them: [install.sh](scripts/install.sh) and [install.ps1](scripts/install.ps1).
 
-### 2. Start The Server
+Pi is optional. If you decline Pi's installer, FCC continues installing with Claude Code and Codex.
+
+### 2. Start FCC
+
+#### Windows
+
+Open **Free Claude Code** from your desktop or Start menu.
+
+#### macOS
+
+Open **Free Claude Code** from your desktop or Applications folder.
+
+#### Linux
+
+Run:
 
 ```bash
 fcc-server
 ```
 
+On Windows and macOS, FCC runs in the system tray or menu bar without opening a
+terminal. Use its menu to open Admin, check server status, restart, or quit. On
+Windows, left-clicking the tray icon opens Admin directly.
+
 To print the installed Free Claude Code version without starting the server,
 run `fcc-server --version`.
 
-Keep this process running. By default, the Admin UI opens in your browser once
-the server is healthy. Its address is always shown in the startup log:
+When using `fcc-server`, keep the terminal open. The Admin UI opens in your
+browser once the server is healthy by default. Its address is shown in the
+startup log:
 
 ```text
 INFO:     Admin UI: http://127.0.0.1:8082/admin (local-only)
@@ -153,11 +178,18 @@ fcc-codex exec "hello"
 
 ## Choose A Provider
 
-Enter the listed setting in the Admin UI, open **Model Config**, then search the `MODEL` dropdown and select a model. FCC constructs each slug as `<provider-id>/<exact-provider-model-id>`; free-text entry remains available when a provider cannot list a model. Click **Validate** and **Apply**. Provider names link to their key, model, or setup pages.
+1. Open a provider link below for its key, models, or setup instructions.
+2. In the Admin UI, configure the listed setting. For OpenAI, use
+   **Providers → Connected accounts** instead.
+3. Search the `MODEL` dropdown and select a model. If the provider cannot list
+   models, enter `<provider-id>/<exact-provider-model-id>` manually.
+4. Click **Validate**, then **Apply**.
 
 | Provider | Admin UI setting | Example `MODEL` |
 | --- | --- | --- |
 | [NVIDIA NIM](https://build.nvidia.com/settings/api-keys) | `NVIDIA_NIM_API_KEY` | `nvidia_nim/nvidia/nemotron-3-super-120b-a12b` |
+| [OpenAI / ChatGPT](https://learn.chatgpt.com/docs/auth) | Connect ChatGPT in the Admin UI | `openai/<model-id>` |
+| [Azure OpenAI](https://learn.microsoft.com/azure/foundry/openai/how-to/chatgpt) | `AZURE_OPENAI_API_KEY` and `AZURE_OPENAI_BASE_URL` | `azure_openai/<deployment-name>` |
 | [OpenRouter](https://openrouter.ai/keys) | `OPENROUTER_API_KEY` | `open_router/openrouter/free` |
 | [Google AI Studio (Gemini)](https://aistudio.google.com/apikey) | `GEMINI_API_KEY` | `gemini/models/gemini-3.1-flash-lite` |
 | [Google Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | `VERTEX_PROJECT_ID` + ADC | `vertex/google/gemini-3.5-flash` |
@@ -178,6 +210,7 @@ Enter the listed setting in the Admin UI, open **Model Config**, then search the
 | [Cerebras Inference](https://cloud.cerebras.ai/) | `CEREBRAS_API_KEY` | `cerebras/gpt-oss-120b` |
 | [Groq](https://console.groq.com/keys) | `GROQ_API_KEY` | `groq/llama-3.3-70b-versatile` |
 | [SambaNova](https://cloud.sambanova.ai/apis) | `SAMBANOVA_API_KEY` | `sambanova/Meta-Llama-3.3-70B-Instruct` |
+| [Kilo.ai](https://kilo.ai) | `KILO_API_KEY` | `kilo/kilo-auto/free` |
 | [Fireworks AI](https://fireworks.ai/account/api-keys) | `FIREWORKS_API_KEY` | `fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct` |
 | [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) | `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` | `cloudflare/@cf/moonshotai/kimi-k2.6` |
 | [Z.ai](https://z.ai/manage-apikey/apikey-list) | `ZAI_API_KEY` | `zai/glm-5.2` |
@@ -188,6 +221,17 @@ Enter the listed setting in the Admin UI, open **Model Config**, then search the
 
 Important provider notes:
 
+- OpenAI uses your ChatGPT subscription rather than an API key. Connect from
+  **Providers → Connected accounts**; browser PKCE is the default and device
+  code is available for headless setups. FCC stores its own renewable
+  credentials under `~/.fcc/auth/` and leaves Codex login untouched. Restart
+  an already-running agent after connecting to refresh its model picker.
+- Azure OpenAI uses the deployment names from your resource. Set
+  `AZURE_OPENAI_BASE_URL` to its complete v1 endpoint, such as
+  `https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1/`, and select a
+  deployment that supports Chat Completions. Azure does not expose custom
+  deployment names through its data-plane model list, so enter the deployment
+  name as a custom model slug.
 - Mistral Codestral uses a separate key from Mistral La Plateforme.
 - Kimi Code subscription keys use `kimi_code/`; Kimi API credit keys use
   `kimi/`. Kimi Code plans are for personal interactive coding-agent use under
@@ -237,9 +281,16 @@ For example, route Opus to `nvidia_nim/moonshotai/kimi-k2.6`, Sonnet to `open_ro
 
 ### Reasoning Control
 
-Open **Admin UI → Model Config → Reasoning** to choose how FCC handles client reasoning controls. The default **From client** option preserves reasoning effort sent by Claude Code, Codex, or Pi; when the client sends no control, the provider keeps its own default.
+Open **Admin UI → Model Config → Reasoning** and select the behavior you want.
 
-You can instead select **Off**, **Low**, **Medium**, **High**, **X-High**, or **Max**. Fable, Opus, Sonnet, and Haiku each have the same choices plus **Inherit**, which uses the root policy. Providers with named effort receive those names; numeric-budget providers map **Low=512**, **Medium=1,024**, **High=2,048**, **X-High=4,096**, and **Max=8,192** reasoning tokens; boolean providers receive on or off. Unsupported controls safely remain provider-defined.
+| Selection | Behavior |
+| --- | --- |
+| **From client** (default) | Use the effort sent by Claude Code, Codex, or Pi. If none is sent, keep the provider default. |
+| **Off** | Request reasoning to be disabled. |
+| **Low**, **Medium**, **High**, **X-High**, or **Max** | Override the client with the selected reasoning level. |
+| **Inherit** (Fable, Opus, Sonnet, and Haiku only) | Use the root Reasoning selection. |
+
+Providers that do not support a selected control retain their own behavior.
 
 <a id="connect-your-client"></a>
 
@@ -261,12 +312,48 @@ Install the [Claude Code extension](https://marketplace.visualstudio.com/items?i
   { "name": "CLAUDE_CODE_AUTO_COMPACT_WINDOW", "value": "190000" },
   { "name": "DISABLE_AUTOUPDATER", "value": "1" },
   { "name": "DISABLE_FEEDBACK_COMMAND", "value": "1" },
-  { "name": "DISABLE_ERROR_REPORTING", "value": "1" },
-  { "name": "DISABLE_TELEMETRY", "value": "1" }
+  { "name": "DISABLE_ERROR_REPORTING", "value": "1" }
 ]
 ```
 
 Match the port and authentication token to the Admin UI, then reload the extension.
+
+</details>
+
+<details>
+<summary><strong>Codex App</strong></summary>
+
+Start FCC, then add its provider and generated model catalog to your user-level Codex configuration.
+
+**Windows** — edit `%USERPROFILE%\.codex\config.toml` and replace `YOUR_USERNAME`:
+
+```toml
+model_provider = "fcc"
+model = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
+model_catalog_json = "C:/Users/YOUR_USERNAME/.fcc/codex-model-catalog.json"
+
+[model_providers.fcc]
+name = "Free Claude Code"
+base_url = "http://127.0.0.1:8082/v1"
+http_headers = { Authorization = "Bearer freecc" }
+wire_api = "responses"
+```
+
+**macOS** — edit `~/.codex/config.toml` and replace `YOUR_USERNAME`:
+
+```toml
+model_provider = "fcc"
+model = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
+model_catalog_json = "/Users/YOUR_USERNAME/.fcc/codex-model-catalog.json"
+
+[model_providers.fcc]
+name = "Free Claude Code"
+base_url = "http://127.0.0.1:8082/v1"
+http_headers = { Authorization = "Bearer freecc" }
+wire_api = "responses"
+```
+
+Match the model, port, and bearer token to the Admin UI. Restart the Codex App after setup or model changes, then use its model picker to select any FCC provider/model slug.
 
 </details>
 
@@ -308,8 +395,7 @@ Set the environment for `acp.registry.claude-acp`:
   "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "190000",
   "DISABLE_AUTOUPDATER": "1",
   "DISABLE_FEEDBACK_COMMAND": "1",
-  "DISABLE_ERROR_REPORTING": "1",
-  "DISABLE_TELEMETRY": "1"
+  "DISABLE_ERROR_REPORTING": "1"
 }
 ```
 
@@ -437,7 +523,19 @@ Re-run the matching command from [Install Or Update](#install).
 
 ### Uninstall
 
-Stop every running FCC command first. The uninstaller removes the FCC uv tool, verifies every FCC command is gone, and then deletes `~/.fcc/`. It leaves uv, Python, Claude Code, Codex, Pi, and shared PATH entries intact.
+Stop every running FCC command first. The uninstaller verifies every FCC command is gone
+before deleting its managed data.
+
+**Removes**
+
+- Free Claude Code, including its desktop launcher and commands
+- `~/.fcc/`
+
+**Keeps**
+
+- uv and Python
+- Claude Code, Codex, and Pi
+- Shared PATH entries
 
 macOS/Linux:
 
