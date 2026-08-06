@@ -72,6 +72,8 @@ def test_managed_claude_builds_new_task_command_and_env() -> None:
     assert invocation.env["DISABLE_FEEDBACK_COMMAND"] == "1"
     assert invocation.env["DISABLE_ERROR_REPORTING"] == "1"
     assert invocation.env["DISABLE_TELEMETRY"] == "1"
+    assert invocation.env["NO_PROXY"] == "127.0.0.1,localhost,::1"
+    assert invocation.env["no_proxy"] == invocation.env["NO_PROXY"]
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in invocation.env
     assert "ANTHROPIC_API_URL" not in invocation.env
     assert "ANTHROPIC_API_KEY" not in invocation.env
@@ -135,7 +137,7 @@ def test_managed_claude_env_uses_sentinel_when_proxy_auth_blank() -> None:
     assert env["ANTHROPIC_AUTH_TOKEN"] == "fcc-no-auth"
 
 
-def test_managed_claude_env_only_adds_noninteractive_process_settings() -> None:
+def test_managed_claude_env_adds_noninteractive_process_policy() -> None:
     base_env = {
         "PATH": "keep",
         "ANTHROPIC_API_URL": "https://api.anthropic.com/v1",
@@ -157,6 +159,7 @@ def test_managed_claude_env_only_adds_noninteractive_process_settings() -> None:
 
     assert managed_env == {
         **proxy_env,
+        "DISABLE_TELEMETRY": "1",
         "TERM": "dumb",
         "PYTHONIOENCODING": "utf-8",
     }

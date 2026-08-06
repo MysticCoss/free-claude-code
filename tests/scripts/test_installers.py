@@ -1,12 +1,14 @@
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 FCC_COMMANDS = (
+    "fcc-desktop",
     "fcc-server",
     "fcc-claude",
     "fcc-codex",
@@ -95,6 +97,7 @@ if [ "${{1:-}}" = "tool" ] && [ "${{2:-}}" = "install" ]; then
     fi
     mkdir -p "$FAKE_TOOL_BIN"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-server"
+    cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-desktop"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-claude"
     cp "$FAKE_FIXTURES/fcc-command.sh" "$FAKE_TOOL_BIN/fcc-pi"
     if [ "$FAIL_STEP" != "fcc-missing" ]; then
@@ -256,6 +259,7 @@ chmod +x "$HOME/.local/bin/codex"
         """#!/bin/sh
 echo "pi-install" >> "$CALL_LOG"
 [ "$FAIL_STEP" = "pi-install" ] && exit 24
+[ "$FAIL_STEP" = "pi-skip" ] && exit 0
 if [ -n "${FAKE_NPM_PREFIX:-}" ]; then
     pi_bin="$FAKE_NPM_PREFIX/bin"
 else
@@ -288,9 +292,20 @@ echo "$name:$*" >> "$CALL_LOG"
 if [ "$FAIL_STEP" = "fcc-verify" ]; then
     exit 36
 fi
+if [ "$name" = "fcc-desktop" ] && [ "${1:-}" = "--export-icon" ]; then
+    [ "$FAIL_STEP" = "desktop-icon-export" ] && exit 37
+    mkdir -p "$(dirname "$2")"
+    printf 'fake icon\n' > "$2"
+fi
 if [ "$name" = "fcc-server" ] && [ "${1:-}" = "--version" ]; then
     echo "free-claude-code 3.5.18"
 fi
+""",
+    )
+    _write_executable(
+        bin_dir / "uname",
+        """#!/bin/sh
+printf '%s\n' "${FAKE_UNAME:-Linux}"
 """,
     )
 
@@ -305,6 +320,7 @@ fi
             "FCC_PROCESS_MARKER": str(tmp_path / "fcc-process-ready"),
             "FCC_RUNNING_COMMAND": "",
             "FCC_RUNNING_PHASE": "early",
+            "FAKE_UNAME": "Linux",
             "FAIL_STEP": "",
         }
     )
@@ -336,6 +352,91 @@ def test_install_sh_fresh_install_is_verified(posix_harness: PosixHarness) -> No
         "uv:tool dir --bin",
         "fcc-server:--version",
     ]
+
+
+def test_install_sh_creates_native_macos_app_and_desktop_link(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    tool_bin = posix_harness.root / "tool's bin"
+    posix_harness.env["FAKE_TOOL_BIN"] = str(tool_bin)
+
+    result = posix_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    app = posix_harness.root / "home" / "Applications" / "Free Claude Code.app"
+    plist = app / "Contents" / "Info.plist"
+    owner_file = app / "Contents" / ".free-claude-code-owner"
+    launcher = app / "Contents" / "MacOS" / "fcc-desktop"
+    icon = app / "Contents" / "Resources" / "AppIcon.icns"
+    desktop_link = posix_harness.root / "home" / "Desktop" / "Free Claude Code.app"
+    assert owner_file.read_text(encoding="utf-8").strip() == (
+        "io.github.alishahryar1.free-claude-code"
+    )
+    plist_text = plist.read_text(encoding="utf-8")
+    assert "<key>CFBundleIconFile</key>" in plist_text
+    assert "<string>AppIcon</string>" in plist_text
+    assert "<key>LSUIElement</key>" in plist_text
+    assert "<key>LSMultipleInstancesProhibited</key>" in plist_text
+    assert icon.read_bytes() == b"fake icon\n"
+    assert launcher.stat().st_mode & 0o111
+    expected_command = str(tool_bin / "fcc-desktop").replace("'", "'\\''")
+    assert f"exec '{expected_command}'" in launcher.read_text(encoding="utf-8")
+    assert desktop_link.is_symlink()
+    assert desktop_link.readlink() == app
+    assert any(
+        call == f"fcc-desktop:--export-icon {icon}" for call in posix_harness.calls()
+    )
+
+
+def test_install_sh_stops_if_macos_icon_export_fails(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+
+    result = posix_harness.run(fail_step="desktop-icon-export")
+
+    assert result.returncode != 0
+    assert "Command failed with exit code 37" in result.stderr
+    assert not (
+        posix_harness.root / "home" / "Desktop" / "Free Claude Code.app"
+    ).exists()
+
+
+def test_install_sh_rejects_unowned_macos_app_bundle(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    app = posix_harness.root / "home" / "Applications" / "Free Claude Code.app"
+    contents = app / "Contents"
+    contents.mkdir(parents=True)
+    plist = contents / "Info.plist"
+    plist.write_text("foreign app", encoding="utf-8")
+
+    result = posix_harness.run()
+
+    assert result.returncode != 0
+    assert "not managed by Free Claude Code" in result.stderr
+    assert plist.read_text(encoding="utf-8") == "foreign app"
+    assert not (contents / ".free-claude-code-owner").exists()
+
+
+def test_install_sh_preserves_unrelated_macos_desktop_link(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.env["FAKE_UNAME"] = "Darwin"
+    desktop = posix_harness.root / "home" / "Desktop"
+    desktop.mkdir()
+    unrelated = posix_harness.root / "Unrelated.app"
+    unrelated.mkdir()
+    desktop_link = desktop / "Free Claude Code.app"
+    desktop_link.symlink_to(unrelated, target_is_directory=True)
+
+    result = posix_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    assert "non-FCC link" in result.stdout
+    assert desktop_link.readlink() == unrelated
 
 
 @pytest.mark.parametrize("uv_version", ("0.11.16", "0.11.16+build.1"))
@@ -385,6 +486,59 @@ def test_install_sh_discovers_custom_pi_npm_prefix(
     assert "npm:prefix -g" in calls
     assert "pi:--help" in calls
     assert "pi:--version" in calls
+
+
+def test_install_sh_continues_when_pi_is_not_installed(
+    posix_harness: PosixHarness,
+) -> None:
+    result = posix_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = posix_harness.calls()
+    assert "pi-install" in calls
+    assert not any(call.startswith("pi:") for call in calls)
+    assert "uv-install" in calls
+    assert "fcc-server:--version" in calls
+
+
+def test_install_sh_continues_when_unrelated_pi_is_unchanged(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.add_unrelated_pi()
+
+    result = posix_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = posix_harness.calls()
+    assert "unrelated-pi:--help" in calls
+    assert "unrelated-pi:--version" not in calls
+    assert "fcc-server:--version" in calls
+
+
+def test_install_sh_continues_when_pi_resolution_changes_to_unrelated_command(
+    posix_harness: PosixHarness,
+) -> None:
+    posix_harness.add_unrelated_pi()
+    npm_prefix = posix_harness.root / "custom-npm"
+    posix_harness.add_npm_prefix(npm_prefix)
+    _write_executable(
+        npm_prefix / "bin" / "pi",
+        _posix_command("other-unrelated-pi"),
+    )
+
+    result = posix_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = posix_harness.calls()
+    assert "other-unrelated-pi:--help" in calls
+    assert "other-unrelated-pi:--version" not in calls
+    assert "fcc-server:--version" in calls
 
 
 def test_install_sh_replaces_obsolete_uv(posix_harness: PosixHarness) -> None:
@@ -593,6 +747,127 @@ def _powershells() -> tuple[str, ...]:
     return tuple(dict.fromkeys(path for path in candidates if path is not None))
 
 
+def test_install_ps1_waits_for_gui_icon_export() -> None:
+    installer = (_repo_root() / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = _braced_body(installer, "function Export-FccDesktopIcon")
+
+    assert "Start-Process" in body
+    assert "-WindowStyle Hidden" in body
+    assert "-Wait" in body
+    assert "-PassThru" in body
+    assert "$process.ExitCode" in body
+
+
+@pytest.mark.parametrize(
+    "powershell",
+    _powershells() or (None,),
+    ids=lambda path: Path(path).name if path is not None else "unavailable",
+)
+def test_install_ps1_gui_icon_export_completes_before_returning(
+    powershell: str | None,
+    tmp_path: Path,
+) -> None:
+    if powershell is None or os.name != "nt":
+        pytest.skip("PowerShell GUI process behavior runs on Windows hosts")
+
+    installer = (_repo_root() / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    function_declarations = (
+        "function Format-Argument",
+        "function Format-Command",
+        "function Export-FccDesktopIcon",
+    )
+    functions = "\n".join(
+        f"{declaration} {{{_braced_body(installer, declaration)}}}"
+        for declaration in function_declarations
+    )
+    installed_desktop_command = Path(sys.executable).with_name("fcc-desktop.exe")
+    desktop_command = tmp_path / "icon-exporter.exe"
+    shutil.copy2(installed_desktop_command, desktop_command)
+    destination = tmp_path / "profile with spaces" / ".fcc" / "app-icon.ico"
+    env = os.environ | {
+        "FCC_TEST_DESKTOP_COMMAND": str(desktop_command),
+        "FCC_TEST_ICON_PATH": str(destination),
+    }
+    script = "\n".join(
+        (
+            '$ErrorActionPreference = "Stop"',
+            "$DryRun = $false",
+            functions,
+            (
+                "Export-FccDesktopIcon "
+                "-DesktopCommand $env:FCC_TEST_DESKTOP_COMMAND "
+                "-IconPath $env:FCC_TEST_ICON_PATH"
+            ),
+        )
+    )
+
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        destination.read_bytes()
+        == (
+            _repo_root() / "src" / "free_claude_code" / "assets" / "app-icon.ico"
+        ).read_bytes()
+    )
+
+
+def _create_windows_shortcut(
+    powershell: str,
+    shortcut_path: Path,
+    target_path: Path,
+) -> None:
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ | {
+        "FCC_TEST_SHORTCUT": str(shortcut_path),
+        "FCC_TEST_TARGET": str(target_path),
+    }
+    subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-Command",
+            (
+                "$shell = New-Object -ComObject WScript.Shell; "
+                "$shortcut = $shell.CreateShortcut($env:FCC_TEST_SHORTCUT); "
+                "$shortcut.TargetPath = $env:FCC_TEST_TARGET; "
+                "$shortcut.Save()"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _windows_shortcut_icon(powershell: str, shortcut_path: Path) -> str:
+    env = os.environ | {"FCC_TEST_SHORTCUT": str(shortcut_path)}
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-Command",
+            (
+                "$shell = New-Object -ComObject WScript.Shell; "
+                "$shortcut = $shell.CreateShortcut($env:FCC_TEST_SHORTCUT); "
+                "[Console]::Out.Write($shortcut.IconLocation)"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return completed.stdout
+
+
 def _batch_client(name: str) -> str:
     help_output = (
         "echo   --extension, -e ^<path^>  Load an extension\n"
@@ -637,6 +912,7 @@ exit /b 0
 if "%FAIL_STEP%"=="fcc-install" exit /b 53
 if not exist "%FAKE_TOOL_BIN%" mkdir "%FAKE_TOOL_BIN%"
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-server.cmd" >nul
+copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-desktop.cmd" >nul
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-claude.cmd" >nul
 copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-pi.cmd" >nul
 if not "%FAIL_STEP%"=="fcc-missing" copy /y "%FAKE_FIXTURES%\fcc-command.cmd" "%FAKE_TOOL_BIN%\fcc-codex.cmd" >nul
@@ -734,6 +1010,11 @@ def powershell_harness(
 for %%I in ("%~f0") do set "FCC_NAME=%%~nI"
 echo %FCC_NAME%:%*>>"%CALL_LOG%"
 if "%FAIL_STEP%"=="fcc-verify" exit /b 55
+if "%FCC_NAME%"=="fcc-desktop" if "%1"=="--export-icon" if "%FAIL_STEP%"=="desktop-icon-export" exit /b 56
+if "%FCC_NAME%"=="fcc-desktop" if "%1"=="--export-icon" (
+    if not exist "%~dp2" mkdir "%~dp2"
+    echo fake icon>"%~2"
+)
 if "%FCC_NAME%"=="fcc-server" if "%1"=="--version" echo free-claude-code 3.5.18
 exit /b 0
 """,
@@ -759,6 +1040,10 @@ Add-Content -LiteralPath $env:CALL_LOG -Value "codex-install:$env:CODEX_NON_INTE
     )
     (fixtures / "pi-installer.ps1").write_text(
         r"""if ($env:FAIL_STEP -eq "pi-install") { exit 64 }
+if ($env:FAIL_STEP -eq "pi-skip") {
+    Add-Content -LiteralPath $env:CALL_LOG -Value "pi-install"
+    return
+}
 $bin = if ($env:FAKE_NPM_PREFIX) { $env:FAKE_NPM_PREFIX } else { Join-Path $env:APPDATA "npm" }
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 Copy-Item (Join-Path $env:FAKE_FIXTURES "pi-command.cmd") (Join-Path $bin "pi.cmd") -Force
@@ -876,17 +1161,73 @@ def test_install_ps1_fresh_install_is_verified(
     assert any(
         call.startswith(
             "uv:tool install --force --refresh-package free-claude-code "
-            '--python 3.14.0 "free-claude-code @ '
+            "--python cpython-3.14.0-windows-x86_64-none "
+            '"free-claude-code @ '
             'https://github.com/Alishahryar1/free-claude-code/archive/refs/heads/main.zip"'
         )
         for call in calls
     )
     assert not any(call.startswith("git:") for call in calls)
-    assert calls[-3:] == [
+    assert calls[-4:-1] == [
         "uv:tool update-shell",
         "uv:tool dir --bin",
         "fcc-server:--version",
     ]
+    home = Path(powershell_harness.env["USERPROFILE"])
+    app_data = Path(powershell_harness.env["APPDATA"])
+    icon = home / ".fcc" / "app-icon.ico"
+    assert icon.read_text(encoding="utf-8").strip() == "fake icon"
+    assert calls[-1] == f'fcc-desktop:--export-icon "{icon}"'
+    desktop_shortcut = home / "Desktop" / "Free Claude Code.lnk"
+    assert desktop_shortcut.is_file()
+    assert (
+        _windows_shortcut_icon(
+            powershell_harness.powershell,
+            desktop_shortcut,
+        )
+        == f"{icon},0"
+    )
+    assert (
+        app_data
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Free Claude Code.lnk"
+    ).is_file()
+
+
+def test_install_ps1_stops_if_windows_icon_export_fails(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    result = powershell_harness.run(fail_step="desktop-icon-export")
+
+    assert result.returncode != 0
+    assert "Command failed with exit code 56" in result.stderr
+    home = Path(powershell_harness.env["USERPROFILE"])
+    assert not (home / "Desktop" / "Free Claude Code.lnk").exists()
+
+
+def test_install_ps1_preserves_unowned_desktop_shortcut(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    desktop_shortcut = (
+        Path(powershell_harness.env["USERPROFILE"]) / "Desktop" / "Free Claude Code.lnk"
+    )
+    unrelated_target = powershell_harness.root / "unrelated.cmd"
+    unrelated_target.write_text("@echo off\n", encoding="utf-8")
+    _create_windows_shortcut(
+        powershell_harness.powershell,
+        desktop_shortcut,
+        unrelated_target,
+    )
+    original_shortcut = desktop_shortcut.read_bytes()
+
+    result = powershell_harness.run()
+
+    assert result.returncode == 0, result.stderr
+    assert "not managed by Free Claude Code" in result.stdout
+    assert desktop_shortcut.read_bytes() == original_shortcut
 
 
 @pytest.mark.parametrize("uv_version", ("0.11.16", "0.11.16+build.1"))
@@ -936,6 +1277,59 @@ def test_install_ps1_discovers_custom_pi_npm_prefix(
     assert "npm:prefix -g" in calls
     assert "pi:--help" in calls
     assert "pi:--version" in calls
+
+
+def test_install_ps1_continues_when_pi_is_not_installed(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    result = powershell_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = powershell_harness.calls()
+    assert "pi-install" in calls
+    assert not any(call.startswith("pi:") for call in calls)
+    assert "uv-install" in calls
+    assert "fcc-server:--version" in calls
+
+
+def test_install_ps1_continues_when_unrelated_pi_is_unchanged(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    powershell_harness.add_unrelated_pi()
+
+    result = powershell_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = powershell_harness.calls()
+    assert "unrelated-pi:--help" in calls
+    assert "unrelated-pi:--version" not in calls
+    assert "fcc-server:--version" in calls
+
+
+def test_install_ps1_continues_when_pi_resolution_changes_to_unrelated_command(
+    powershell_harness: PowerShellHarness,
+) -> None:
+    powershell_harness.add_unrelated_pi()
+    npm_prefix = powershell_harness.root / "custom-npm"
+    powershell_harness.add_npm_prefix(npm_prefix)
+    _write_executable(
+        npm_prefix / "pi.cmd",
+        _batch_client("other-unrelated-pi"),
+    )
+
+    result = powershell_harness.run(fail_step="pi-skip")
+
+    assert result.returncode == 0, result.stderr
+    assert "Pi was not installed; continuing without it." in result.stdout
+    assert "Run Pi with: fcc-pi" not in result.stdout
+    calls = powershell_harness.calls()
+    assert "other-unrelated-pi:--help" in calls
+    assert "other-unrelated-pi:--version" not in calls
+    assert "fcc-server:--version" in calls
 
 
 def test_install_ps1_replaces_obsolete_uv(
@@ -1152,10 +1546,16 @@ def test_installers_use_native_clients_and_single_python_selection() -> None:
     assert "https://pi.dev/install.ps1" in powershell
 
 
+def test_install_ps1_uses_x64_python_for_windows_arm_compatibility() -> None:
+    powershell = (_repo_root() / "scripts" / "install.ps1").read_text(encoding="utf-8")
+
+    assert '$PythonRequest = "cpython-3.14.0-windows-x86_64-none"' in powershell
+
+
 def test_readme_install_section_has_no_manual_git_prerequisite() -> None:
     readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
     install_section = readme.split("### 1. Install Or Update", 1)[1].split(
-        "### 2. Start The Server", 1
+        "### 2. Start FCC", 1
     )[0]
 
     assert "Install Git" not in install_section

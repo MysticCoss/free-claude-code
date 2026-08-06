@@ -12,6 +12,7 @@ from free_claude_code.api.handlers import (
     TokenCountHandler,
 )
 from free_claude_code.application.errors import InvalidRequestError
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic.models import (
     Message,
@@ -50,8 +51,8 @@ class FakeProvider:
     async def cleanup(self) -> None:
         return None
 
-    async def list_model_ids(self) -> frozenset[str]:
-        return frozenset({"test-model"})
+    async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
+        return frozenset({ProviderModelInfo("test-model")})
 
     async def stream_response(
         self,
@@ -59,6 +60,7 @@ class FakeProvider:
         input_tokens: int = 0,
         *,
         request_id: str | None = None,
+        response_model: str | None = None,
         reasoning: ReasoningPolicy,
     ) -> AsyncIterator[str]:
         self.requests.append(request)
@@ -66,6 +68,7 @@ class FakeProvider:
             {
                 "input_tokens": input_tokens,
                 "request_id": request_id,
+                "response_model": response_model,
                 "reasoning": reasoning,
             }
         )
@@ -116,6 +119,7 @@ async def test_messages_handler_passes_routed_request_and_stream_metadata() -> N
     assert provider.requests[0].model == "test-model"
     assert provider.stream_kwargs[0]["input_tokens"] > 0
     assert provider.stream_kwargs[0]["request_id"].startswith("req_")
+    assert provider.stream_kwargs[0]["response_model"] == "nvidia_nim/test-model"
     assert provider.stream_kwargs[0]["reasoning"] == ReasoningPolicy.provider_default()
     assert len(provider.preflight_calls) == 1
 
@@ -329,6 +333,7 @@ async def test_messages_handler_stream_false_provider_exception_keeps_status() -
             input_tokens: int = 0,
             *,
             request_id: str | None = None,
+            response_model: str | None = None,
             reasoning: ReasoningPolicy,
         ) -> AsyncIterator[str]:
             self.requests.append(request)
@@ -336,6 +341,7 @@ async def test_messages_handler_stream_false_provider_exception_keeps_status() -
                 {
                     "input_tokens": input_tokens,
                     "request_id": request_id,
+                    "response_model": response_model,
                     "reasoning": reasoning,
                 }
             )
@@ -396,7 +402,7 @@ async def test_messages_handler_forces_no_thinking_for_safety_classifier() -> No
             "stage": "routing",
             "event": "free_claude_code.api.optimization.safety_classifier_no_thinking",
             "source": "api",
-            "model": "test-model",
+            "model": "nvidia_nim/test-model",
             "changed": True,
         }
     ]
@@ -464,7 +470,7 @@ async def test_messages_handler_keeps_existing_no_thinking_for_classifier() -> N
             "stage": "routing",
             "event": "free_claude_code.api.optimization.safety_classifier_no_thinking",
             "source": "api",
-            "model": "test-model",
+            "model": "claude-3-freecc-no-thinking/nvidia_nim/test-model",
             "changed": False,
         }
     ]
