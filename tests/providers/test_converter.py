@@ -249,9 +249,7 @@ def test_openai_build_demotes_empty_system_content_to_user() -> None:
     body = build_base_request_body(request)
 
     assert body["messages"][0]["role"] == "user"
-    assert body["messages"][0]["content"] == (
-        '<system-msg role="system"></system-msg>'
-    )
+    assert body["messages"][0]["content"] == ('<system-msg role="system"></system-msg>')
 
 
 # --- Tool Conversion Tests ---

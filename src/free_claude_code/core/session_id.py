@@ -26,8 +26,6 @@ an explicit "no session" sentinel; the previous behavior of falling back to a
 synthesized request id conflated two distinct identifiers.
 """
 
-from __future__ import annotations
-
 import hashlib
 
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
