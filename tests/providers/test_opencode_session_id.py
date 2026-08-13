@@ -128,7 +128,9 @@ def _derive(input_str: str) -> str:
 
     digest = _hashlib.sha256(input_str.encode("utf-8")).digest()
     hex_part = digest[:_HEX_LEN].hex()
-    b62_part = "".join(_BASE62[b % 62] for b in digest[_HEX_LEN:_HEX_LEN + _RANDOM_LEN])
+    b62_part = "".join(
+        _BASE62[b % 62] for b in digest[_HEX_LEN : _HEX_LEN + _RANDOM_LEN]
+    )
     return f"{_PREFIX}{hex_part}{b62_part}"
 
 
