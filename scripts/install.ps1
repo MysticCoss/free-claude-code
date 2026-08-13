@@ -3,6 +3,7 @@ param(
     [switch] $VoiceLocal,
     [switch] $VoiceAll,
     [string] $TorchBackend = "",
+    [switch] $Rtk,
     [switch] $DryRun,
     [switch] $Help,
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -20,8 +21,16 @@ $MinUvVersion = "0.11.16"
 $ClaudeInstallUrl = "https://claude.ai/install.ps1"
 $CodexInstallUrl = "https://chatgpt.com/codex/install.ps1"
 $PiInstallUrl = "https://pi.dev/install.ps1"
+$RtkVersion = "0.44.2"
+$RtkReleaseBaseUrl = "https://github.com/rtk-ai/rtk/releases/download/v$RtkVersion"
+$RtkWindowsAssetName = "rtk-x86_64-pc-windows-msvc.zip"
+$RtkWindowsAssetSha256 = "3a1e114edce9080f8a10663e9c87488363a82f14a5ca8aab2ad416817f89d47c"
 $UvInstallUrl = "https://astral.sh/uv/install.ps1"
+$script:InstallClaudeCode = $true
+$script:InstallCodex = $true
+$script:InstallPi = $true
 $script:PiAvailable = $false
+$script:EnableRtk = $Rtk.IsPresent
 $FccCommands = @(
     # Include retired entry points so updates reject older FCC processes before replacement.
     "fcc-desktop",
@@ -37,13 +46,14 @@ function Show-Usage {
     @"
 Usage: install.ps1 [options]
 
-Installs Claude Code and Codex, offers to install Pi, ensures a compatible uv, and installs or updates Free Claude Code.
+Installs or updates Free Claude Code and lets you choose which coding agents to install or verify.
 
 Options:
   -VoiceNim              Install NVIDIA NIM voice transcription support.
   -VoiceLocal            Install local Whisper voice transcription support.
   -VoiceAll              Install all voice transcription backends.
   -TorchBackend VALUE    Use a uv PyTorch backend, such as cu130. Requires local voice.
+  -Rtk                   Install and configure RTK for the selected coding agents.
   -DryRun                Print commands without running them.
   -Help                  Show this help text.
 "@
@@ -54,6 +64,52 @@ function Write-Step {
 
     Write-Host ""
     Write-Host "==> $Message"
+}
+
+function Test-InteractiveInstaller {
+    return (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
+}
+
+function Read-YesNo {
+    param(
+        [string] $Prompt,
+        [bool] $DefaultYes = $true
+    )
+
+    while ($true) {
+        $hint = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
+        $answer = ([string] (Read-Host "$Prompt $hint")).Trim().ToLowerInvariant()
+        if ($answer -eq "") {
+            return $DefaultYes
+        }
+        if ($answer -in @("y", "yes")) {
+            return $true
+        }
+        if ($answer -in @("n", "no")) {
+            return $false
+        }
+        Write-Host "Please answer Y or N."
+    }
+}
+
+function Select-CodingAgents {
+    while ($true) {
+        $script:InstallClaudeCode = Read-YesNo "Install or verify Claude Code for fcc-claude?"
+        $script:InstallCodex = Read-YesNo "Install or verify Codex for fcc-codex?"
+        $script:InstallPi = Read-YesNo "Install or verify Pi for fcc-pi?"
+
+        if ($script:InstallClaudeCode -or $script:InstallCodex -or $script:InstallPi) {
+            break
+        }
+        Write-Host "Select at least one coding agent."
+        Write-Host ""
+    }
+
+    if (-not $script:EnableRtk) {
+        $script:EnableRtk = Read-YesNo `
+            -Prompt "Enable RTK token optimization globally for the selected coding agents?" `
+            -DefaultYes $false
+    }
 }
 
 function Format-Argument {
@@ -96,7 +152,7 @@ function Invoke-NativeCommand {
     }
 }
 
-function Invoke-NativeCapture {
+function Invoke-Utf8NativeCapture {
     param(
         [string] $FilePath,
         [string[]] $Arguments = @()
@@ -104,9 +160,16 @@ function Invoke-NativeCapture {
 
     $commandText = Format-Command -FilePath $FilePath -Arguments $Arguments
     Write-Host "+ $commandText"
-    $global:LASTEXITCODE = 0
-    $output = & $FilePath @Arguments
-    $exitCode = $LASTEXITCODE
+    $originalOutputEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $global:LASTEXITCODE = 0
+        $output = & $FilePath @Arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        [Console]::OutputEncoding = $originalOutputEncoding
+    }
     if ($exitCode -ne 0) {
         throw "Command failed with exit code ${exitCode}: $commandText"
     }
@@ -234,6 +297,17 @@ function Invoke-DownloadedPowerShellInstaller {
             throw "The downloaded $Name installer was empty."
         }
 
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile(
+            $temporaryScript,
+            [ref] $tokens,
+            [ref] $parseErrors
+        ) | Out-Null
+        if ($parseErrors.Count -gt 0) {
+            throw "The downloaded $Name installer from '$Url' is not valid PowerShell. A network proxy or filter may have replaced it with an HTML response."
+        }
+
         $powerShellPath = Get-PowerShellExecutable
 
         $hadNonInteractive = Test-Path Env:CODEX_NON_INTERACTIVE
@@ -315,6 +389,153 @@ function Confirm-PiApplication {
     Invoke-NativeCommand -FilePath $command.Source -Arguments @("--version")
 }
 
+function Install-Rtk {
+    $archiveUrl = "$RtkReleaseBaseUrl/$RtkWindowsAssetName"
+    if ($DryRun) {
+        Write-Host "+ irm $archiveUrl -OutFile <temporary-archive>"
+        Write-Host "+ verify pinned SHA-256 for $RtkWindowsAssetName"
+        Write-Host "+ extract and install rtk.exe to ~/.local/bin"
+        return
+    }
+
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("fcc-rtk-" + [guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path $temporaryRoot $RtkWindowsAssetName
+    $extractPath = Join-Path $temporaryRoot "extracted"
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+
+        Write-Host "+ irm $archiveUrl -OutFile $(Format-Argument $archivePath)"
+        Invoke-RestMethod -Uri $archiveUrl -OutFile $archivePath -ErrorAction Stop
+        if ((-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) -or ((Get-Item -LiteralPath $archivePath).Length -eq 0)) {
+            throw "The RTK release archive was empty."
+        }
+
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $archiveStream = [IO.File]::OpenRead($archivePath)
+        try {
+            $actualHash = [BitConverter]::ToString($sha256.ComputeHash($archiveStream)).Replace("-", "").ToLowerInvariant()
+        }
+        finally {
+            $archiveStream.Dispose()
+            $sha256.Dispose()
+        }
+        if ($actualHash -ne $RtkWindowsAssetSha256) {
+            throw "RTK checksum verification failed for $RtkWindowsAssetName."
+        }
+
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
+        $extractedExecutable = Join-Path $extractPath "rtk.exe"
+        if (-not (Test-Path -LiteralPath $extractedExecutable -PathType Leaf)) {
+            throw "The verified RTK archive did not contain rtk.exe."
+        }
+
+        $installDirectory = Join-Path $env:USERPROFILE ".local\bin"
+        New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
+        Copy-Item -LiteralPath $extractedExecutable -Destination (Join-Path $installDirectory "rtk.exe") -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryRoot) {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-RtkCommand {
+    param([string[]] $Arguments)
+
+    if ($DryRun) {
+        Write-Host "+ RTK_TELEMETRY_DISABLED=1 $(Format-Command -FilePath 'rtk' -Arguments $Arguments)"
+        return
+    }
+
+    $command = Get-ApplicationCommand "rtk"
+    if (-not $command) {
+        throw "RTK was installed, but 'rtk' is not available on PATH."
+    }
+
+    $hadTelemetryDisabled = Test-Path Env:RTK_TELEMETRY_DISABLED
+    $previousTelemetryDisabled = $env:RTK_TELEMETRY_DISABLED
+    try {
+        $env:RTK_TELEMETRY_DISABLED = "1"
+        Invoke-NativeCommand -FilePath $command.Source -Arguments $Arguments
+    }
+    finally {
+        if ($hadTelemetryDisabled) {
+            $env:RTK_TELEMETRY_DISABLED = $previousTelemetryDisabled
+        }
+        else {
+            Remove-Item Env:RTK_TELEMETRY_DISABLED -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Ensure-RtkClaudeConfigDirectory {
+    $claudeConfigDirectory = $env:CLAUDE_CONFIG_DIR
+    if ([string]::IsNullOrWhiteSpace($claudeConfigDirectory)) {
+        $claudeConfigDirectory = Join-Path $env:USERPROFILE ".claude"
+    }
+
+    if ($DryRun) {
+        Write-Host "+ mkdir $(Format-Argument $claudeConfigDirectory)"
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $claudeConfigDirectory | Out-Null
+}
+
+function Confirm-RtkApplication {
+    if ($DryRun) {
+        Invoke-RtkCommand -Arguments @("--version")
+        Invoke-RtkCommand -Arguments @("gain")
+        return
+    }
+
+    $command = Get-ApplicationCommand "rtk"
+    if (-not $command) {
+        throw "RTK was installed, but 'rtk' is not available on PATH."
+    }
+
+    try {
+        Invoke-RtkCommand -Arguments @("--version")
+        Invoke-RtkCommand -Arguments @("gain")
+    }
+    catch {
+        throw "The 'rtk' command at '$($command.Source)' is not a compatible Rust Token Killer installation. Remove the conflicting command from PATH, then rerun the installer. $($_.Exception.Message)"
+    }
+}
+
+function Ensure-Rtk {
+    if (Get-ApplicationCommand "rtk") {
+        Write-Host "RTK already found on PATH; verifying it without updating it."
+    }
+    else {
+        Install-Rtk
+        Add-KnownBinDirectories
+    }
+
+    Confirm-RtkApplication
+}
+
+function Configure-RtkForSelectedAgents {
+    if (-not $script:EnableRtk) {
+        return
+    }
+
+    Write-Step "Installing and configuring RTK token optimization"
+    Ensure-Rtk
+
+    if ($script:InstallClaudeCode) {
+        Ensure-RtkClaudeConfigDirectory
+        Invoke-RtkCommand -Arguments @("init", "--global", "--auto-patch")
+    }
+    if ($script:InstallCodex) {
+        Invoke-RtkCommand -Arguments @("init", "--global", "--codex")
+    }
+    if ($script:InstallPi -and $script:PiAvailable) {
+        Invoke-RtkCommand -Arguments @("init", "--global", "--agent", "pi")
+    }
+}
+
 function Ensure-ClaudeCode {
     if (Get-ApplicationCommand "claude") {
         Write-Host "Claude Code already found on PATH; verifying it."
@@ -372,6 +593,27 @@ function Ensure-Pi {
     $script:PiAvailable = $true
 }
 
+function Ensure-SelectedCodingAgents {
+    if ($script:InstallClaudeCode) {
+        Write-Step "Ensuring Claude Code is installed"
+        Ensure-ClaudeCode
+    }
+
+    if ($script:InstallCodex) {
+        Write-Step "Ensuring Codex is installed"
+        Ensure-Codex
+    }
+
+    if ($script:InstallPi) {
+        Write-Step "Checking or installing Pi"
+        Ensure-Pi
+    }
+
+    if ((-not $script:InstallClaudeCode) -and (-not $script:InstallCodex) -and (-not $script:PiAvailable)) {
+        throw "No selected coding agent was installed. Re-run the installer and choose at least one."
+    }
+}
+
 function Convert-UvVersionOutput {
     param([string] $Output)
 
@@ -389,7 +631,7 @@ function Convert-UvVersionOutput {
 function Get-UvVersion {
     param([string] $UvPath)
 
-    $output = Invoke-NativeCapture -FilePath $UvPath -Arguments @("--version")
+    $output = Invoke-Utf8NativeCapture -FilePath $UvPath -Arguments @("--version")
     $version = Convert-UvVersionOutput $output
     if ([string]::IsNullOrWhiteSpace($version)) {
         throw "uv is present, but 'uv --version' did not return a valid version."
@@ -573,7 +815,7 @@ function Configure-AndConfirmFreeClaudeCode {
         throw "uv is not available for PATH configuration."
     }
     Invoke-NativeCommand -FilePath $uvCommand.Source -Arguments @("tool", "update-shell")
-    $toolBin = Invoke-NativeCapture -FilePath $uvCommand.Source -Arguments @("tool", "dir", "--bin")
+    $toolBin = Invoke-Utf8NativeCapture -FilePath $uvCommand.Source -Arguments @("tool", "dir", "--bin")
     if ([string]::IsNullOrWhiteSpace($toolBin)) {
         throw "uv returned an empty tool bin directory."
     }
@@ -691,14 +933,13 @@ Add-KnownBinDirectories
 Write-Step "Checking for running Free Claude Code processes"
 Assert-NoFccProcessesRunning
 
-Write-Step "Ensuring Claude Code is installed"
-Ensure-ClaudeCode
+if (Test-InteractiveInstaller) {
+    Write-Step "Choosing coding agents"
+    Select-CodingAgents
+}
 
-Write-Step "Ensuring Codex is installed"
-Ensure-Codex
-
-Write-Step "Checking or installing Pi"
-Ensure-Pi
+Ensure-SelectedCodingAgents
+Configure-RtkForSelectedAgents
 
 Write-Step "Ensuring uv $MinUvVersion or newer is installed"
 Ensure-Uv
@@ -716,8 +957,12 @@ if ($DryRun) {
 else {
     Write-Host "Free Claude Code is installed and verified. Open the Free Claude Code desktop shortcut to run it in the background."
     Write-Host "For terminal use, start the proxy with: fcc-server"
-    Write-Host "Run Claude Code with: fcc-claude"
-    Write-Host "Run Codex with: fcc-codex"
+    if ($script:InstallClaudeCode) {
+        Write-Host "Run Claude Code with: fcc-claude"
+    }
+    if ($script:InstallCodex) {
+        Write-Host "Run Codex with: fcc-codex"
+    }
     if ($script:PiAvailable) {
         Write-Host "Run Pi with: fcc-pi"
     }

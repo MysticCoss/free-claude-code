@@ -1,5 +1,6 @@
 import pytest
 
+from free_claude_code.core.anthropic.openai_tool_names import OpenAIToolNameCodec
 from free_claude_code.core.anthropic.stream_contracts import (
     assert_anthropic_stream_contract,
     parse_sse_text,
@@ -124,9 +125,55 @@ def test_responses_provider_stream_preserves_reasoning_tools_usage_and_ids() -> 
     assert argument_deltas == ['{"q":', '"x"}']
     message_delta = next(event for event in events if event.event == "message_delta")
     assert message_delta.data["usage"] == {
-        "input_tokens": 20,
+        "input_tokens": 5,
         "output_tokens": 8,
         "cache_read_input_tokens": 15,
+    }
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "cached_tokens", "expected_input_tokens"),
+    [
+        (20, -1, 20),
+        (20, 21, 20),
+        (20, True, 20),
+        (None, 5, 12),
+    ],
+)
+def test_responses_provider_stream_ignores_invalid_cache_partitions(
+    input_tokens: int | None,
+    cached_tokens: int | bool,
+    expected_input_tokens: int,
+) -> None:
+    stream = ResponsesProviderStream(
+        message_id="msg_test",
+        model="openai/gpt-test",
+        input_tokens=12,
+    )
+    output = stream.start()
+    output.extend(
+        stream.feed(
+            "response.completed",
+            {
+                "response": {
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": 8,
+                        "input_tokens_details": {"cached_tokens": cached_tokens},
+                    }
+                }
+            },
+        )
+    )
+
+    message_delta = next(
+        event
+        for event in parse_sse_text("".join(output))
+        if event.event == "message_delta"
+    )
+    assert message_delta.data["usage"] == {
+        "input_tokens": expected_input_tokens,
+        "output_tokens": 8,
     }
 
 
@@ -151,3 +198,68 @@ def test_responses_provider_stream_surfaces_failed_event() -> None:
         )
 
     assert exc_info.value.code == "server_error"
+
+
+def test_responses_provider_stream_restores_added_and_done_only_tool_names() -> None:
+    originals = (
+        "mcp__responses_added__" + "x" * 70,
+        "mcp__responses_done__" + "y" * 70,
+    )
+    codec = OpenAIToolNameCodec.from_names(originals)
+    stream = ResponsesProviderStream(
+        message_id="msg_test",
+        model="gpt-test",
+        input_tokens=0,
+        tool_names=codec,
+    )
+    output = stream.start()
+    output.extend(
+        stream.feed(
+            "response.output_item.added",
+            {
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_added",
+                    "call_id": "call_added",
+                    "name": codec.encode(originals[0]),
+                }
+            },
+        )
+    )
+    output.extend(
+        stream.feed(
+            "response.output_item.done",
+            {
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_added",
+                    "call_id": "call_added",
+                    "name": codec.encode(originals[0]),
+                    "arguments": "{}",
+                }
+            },
+        )
+    )
+    output.extend(
+        stream.feed(
+            "response.output_item.done",
+            {
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_done",
+                    "call_id": "call_done",
+                    "name": codec.encode(originals[1]),
+                    "arguments": "{}",
+                }
+            },
+        )
+    )
+
+    event_text = "".join(output)
+    starts = [
+        event.data["content_block"]
+        for event in parse_sse_text(event_text)
+        if event.event == "content_block_start"
+    ]
+    assert [start["name"] for start in starts] == list(originals)
+    assert all(codec.encode(name) not in event_text for name in originals)

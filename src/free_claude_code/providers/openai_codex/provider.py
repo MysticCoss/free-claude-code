@@ -12,6 +12,7 @@ import httpx
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.anthropic.openai_tool_names import OpenAIToolNameCodec
 from free_claude_code.core.diagnostics import (
     ERROR_DETAIL_DISPLAY_CAP_BYTES,
     attach_upstream_error_body,
@@ -90,7 +91,7 @@ class OpenAICodexProvider(BaseProvider):
         *,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> None:
-        """Validate lossless request conversion before any upstream I/O."""
+        """Validate and adapt the private Codex request before upstream I/O."""
 
         self._build_body(request, reasoning=reasoning)
 
@@ -134,12 +135,14 @@ class OpenAICodexProvider(BaseProvider):
     ) -> AsyncIterator[str]:
         """Stream Responses output in Anthropic Messages format."""
 
+        tool_names = OpenAIToolNameCodec.from_request(request)
         body = self._build_body(request, reasoning=reasoning)
         return self._run_stream(
             body,
             input_tokens=input_tokens,
             request_id=request_id,
             response_model=response_model or request.model,
+            tool_names=tool_names,
         )
 
     @staticmethod
@@ -149,9 +152,14 @@ class OpenAICodexProvider(BaseProvider):
         reasoning: ReasoningPolicy,
     ) -> dict[str, Any]:
         try:
-            return build_responses_provider_request(request, reasoning=reasoning)
+            body = build_responses_provider_request(request, reasoning=reasoning)
         except ResponsesConversionError as exc:
             raise InvalidRequestError(str(exc)) from exc
+        # The private Codex backend rejects these public Responses fields.
+        # Codex itself omits the output cap and uses separate internal metadata.
+        body.pop("max_output_tokens", None)
+        body.pop("metadata", None)
+        return body
 
     async def _run_stream(
         self,
@@ -160,6 +168,7 @@ class OpenAICodexProvider(BaseProvider):
         input_tokens: int,
         request_id: str | None,
         response_model: str,
+        tool_names: OpenAIToolNameCodec,
     ) -> AsyncIterator[str]:
         retry_session = self._admission.new_retry_session(request_id=request_id)
         recovery = RecoveryController()
@@ -184,6 +193,7 @@ class OpenAICodexProvider(BaseProvider):
                 model=response_model,
                 input_tokens=input_tokens,
                 log_raw_events=self._config.log_raw_sse_events,
+                tool_names=tool_names,
             )
             for event in stream.start():
                 for held in recovery.push(event):
@@ -227,8 +237,8 @@ class OpenAICodexProvider(BaseProvider):
                             truncated=body_truncated,
                         )
                         raise
-                content_type = response.headers.get("content-type", "")
-                if "text/event-stream" not in content_type.lower():
+                content_type = response.headers.get("content-type")
+                if content_type and "text/event-stream" not in content_type.lower():
                     body_bytes, body_truncated = await _read_bounded_body(response)
                     error = _TruncatedResponsesStream(
                         "OpenAI returned a non-streaming Responses payload."

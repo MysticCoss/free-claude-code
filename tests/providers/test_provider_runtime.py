@@ -11,23 +11,36 @@ from free_claude_code.application.errors import (
 )
 from free_claude_code.config.nim import NimSettings
 from free_claude_code.config.provider_catalog import (
+    AGNES_DEFAULT_BASE,
     BEDROCK_DEFAULT_BASE,
+    CHUTES_DEFAULT_BASE,
     COHERE_DEFAULT_BASE,
+    DEEPINFRA_DEFAULT_BASE,
+    FEATHERLESS_DEFAULT_BASE,
     GITHUB_MODELS_DEFAULT_BASE,
     HUGGINGFACE_DEFAULT_BASE,
     KIMI_CODE_DEFAULT_BASE,
     MINIMAX_DEFAULT_BASE,
+    NARAROUTE_DEFAULT_BASE,
+    NEBIUS_DEFAULT_BASE,
     OLLAMA_CLOUD_DEFAULT_BASE,
     PROVIDER_CATALOG,
+    QWENCLOUD_DEFAULT_BASE,
+    SILICONFLOW_DEFAULT_BASE,
     SUPPORTED_PROVIDER_IDS,
+    TOGETHER_DEFAULT_BASE,
+    TOKENROUTER_DEFAULT_BASE,
     VERCEL_AI_GATEWAY_DEFAULT_BASE,
+    XAI_DEFAULT_BASE,
     ZAI_DEFAULT_BASE,
+    ZENMUX_DEFAULT_BASE,
 )
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.cloudflare import CloudflareProvider
 from free_claude_code.providers.deepseek import DeepSeekProvider
 from free_claude_code.providers.gemini import GeminiProvider
 from free_claude_code.providers.github_models import GitHubModelsProvider
+from free_claude_code.providers.groq import GroqProvider
 from free_claude_code.providers.kilo import KiloProvider
 from free_claude_code.providers.lmstudio import LMStudioProvider
 from free_claude_code.providers.mistral import MistralProvider
@@ -57,6 +70,14 @@ def _make_settings(**overrides):
     mock.azure_openai_base_url = "https://test-resource.openai.azure.com/openai/v1/"
     mock.nvidia_nim_api_key = "test_key"
     mock.open_router_api_key = "test_openrouter_key"
+    mock.xai_api_key = "test_xai_key"
+    mock.qwencloud_api_key = "test_qwencloud_key"
+    mock.together_api_key = "test_together_key"
+    mock.deepinfra_api_key = "test_deepinfra_key"
+    mock.siliconflow_api_key = "test_siliconflow_key"
+    mock.nebius_api_key = "test_nebius_key"
+    mock.chutes_api_key = "test_chutes_key"
+    mock.featherless_api_key = "test_featherless_key"
     mock.mistral_api_key = "test_mistral_key"
     mock.codestral_api_key = "test_codestral_key"
     mock.deepseek_api_key = "test_deepseek_key"
@@ -70,6 +91,12 @@ def _make_settings(**overrides):
     mock.cohere_api_key = "test_cohere_key"
     mock.github_models_token = "test_github_models_token"
     mock.zai_api_key = "test_zai_key"
+    mock.tokenrouter_api_key = "test_tokenrouter_key"
+    mock.tokenrouter_base_url = TOKENROUTER_DEFAULT_BASE
+    mock.nararoute_api_key = "test_nararoute_key"
+    mock.nararoute_base_url = NARAROUTE_DEFAULT_BASE
+    mock.agnes_api_key = "test_agnes_key"
+    mock.zenmux_api_key = "test_zenmux_key"
     mock.lm_studio_base_url = "http://localhost:1234/v1"
     mock.llamacpp_base_url = "http://localhost:8080/v1"
     mock.ollama_base_url = "http://localhost:11434"
@@ -86,7 +113,7 @@ def _make_settings(**overrides):
     mock.kimi_code_api_key = "test_kimi_code_key"
     mock.wafer_proxy = ""
     mock.minimax_proxy = ""
-    mock.opencode_proxy = ""
+    mock.opencode_zen_proxy = ""
     mock.opencode_go_proxy = ""
     mock.vercel_ai_gateway_proxy = ""
     mock.bedrock_proxy = ""
@@ -94,8 +121,14 @@ def _make_settings(**overrides):
     mock.cohere_proxy = ""
     mock.github_models_proxy = ""
     mock.zai_proxy = ""
+    mock.tokenrouter_proxy = ""
+    mock.nararoute_proxy = ""
+    mock.agnes_proxy = ""
+    mock.zenmux_proxy = ""
     mock.fireworks_proxy = ""
     mock.fireworks_api_key = "test_fireworks_key"
+    mock.novita_proxy = ""
+    mock.novita_api_key = "test_novita_key"
     mock.cloudflare_api_token = "test_cloudflare_token"
     mock.cloudflare_account_id = "test_cloudflare_account"
     mock.cloudflare_proxy = ""
@@ -112,6 +145,14 @@ def _make_settings(**overrides):
     mock.kilo_api_key = "test_kilo_key"
     mock.kilo_proxy = ""
     mock.openai_proxy = ""
+    mock.xai_proxy = ""
+    mock.qwencloud_proxy = ""
+    mock.together_proxy = ""
+    mock.deepinfra_proxy = ""
+    mock.siliconflow_proxy = ""
+    mock.nebius_proxy = ""
+    mock.chutes_proxy = ""
+    mock.featherless_proxy = ""
     mock.azure_openai_proxy = ""
     mock.provider_rate_limit = 40
     mock.provider_rate_window = 60
@@ -179,6 +220,209 @@ def test_ollama_cloud_provider_config_uses_key_and_proxy():
     assert config.api_key == "ollama-cloud-token"
     assert config.base_url == OLLAMA_CLOUD_DEFAULT_BASE
     assert config.proxy == "http://proxy.test:8080"
+
+
+def test_xai_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["xai"]
+    settings = _make_settings(
+        xai_api_key="xai-token",
+        xai_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("xai", settings)
+
+    assert descriptor.display_name == "xAI (Grok)"
+    assert descriptor.credential_env == "XAI_API_KEY"
+    assert config.api_key == "xai-token"
+    assert config.base_url == XAI_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_qwencloud_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["qwencloud"]
+    settings = _make_settings(
+        qwencloud_api_key="qwencloud-token",
+        qwencloud_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("qwencloud", settings)
+
+    assert descriptor.display_name == "QwenCloud Token Plan"
+    assert descriptor.credential_env == "QWENCLOUD_API_KEY"
+    assert config.api_key == "qwencloud-token"
+    assert config.base_url == QWENCLOUD_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_together_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["together"]
+    settings = _make_settings(
+        together_api_key="together-token",
+        together_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("together", settings)
+
+    assert descriptor.display_name == "Together AI"
+    assert descriptor.credential_env == "TOGETHER_API_KEY"
+    assert config.api_key == "together-token"
+    assert config.base_url == TOGETHER_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_deepinfra_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["deepinfra"]
+    settings = _make_settings(
+        deepinfra_api_key="deepinfra-token",
+        deepinfra_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("deepinfra", settings)
+
+    assert descriptor.display_name == "DeepInfra"
+    assert descriptor.credential_env == "DEEPINFRA_API_KEY"
+    assert config.api_key == "deepinfra-token"
+    assert config.base_url == DEEPINFRA_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_siliconflow_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["siliconflow"]
+    settings = _make_settings(
+        siliconflow_api_key="siliconflow-token",
+        siliconflow_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("siliconflow", settings)
+
+    assert descriptor.display_name == "SiliconFlow"
+    assert descriptor.credential_env == "SILICONFLOW_API_KEY"
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "siliconflow-token"
+    assert config.base_url == SILICONFLOW_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_nebius_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["nebius"]
+    settings = _make_settings(
+        nebius_api_key="nebius-token",
+        nebius_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("nebius", settings)
+
+    assert descriptor.display_name == "Nebius Token Factory"
+    assert descriptor.credential_env == "NEBIUS_API_KEY"
+    assert descriptor.credential_url == (
+        "https://tokenfactory.nebius.com/project/api-keys"
+    )
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "nebius-token"
+    assert config.base_url == NEBIUS_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_chutes_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["chutes"]
+    settings = _make_settings(
+        chutes_api_key="chutes-token",
+        chutes_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("chutes", settings)
+
+    assert descriptor.display_name == "Chutes"
+    assert descriptor.credential_env == "CHUTES_API_KEY"
+    assert descriptor.credential_url == (
+        "https://chutes.ai/docs/getting-started/authentication"
+    )
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "chutes-token"
+    assert config.base_url == CHUTES_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_featherless_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["featherless"]
+    settings = _make_settings(
+        featherless_api_key="featherless-token",
+        featherless_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("featherless", settings)
+
+    assert descriptor.display_name == "Featherless AI"
+    assert descriptor.credential_env == "FEATHERLESS_API_KEY"
+    assert descriptor.credential_url == "https://featherless.ai/account/api-keys"
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "featherless-token"
+    assert config.base_url == FEATHERLESS_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_agnes_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["agnes"]
+    settings = _make_settings(
+        agnes_api_key="agnes-token",
+        agnes_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("agnes", settings)
+
+    assert descriptor.display_name == "Agnes AI"
+    assert descriptor.credential_env == "AGNES_API_KEY"
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "agnes-token"
+    assert config.base_url == AGNES_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
+
+
+def test_zenmux_provider_config_uses_key_base_and_proxy() -> None:
+    descriptor = PROVIDER_CATALOG["zenmux"]
+    settings = _make_settings(
+        zenmux_api_key="zenmux-token",
+        zenmux_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(descriptor, settings)
+    with patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"):
+        provider = create_provider("zenmux", settings)
+
+    assert descriptor.display_name == "ZenMux"
+    assert descriptor.credential_env == "ZENMUX_API_KEY"
+    assert descriptor.base_url_attr is None
+    assert config.api_key == "zenmux-token"
+    assert config.base_url == ZENMUX_DEFAULT_BASE
+    assert config.proxy == "http://proxy.test:8080"
+    assert isinstance(provider, OpenAIChatProvider)
 
 
 def test_bedrock_provider_config_uses_regional_base_key_and_proxy() -> None:
@@ -320,6 +564,16 @@ def test_create_cloudflare_provider_uses_account_scoped_base_url():
     )
 
 
+def test_opencode_zen_provider_config_uses_explicit_id_and_name():
+    with patch("httpx.AsyncClient"):
+        provider = create_provider("opencode_zen", _make_settings())
+
+    assert isinstance(provider, OpenAIChatProvider)
+    assert provider._base_url == "https://opencode.ai/zen/v1"
+    assert provider._provider_name == "OPENCODE_ZEN"
+    assert provider._api_key == "test_opencode_key"
+
+
 def test_opencode_go_provider_config_uses_correct_base_url_and_name():
     with patch("httpx.AsyncClient"):
         provider = create_provider("opencode_go", _make_settings())
@@ -444,6 +698,7 @@ def test_create_provider_instantiates_each_builtin():
         groq_api_key="test_groq_key",
         cerebras_api_key="test_cerebras_key",
         fireworks_api_key="test_fireworks_key",
+        novita_api_key="test_novita_key",
         cloudflare_api_token="test_cloudflare_token",
         cloudflare_account_id="test_cloudflare_account",
         vercel_ai_gateway_api_key="test_vercel_key",
@@ -461,6 +716,14 @@ def test_create_provider_instantiates_each_builtin():
     cases = {
         "nvidia_nim": NvidiaNimProvider,
         "openai": OpenAICodexProvider,
+        "xai": OpenAIChatProvider,
+        "qwencloud": OpenAIChatProvider,
+        "together": OpenAIChatProvider,
+        "deepinfra": OpenAIChatProvider,
+        "siliconflow": OpenAIChatProvider,
+        "nebius": OpenAIChatProvider,
+        "chutes": OpenAIChatProvider,
+        "featherless": OpenAIChatProvider,
         "azure_openai": OpenAIChatProvider,
         "open_router": OpenRouterProvider,
         "mistral": MistralProvider,
@@ -470,13 +733,14 @@ def test_create_provider_instantiates_each_builtin():
         "kimi_code": OpenAIChatProvider,
         "minimax": OpenAIChatProvider,
         "fireworks": OpenAIChatProvider,
+        "novita": OpenAIChatProvider,
         "cloudflare": CloudflareProvider,
         "lmstudio": LMStudioProvider,
         "llamacpp": OpenAIChatProvider,
         "ollama": OpenAIChatProvider,
         "ollama_cloud": OpenAIChatProvider,
         "wafer": OpenAIChatProvider,
-        "opencode": OpenAIChatProvider,
+        "opencode_zen": OpenAIChatProvider,
         "opencode_go": OpenAIChatProvider,
         "vercel": OpenAIChatProvider,
         "bedrock": OpenAIChatProvider,
@@ -484,9 +748,13 @@ def test_create_provider_instantiates_each_builtin():
         "cohere": OpenAIChatProvider,
         "github_models": GitHubModelsProvider,
         "zai": OpenAIChatProvider,
+        "tokenrouter": OpenAIChatProvider,
+        "nararoute": OpenAIChatProvider,
+        "agnes": OpenAIChatProvider,
+        "zenmux": OpenAIChatProvider,
         "gemini": GeminiProvider,
         "vertex": VertexProvider,
-        "groq": OpenAIChatProvider,
+        "groq": GroqProvider,
         "sambanova": OpenAIChatProvider,
         "kilo": KiloProvider,
         "cerebras": OpenAIChatProvider,

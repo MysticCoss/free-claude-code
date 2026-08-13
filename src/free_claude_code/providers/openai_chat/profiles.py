@@ -10,6 +10,7 @@ from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKEN
 from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
+from free_claude_code.providers.model_listing import RequiredPathValues
 
 from .base_url import openai_v1_base_url
 from .extra_body import (
@@ -20,11 +21,13 @@ from .reasoning import (
     LLAMACPP_REASONING,
     NO_REASONING,
     SPLIT_REASONING_OUTPUT,
+    ChatTemplateReasoning,
     NamedEffortReasoning,
     ReasoningEncoder,
     ReasoningObject,
     ThinkingObjectReasoning,
 )
+from .reasoning_details import apply_reasoning_details_replay
 from .request_policy import OpenAIChatPostprocessor, OpenAIChatRequestPolicy
 
 _ALL_EFFORTS = tuple((effort, effort.value) for effort in ReasoningEffort)
@@ -35,6 +38,14 @@ _LOW_MEDIUM_HIGH = (
     (ReasoningEffort.HIGH, "high"),
     (ReasoningEffort.XHIGH, "high"),
     (ReasoningEffort.MAX, "high"),
+)
+_MINIMAL_TO_XHIGH = (
+    (ReasoningEffort.MINIMAL, "minimal"),
+    (ReasoningEffort.LOW, "low"),
+    (ReasoningEffort.MEDIUM, "medium"),
+    (ReasoningEffort.HIGH, "high"),
+    (ReasoningEffort.XHIGH, "xhigh"),
+    (ReasoningEffort.MAX, "xhigh"),
 )
 _LOW_TO_MAX = (
     (ReasoningEffort.MINIMAL, "low"),
@@ -55,6 +66,37 @@ _KIMI_CODE_EFFORTS = (
 
 
 @dataclass(frozen=True, slots=True)
+class OpenAIModelPagination:
+    """Bounded numbered-pagination metadata for a model-list endpoint."""
+
+    page_param: str = "page"
+    first_page: int = 1
+    current_page_path: tuple[str, ...] = ("pagination", "current_page")
+    total_pages_path: tuple[str, ...] = ("pagination", "total_pages")
+    max_pages: int = 100
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIModelListing:
+    """Declarative model-list endpoint and response shape."""
+
+    path: str | None = None
+    query_params: tuple[tuple[str, str], ...] = ()
+    collection_field: str | None = "data"
+    id_field: str = "id"
+    aliases_field: str | None = None
+    required_path_values: RequiredPathValues = ()
+    required_null_field: str | None = None
+    required_sequence_items: tuple[tuple[str, str], ...] = ()
+    exclude_missing_sequence_fields: bool = False
+    tags_field: str | None = None
+    thinking_tag: str = "reasoning"
+    non_thinking_tag: str | None = None
+    thinking_boolean_path: tuple[str, ...] | None = None
+    pagination: OpenAIModelPagination | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OpenAIChatProfile:
     """Immutable transport and reasoning behavior for one provider."""
 
@@ -62,9 +104,13 @@ class OpenAIChatProfile:
     reasoning: ReasoningEncoder
     postprocessors: tuple[OpenAIChatPostprocessor, ...] = ()
     model_ids_are_routable: bool = True
+    model_listing: OpenAIModelListing = OpenAIModelListing()
     normalize_base_url: bool = False
     reasoning_delta_field: Literal["reasoning_content", "reasoning"] = (
         "reasoning_content"
+    )
+    reasoning_delta_fallback_field: Literal["reasoning_content", "reasoning"] | None = (
+        None
     )
     structured_reasoning_details: bool = False
     user_agent: str | None = None
@@ -78,6 +124,14 @@ class OpenAIChatProfile:
 
     def reasoning_delta(self, delta: Any) -> str | None:
         value = getattr(delta, self.reasoning_delta_field, None)
+        if isinstance(value, str) and value:
+            return value
+        fallback = self.reasoning_delta_fallback_field
+        if fallback is None:
+            return value if isinstance(value, str) else None
+        fallback_value = getattr(delta, fallback, None)
+        if isinstance(fallback_value, str):
+            return fallback_value
         return value if isinstance(value, str) else None
 
     def apply_reasoning(
@@ -139,6 +193,171 @@ def _policy(
 
 
 OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
+    "xai": OpenAIChatProfile(
+        _policy(
+            "XAI",
+            ReasoningReplayMode.REASONING_CONTENT,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NO_REASONING,
+        model_listing=OpenAIModelListing(
+            path="/language-models",
+            collection_field="models",
+            aliases_field="aliases",
+        ),
+    ),
+    "qwencloud": OpenAIChatProfile(
+        _policy(
+            "QWENCLOUD",
+            ReasoningReplayMode.REASONING_CONTENT,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NO_REASONING,
+    ),
+    "together": OpenAIChatProfile(
+        _policy(
+            "TOGETHER",
+            ReasoningReplayMode.REASONING,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NO_REASONING,
+        model_listing=OpenAIModelListing(
+            path="/models",
+            collection_field=None,
+            required_path_values=((("type",), ("chat",)),),
+        ),
+        reasoning_delta_field="reasoning",
+    ),
+    "deepinfra": OpenAIChatProfile(
+        _policy(
+            "DEEPINFRA",
+            ReasoningReplayMode.REASONING_CONTENT,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NamedEffortReasoning(
+            _ALL_EFFORTS,
+            disabled_value="none",
+            enabled_value="high",
+            use_extra_body=True,
+        ),
+        model_listing=OpenAIModelListing(
+            path="https://api.deepinfra.com/models/list",
+            collection_field=None,
+            id_field="model_name",
+            required_path_values=((("reported_type",), ("text-generation",)),),
+            required_null_field="deprecated",
+            tags_field="tags",
+            non_thinking_tag="non-reasoning",
+        ),
+    ),
+    "siliconflow": OpenAIChatProfile(
+        _policy(
+            "SILICONFLOW",
+            ReasoningReplayMode.REASONING_CONTENT,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NO_REASONING,
+        model_listing=OpenAIModelListing(
+            path="/models",
+            query_params=(("sub_type", "chat"),),
+        ),
+    ),
+    "nebius": OpenAIChatProfile(
+        _policy(
+            "NEBIUS",
+            ReasoningReplayMode.REASONING_CONTENT,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NamedEffortReasoning(
+            _MINIMAL_TO_XHIGH,
+            disabled_value="none",
+            enabled_value="xhigh",
+        ),
+        model_listing=OpenAIModelListing(
+            path="/models",
+            query_params=(("verbose", "true"),),
+            required_path_values=((("architecture", "modality"), ("text->text",)),),
+        ),
+    ),
+    "chutes": OpenAIChatProfile(
+        _policy(
+            "CHUTES",
+            ReasoningReplayMode.DISABLED,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NO_REASONING,
+        model_listing=OpenAIModelListing(
+            path="/models",
+            required_sequence_items=(
+                ("input_modalities", "text"),
+                ("output_modalities", "text"),
+                ("supported_features", "tools"),
+            ),
+            exclude_missing_sequence_fields=True,
+            tags_field="supported_features",
+        ),
+    ),
+    "featherless": OpenAIChatProfile(
+        _policy(
+            "FEATHERLESS",
+            ReasoningReplayMode.REASONING_CONTENT,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        ChatTemplateReasoning(field="enable_thinking"),
+        model_listing=OpenAIModelListing(
+            path="/models",
+            query_params=(
+                ("capabilities", "chat,tool-use"),
+                ("available_on_current_plan", "true"),
+                ("status", "active"),
+                ("per_page", "1000"),
+            ),
+            required_path_values=(
+                (("features", "tool_use"), (True,)),
+                (("is_gated",), (False,)),
+                (("available_on_current_plan",), (True,)),
+            ),
+            pagination=OpenAIModelPagination(),
+        ),
+    ),
+    "agnes": OpenAIChatProfile(
+        _policy(
+            "AGNES",
+            ReasoningReplayMode.THINK_TAGS,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        ChatTemplateReasoning(field="enable_thinking"),
+    ),
+    "zenmux": OpenAIChatProfile(
+        _policy(
+            "ZENMUX",
+            ReasoningReplayMode.REASONING,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_canonical_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+            max_tokens_field="max_completion_tokens",
+        ),
+        ReasoningObject(_MINIMAL_TO_XHIGH),
+        postprocessors=(apply_reasoning_details_replay,),
+        model_listing=OpenAIModelListing(
+            required_sequence_items=(
+                ("input_modalities", "text"),
+                ("output_modalities", "text"),
+            ),
+            thinking_boolean_path=("capabilities", "reasoning"),
+        ),
+        reasoning_delta_field="reasoning",
+        reasoning_delta_fallback_field="reasoning_content",
+        structured_reasoning_details=True,
+    ),
     "azure_openai": OpenAIChatProfile(
         _policy(
             "AZURE_OPENAI",
@@ -156,12 +375,12 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
         _policy("CODESTRAL", ReasoningReplayMode.THINK_TAGS),
         NO_REASONING,
     ),
-    "opencode": OpenAIChatProfile(
-        _policy("OPENCODE", ReasoningReplayMode.THINK_TAGS),
+    "opencode_zen": OpenAIChatProfile(
+        _policy("OPENCODE_ZEN", ReasoningReplayMode.REASONING_CONTENT),
         NO_REASONING,
     ),
     "opencode_go": OpenAIChatProfile(
-        _policy("OPENCODE_GO", ReasoningReplayMode.THINK_TAGS),
+        _policy("OPENCODE_GO", ReasoningReplayMode.REASONING_CONTENT),
         NO_REASONING,
     ),
     "vercel": OpenAIChatProfile(
@@ -281,23 +500,6 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
         ),
         reasoning_delta_field="reasoning",
     ),
-    "groq": OpenAIChatProfile(
-        _policy(
-            "GROQ",
-            ReasoningReplayMode.REASONING_CONTENT,
-            include_extra_body=True,
-            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
-            max_tokens_field="max_completion_tokens",
-            strip_message_names=True,
-            unsupported_body_keys=frozenset({"logprobs", "logit_bias", "top_logprobs"}),
-            normalize_n_to_one=True,
-        ),
-        NamedEffortReasoning(
-            _LOW_MEDIUM_HIGH,
-            disabled_value="none",
-            enabled_value="medium",
-        ),
-    ),
     "sambanova": OpenAIChatProfile(
         _policy(
             "SAMBANOVA",
@@ -332,6 +534,22 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             budget_field="reasoning_effort",
         ),
     ),
+    "novita": OpenAIChatProfile(
+        _policy(
+            "NOVITA",
+            ReasoningReplayMode.REASONING_CONTENT,
+            include_extra_body=True,
+            extra_body_validator=validate_extra_body_does_not_override_reasoning_fields,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NamedEffortReasoning(
+            (),
+            disabled_value=False,
+            enabled_value=True,
+            field="enable_thinking",
+            use_extra_body=True,
+        ),
+    ),
     "zai": OpenAIChatProfile(
         _policy(
             "ZAI",
@@ -346,6 +564,17 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             disabled={"type": "disabled"},
         ),
     ),
+    "nararoute": OpenAIChatProfile(
+        _policy(
+            "NARAROUTE",
+            ReasoningReplayMode.DISABLED,
+            default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+        ),
+        NamedEffortReasoning(
+            _LOW_MEDIUM_HIGH,
+            enabled_value="medium",
+        ),
+    ),
     "ollama_cloud": OpenAIChatProfile(
         _policy(
             "OLLAMA_CLOUD",
@@ -358,6 +587,13 @@ OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
             enabled_value="high",
         ),
         reasoning_delta_field="reasoning",
+    ),
+    "tokenrouter": OpenAIChatProfile(
+        _policy(
+            "TOKENROUTER",
+            ReasoningReplayMode.DISABLED,
+        ),
+        NO_REASONING,
     ),
     "llamacpp": OpenAIChatProfile(
         _policy(
