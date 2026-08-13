@@ -342,9 +342,10 @@ Model routing configuration is tiered:
   `REASONING_HAIKU` accept the same values plus `inherit`.
 
 [config/reasoning.py](src/free_claude_code/config/reasoning.py) owns the typed
-configuration vocabulary. FCC-owned dotenv files receive a one-time rename and
-value migration from the retired boolean settings; explicit `FCC_ENV_FILE`
-files are never rewritten and instead receive an actionable startup warning.
+configuration vocabulary. FCC-owned dotenv files receive one-time migrations
+for retired configuration keys and values before Settings loads them. Explicit
+`FCC_ENV_FILE` files are never rewritten and instead receive an actionable
+startup warning.
 
 [config/model_refs.py](src/free_claude_code/config/model_refs.py) owns provider-prefixed model ref
 parsing and configured `MODEL*` inventory. API routing and provider validation
@@ -648,6 +649,20 @@ owns the exactly typed private per-request runner, recovery operations, tool-cal
 assembly, and streamed usage handling. No obsolete generic transport namespace
 or untyped provider backchannel remains.
 
+[providers/groq/](src/free_claude_code/providers/groq/) is a specialized
+`OpenAIChatProvider` because Groq exposes incompatible `reasoning_effort`
+vocabularies without publishing that capability in model metadata. The Groq
+adapter owns a generation-local vocabulary cache keyed by the exact opaque model
+ID; model names and versions are never parsed to select behavior. A narrowly
+recognized pre-stream 400 can teach the adapter the accepted known vocabulary
+and trigger one request-body correction through the shared provider attempt
+budget. Later requests apply the same pure rewrite proactively. Unknown values
+are never echoed, unrelated errors retain their normal failure path, and no
+separate retry loop or persisted capability registry exists. Groq rejects
+structured assistant reasoning fields in replayed Chat Completions history, so
+the same provider policy preserves prior reasoning as ordinary tagged assistant
+content; this replay rule is provider-wide and never selected by model name.
+
 [providers/openai_codex/](src/free_claude_code/providers/openai_codex/) owns
 ChatGPT subscription authentication and the Codex backend's OpenAI Responses
 transport. Its process-lifetime auth manager owns FCC's credential file,
@@ -657,8 +672,15 @@ failure classification, model discovery, admission, and commit-boundary retry.
 Neutral Anthropic-to-Responses input and Responses-to-Anthropic stream
 conversion remain in
 [core/openai_responses/](src/free_claude_code/core/openai_responses/), which
-never imports OAuth, account IDs, or provider endpoints. The Admin API exposes
-only safe connected-account state and never serializes token objects.
+never imports OAuth, account IDs, or provider endpoints. That neutral converter
+preserves the public Responses contract; the subscription provider owns the
+private Codex request projection and omits fields that backend does not accept,
+such as the public `max_output_tokens` cap and `metadata`. Successful private
+responses can omit `Content-Type`, so the provider accepts an absent media type
+for its always-streaming request and parses the body as SSE. An explicitly
+declared non-SSE media type retains the bounded diagnostic failure path. The
+Admin API exposes only safe connected-account state and never serializes token
+objects.
 
 [providers/google_openai/](src/free_claude_code/providers/google_openai/) owns the
 Google-specific protocol behavior shared by AI Studio and Vertex AI: literal
@@ -688,16 +710,26 @@ client-specific recovery phrase.
 
 Providers call the OpenAI request policy for Anthropic-to-OpenAI conversion,
 reasoning replay selection, `extra_body`, and chat-completion field normalization.
+The SDK-free `OpenAIToolNameCodec` in
+[core/anthropic/](src/free_claude_code/core/anthropic/) owns reversible
+translation from client tool identities to OpenAI's portable function-name
+grammar. OpenAI Chat and upstream Responses adapters apply that codec only to
+their explicit declaration, forced-choice, and replay fields, then restore the
+original identity before Anthropic tool state or schema validation. Valid names
+remain unchanged, while deterministic aliases keep retries, replay, and
+append-only prompt prefixes stable. This is target-protocol conversion, never a
+provider or model capability switch.
 Specialized provider packages remain only for true upstream quirks such as
-Gemini thought signatures, NIM tool-schema aliases, retry downgrades, and NVCF
-deployment-failure classification, or DeepSeek attachment/tool/thinking
-compatibility. Local Ollama, Ollama Cloud, llama.cpp, and LM Studio all use the
+Gemini thought signatures, Groq reasoning-vocabulary negotiation, NIM
+tool-schema aliases, retry downgrades, and NVCF deployment-failure
+classification, or DeepSeek attachment/tool/thinking compatibility. Local
+Ollama, Ollama Cloud, llama.cpp, and LM Studio all use the
 same OpenAI-compatible Chat Completions provider family;
 Ollama's standard `reasoning` delta and history field are profile data rather
 than a specialized adapter. DeepSeek intentionally uses its
 OpenAI-compatible Chat Completions endpoint because that is the endpoint that
-reports prompt-cache hit/miss counters; the provider maps those counters back
-into Anthropic usage fields for Claude-compatible clients. DeepSeek reasoning
+reports prompt-cache hit/miss counters; the provider translates those native
+counters into Anthropic usage semantics. DeepSeek reasoning
 history is serialized per assistant turn: non-tool reasoning is omitted from
 its first replay, while tool-call reasoning is retained independently of the
 next generation's thinking mode. Append-only conversations therefore keep an
@@ -733,7 +765,9 @@ request schemas, and converts it into ordinary OpenAI tool-call deltas before
 the shared stream runner can commit visible text. Native structured tool-call
 deltas remain authoritative when both forms appear; incomplete or invalid
 native markup is a retryable upstream protocol failure rather than user-visible
-assistant text.
+assistant text. NIM argument-property aliases remain keyed by the original tool
+identity: shared OpenAI output restores the tool name first, then NIM restores
+arguments and validates the original schema.
 
 ### Reasoning Ownership
 
@@ -798,7 +832,12 @@ streamed usage handling: it requests
 `stream_options.include_usage`, consumes provider `prompt_tokens` and
 `completion_tokens` when present, and falls back to local estimates when
 providers omit or reject optional usage metadata. Provider modules only own true
-usage quirks such as DeepSeek prompt-cache counters.
+usage quirks: DeepSeek validates a complete hit/miss partition, maps misses to
+ordinary input and hits to cache reads, and never reports a miss as an
+Anthropic cache creation. The native Responses-to-Anthropic adapter likewise
+partitions a valid cached-token detail from the upstream total. At the reverse
+protocol boundary, the Anthropic-to-Responses adapter recombines those
+disjoint input categories into its single `input_tokens` total.
 
 ### Adding A Provider
 
@@ -969,11 +1008,26 @@ tools with a single string `input` field, and restores `custom_tool_call`,
 Responses edge. Text or grammar format metadata is preserved as model guidance;
 FCC does not validate custom-tool grammars.
 
+Client-facing Responses tool identity mapping is distinct from upstream wire
+portability. Namespaces and custom-tool identities are restored at the public
+Responses edge; the OpenAI tool-name codec operates beneath that mapping only
+while the canonical Anthropic request crosses an OpenAI upstream transport.
+
 Responses reasoning is handled as lossless protocol conversion before provider
 policy. The adapter preserves `reasoning.effort` in Anthropic `output_config`;
 the application reasoning boundary then interprets `none` as off and preserves
 all other named efforts. It never translates OpenAI effort names into Anthropic
 token budgets.
+Application-resolved source controls remain on the immutable canonical request;
+provider adapters consume the resolved `ReasoningPolicy` rather than parsing
+those controls again. A target converter validates only the unrepresented
+semantic remainder: it may omit an application-consumed control or an exact
+no-op, but must reject active or unknown behavior before upstream I/O. For the
+connected OpenAI Responses transport, `output_config.effort` is already
+represented by the policy and an empty context edit or exact
+`clear_thinking_20251015` edit with `keep: "all"` is inert. Structured-output
+configuration and any active, malformed, or extended context edit remain
+unsupported and fail preflight rather than being silently discarded.
 Prior Responses `reasoning` input items replay plaintext `reasoning_text`, or
 fallback `summary_text`, into assistant `reasoning_content`. Encrypted reasoning
 input is ignored because the proxy cannot decrypt it.
@@ -1067,10 +1121,15 @@ instead of stopping at its login gate.
   fail-open: launch continues with a warning if the catalog cannot be prepared.
 - The server lifecycle independently keeps that same file synchronized for
   Codex App and IDE processes that are not launched through `fcc-codex`.
-- Catalog discovery and inference both authenticate with HTTP bearer authorization.
-- It stores the proxy auth token in `FCC_CODEX_API_KEY` for Codex's provider
-  `env_key` to read. This process-local variable is a client credential carrier,
-  not a second FCC setting.
+- Launcher-side catalog discovery authenticates directly with the canonical proxy
+  token.
+- Inference through `fcc-codex`, Codex App, and IDE integrations uses the same
+  command-backed provider authentication. Codex invokes
+  `fcc-codex --print-proxy-auth-token`, which reads the canonical FCC settings,
+  prints only the shared proxy-auth token (or the no-auth sentinel), and exits
+  without a proxy preflight, model request, or client process. This gives every
+  Codex surface one credential owner instead of competing with Codex's signed-in
+  OpenAI authorization.
 
 [cli/launchers/pi.py](src/free_claude_code/cli/launchers/pi.py) owns the installed
 `fcc-pi` launcher and [cli/launchers/pi_extension.ts](src/free_claude_code/cli/launchers/pi_extension.ts)

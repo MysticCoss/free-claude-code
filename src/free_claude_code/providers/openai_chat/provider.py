@@ -15,6 +15,7 @@ from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic import (
     ContentType,
     HeuristicToolParser,
+    OpenAIToolNameCodec,
     ThinkTagParser,
 )
 from free_claude_code.core.anthropic.models import MessagesRequest
@@ -47,7 +48,11 @@ from free_claude_code.providers.http import (
     close_provider_stream,
     maybe_await_aclose,
 )
-from free_claude_code.providers.model_listing import extract_openai_model_infos
+from free_claude_code.providers.model_listing import (
+    extract_openai_model_infos,
+    merge_model_list_pages,
+    validate_model_list_page,
+)
 from free_claude_code.providers.stream_recovery import (
     RecoveryController,
     RecoveryFailureAction,
@@ -142,15 +147,82 @@ class OpenAIChatProvider(BaseProvider):
         payload = await self._list_models_payload()
         if not self._profile.model_ids_are_routable:
             return frozenset()
-        return extract_openai_model_infos(payload, provider_name=self._provider_name)
+        listing = self._profile.model_listing
+        return extract_openai_model_infos(
+            payload,
+            provider_name=self._provider_name,
+            collection_field=listing.collection_field,
+            id_field=listing.id_field,
+            aliases_field=listing.aliases_field,
+            required_path_values=listing.required_path_values,
+            required_null_field=listing.required_null_field,
+            required_sequence_items=listing.required_sequence_items,
+            exclude_missing_sequence_fields=listing.exclude_missing_sequence_fields,
+            tags_field=listing.tags_field,
+            thinking_tag=listing.thinking_tag,
+            non_thinking_tag=listing.non_thinking_tag,
+            thinking_boolean_path=listing.thinking_boolean_path,
+        )
 
     async def _list_models_payload(self) -> Any:
         """Fetch one OpenAI-compatible model-list payload with shared retries."""
         payload = await self._admission.run_with_retry(
-            self._client.models.list,
+            self._fetch_models_payload,
             provider_failure_override=self._provider_failure_override,
         )
         return payload
+
+    async def _fetch_models_payload(self) -> Any:
+        """Fetch the profile-selected model-list endpoint once."""
+        listing = self._profile.model_listing
+        path = listing.path
+        if path is None:
+            return await self._client.models.list()
+        if listing.pagination is not None:
+            return await self._fetch_paginated_models_payload(path)
+        if listing.query_params:
+            return await self._client.get(
+                path,
+                cast_to=object,
+                options={"params": dict(listing.query_params)},
+            )
+        return await self._client.get(path, cast_to=object)
+
+    async def _fetch_paginated_models_payload(self, path: str) -> Any:
+        """Fetch one complete bounded model catalog within a retry attempt."""
+        listing = self._profile.model_listing
+        pagination = listing.pagination
+        if pagination is None:
+            raise RuntimeError("paginated model fetch requires a pagination policy")
+
+        payloads: list[Any] = []
+        total_pages: int | None = None
+        page = pagination.first_page
+        while total_pages is None or page < pagination.first_page + total_pages:
+            params = dict(listing.query_params)
+            params[pagination.page_param] = str(page)
+            payload = await self._client.get(
+                path,
+                cast_to=object,
+                options={"params": params},
+            )
+            total_pages = validate_model_list_page(
+                payload,
+                provider_name=self._provider_name,
+                expected_page=page,
+                current_page_path=pagination.current_page_path,
+                total_pages_path=pagination.total_pages_path,
+                max_pages=pagination.max_pages,
+                expected_total_pages=total_pages,
+            )
+            payloads.append(payload)
+            page += 1
+
+        return merge_model_list_pages(
+            payloads,
+            provider_name=self._provider_name,
+            collection_field=listing.collection_field,
+        )
 
     def _build_request_body(
         self,
@@ -378,6 +450,7 @@ class _OpenAIChatStreamRunner:
             request.model if response_model is None else response_model
         )
         self._reasoning = reasoning
+        self._tool_names = OpenAIToolNameCodec.from_request(request)
         self._message_id = f"msg_{uuid.uuid4()}"
         self._tool_calls = OpenAIToolCallAssembler(
             record_extra_content=provider._record_tool_call_extra_content
@@ -425,6 +498,7 @@ class _OpenAIChatStreamRunner:
         usage_info = None
         tool_argument_aliases: dict[str, dict[str, str]] = {}
         tool_argument_alias_buffers: dict[int, str] = {}
+        tool_name_buffers: dict[int, str] = {}
 
         while True:
             structured_reasoning = (
@@ -522,7 +596,9 @@ class _OpenAIChatStreamRunner:
 
                                 for tool_use in detected_tools:
                                     for event in iter_heuristic_tool_use_sse(
-                                        ledger, tool_use
+                                        ledger,
+                                        tool_use,
+                                        tool_names=self._tool_names,
                                     ):
                                         for out_event in hold_event(event):
                                             yield out_event
@@ -545,6 +621,8 @@ class _OpenAIChatStreamRunner:
                             for event in self._tool_calls.process_tool_call(
                                 tool_call_info,
                                 ledger,
+                                tool_names=self._tool_names,
+                                tool_name_buffers=tool_name_buffers,
                                 tool_argument_aliases=tool_argument_aliases,
                                 tool_argument_alias_buffers=tool_argument_alias_buffers,
                             ):
@@ -554,6 +632,13 @@ class _OpenAIChatStreamRunner:
                 if finish_reason is None:
                     raise TruncatedProviderStreamError(
                         "Provider stream ended without finish_reason."
+                    )
+                if any(
+                    not self._tool_names.is_unchanged_name(name)
+                    for name in tool_name_buffers.values()
+                ):
+                    raise TruncatedProviderStreamError(
+                        "Provider stream ended with an incomplete tool name."
                     )
                 break
 
@@ -601,6 +686,7 @@ class _OpenAIChatStreamRunner:
                     usage_info = None
                     tool_argument_aliases = {}
                     tool_argument_alias_buffers = {}
+                    tool_name_buffers = {}
                     continue
 
                 if decision.action == RecoveryFailureAction.MIDSTREAM_RECOVERY:
@@ -700,9 +786,23 @@ class _OpenAIChatStreamRunner:
                     yield event
 
         for tool_use in heuristic_parser.flush():
-            for event in iter_heuristic_tool_use_sse(ledger, tool_use):
+            for event in iter_heuristic_tool_use_sse(
+                ledger,
+                tool_use,
+                tool_names=self._tool_names,
+            ):
                 for out_event in hold_event(event):
                     yield out_event
+
+        for event in self._tool_calls.flush_tool_name_buffers(
+            ledger,
+            tool_names=self._tool_names,
+            tool_name_buffers=tool_name_buffers,
+            tool_argument_aliases=tool_argument_aliases,
+            tool_argument_alias_buffers=tool_argument_alias_buffers,
+        ):
+            for out_event in hold_event(event):
+                yield out_event
 
         has_emitted_tool = ledger.has_emitted_tool_block()
         has_content_blocks = (
@@ -820,6 +920,7 @@ class _OpenAIChatStreamRunner:
 
                 completed_tool_calls = tool_calls.completed_calls(
                     self._request,
+                    tool_names=self._tool_names,
                     tool_argument_aliases=self._provider._tool_argument_aliases(
                         accepted_body
                     ),
