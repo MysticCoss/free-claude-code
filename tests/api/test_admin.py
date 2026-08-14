@@ -1195,6 +1195,105 @@ def test_admin_first_apply_migrates_repo_env(monkeypatch, tmp_path):
     assert "DEEPSEEK_API_KEY=deepseek-secret" in managed_text
 
 
+def test_admin_first_apply_repairs_empty_select_repo_values(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+    (tmp_path / ".env").write_text(
+        "MESSAGING_PLATFORM=\nWHISPER_DEVICE=\n",
+        encoding="utf-8",
+    )
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"NVIDIA_NIM_API_KEY": "nim-secret"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    managed_text = (tmp_path / ".fcc" / ".env").read_text("utf-8")
+    assert "NVIDIA_NIM_API_KEY=nim-secret" in managed_text
+    assert "MESSAGING_PLATFORM=discord" in managed_text
+    assert "WHISPER_DEVICE=nvidia_nim" in managed_text
+
+
+def test_admin_apply_preserves_empty_managed_auth_token(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "ANTHROPIC_AUTH_TOKEN=\nPROVIDER_RATE_LIMIT=1\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"PROVIDER_RATE_LIMIT": "2"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    managed_lines = env_file.read_text("utf-8").splitlines()
+    assert "ANTHROPIC_AUTH_TOKEN=" in managed_lines
+    assert "PROVIDER_RATE_LIMIT=2" in managed_lines
+
+
+def test_admin_apply_rejects_explicit_empty_select_update(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    original = "ANTHROPIC_AUTH_TOKEN=\nMESSAGING_PLATFORM=none\n"
+    env_file.write_text(original, encoding="utf-8")
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MESSAGING_PLATFORM": ""}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert any(
+        "messaging_platform" in error and "got ''" in error for error in body["errors"]
+    )
+    assert env_file.read_text("utf-8") == original
+
+
+@pytest.mark.parametrize("source", ("process", "explicit_env_file"))
+def test_admin_apply_rejects_empty_locked_select_value(
+    monkeypatch,
+    tmp_path,
+    source,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+    if source == "process":
+        monkeypatch.setenv("MESSAGING_PLATFORM", "")
+    else:
+        env_file = tmp_path / "locked.env"
+        env_file.write_text("MESSAGING_PLATFORM=\n", encoding="utf-8")
+        monkeypatch.setenv("FCC_ENV_FILE", str(env_file))
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"NVIDIA_NIM_API_KEY": "nim-secret"}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert any(
+        "messaging_platform" in error and "got ''" in error for error in body["errors"]
+    )
+    assert not (tmp_path / ".fcc" / ".env").exists()
+
+
 def test_admin_local_provider_status_reports_reachable(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
