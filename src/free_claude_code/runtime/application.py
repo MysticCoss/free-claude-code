@@ -47,6 +47,10 @@ from .provider_manager import ProviderRuntimeManager
 
 RestartCallback = Callable[[], Awaitable[None] | None]
 
+_PROVIDER_CHECK_FAILURE_MESSAGE = (
+    "Could not refresh this provider's models. Verify its configuration and access."
+)
+
 
 async def best_effort(
     name: str,
@@ -229,10 +233,15 @@ class ApplicationRuntime:
             provider = lease.resolve_provider(provider_id)
             infos = await provider.list_model_infos()
         except Exception as exc:
+            logger.warning(
+                "Admin provider check failed: provider={} exc_type={}",
+                provider_id,
+                type(exc).__name__,
+            )
             return {
                 "provider_id": provider_id,
                 "ok": False,
-                "error_type": type(exc).__name__,
+                "message": _PROVIDER_CHECK_FAILURE_MESSAGE,
             }
         finally:
             await lease.release()

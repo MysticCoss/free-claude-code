@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from free_claude_code.application.connected_accounts import (
@@ -35,6 +36,9 @@ LOCAL_PROVIDER_PATHS = {
     "llamacpp": "/models",
     "ollama": "/api/tags",
 }
+_LOCAL_PROVIDER_CHECK_FAILURE_MESSAGE = (
+    "Could not connect. Verify the URL and that the local provider is running."
+)
 
 
 class AdminConfigPayload(BaseModel):
@@ -294,12 +298,17 @@ async def _check_local_provider(
             "status_code": response.status_code,
         }
     except Exception as exc:
+        logger.debug(
+            "Admin local provider check failed: provider={} exc_type={}",
+            provider_id,
+            type(exc).__name__,
+        )
         return {
             "provider_id": provider_id,
             "status": "offline",
             "label": "Offline",
             "base_url": base_url,
-            "error_type": type(exc).__name__,
+            "message": _LOCAL_PROVIDER_CHECK_FAILURE_MESSAGE,
         }
 
 
