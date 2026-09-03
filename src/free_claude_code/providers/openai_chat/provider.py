@@ -549,11 +549,23 @@ class _OpenAIChatStreamRunner:
                                 for out_event in hold_event(event):
                                     yield out_event
                         elif reasoning is not None:
-                            for event in hold_events(ledger.ensure_thinking_block()):
-                                yield event
                             if reasoning:
+                                for event in hold_events(
+                                    ledger.ensure_thinking_block()
+                                ):
+                                    yield event
                                 for event in hold_event(
                                     ledger.emit_thinking_delta(reasoning)
+                                ):
+                                    yield event
+                            elif not delta.content and not ledger.has_content_block():
+                                # Empty reasoning_content marks reasoning onset
+                                # only before any block exists; relays like the
+                                # OpenCode qwen gateway keep the field present
+                                # with "" on every content chunk, and reopening
+                                # blocks per chunk churns the SSE stream.
+                                for event in hold_events(
+                                    ledger.ensure_thinking_block()
                                 ):
                                     yield event
 
