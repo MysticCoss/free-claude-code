@@ -15,6 +15,7 @@ from free_claude_code.api.dependencies import is_claude_desktop_request
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.application.routing import ModelRouter
 from free_claude_code.cli.commands import desktop_listener_port
+from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.provider_catalog import SUPPORTED_PROVIDER_IDS
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
@@ -299,3 +300,12 @@ def test_router_keeps_existing_id_forms_working_in_desktop_mode() -> None:
     assert gateway.primary.provider_model == "deepseek-v4-flash"
     assert no_thinking.primary.provider_model == "deepseek-v4-flash"
     assert sonnet.primary.provider_model == "deepseek-chat"
+
+
+def test_desktop_admin_fields_require_restart() -> None:
+    # The desktop listener exists only from a supervisor generation start,
+    # so Admin Apply must trigger the automatic restart for both fields;
+    # without restart_required the toggle would silently do nothing until a
+    # manual process restart.
+    assert FIELD_BY_KEY["ENABLE_CLAUDE_DESKTOP_3P"].restart_required is True
+    assert FIELD_BY_KEY["CLAUDE_DESKTOP_PORT"].restart_required is True
