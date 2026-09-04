@@ -4,8 +4,9 @@ Kept in a dedicated file so upstream rewrites of ``test_opencode.py``
 cannot silently drop these guarantees. Covers:
 
 * ``x-opencode-*`` session-header injection (feature 3)
-* mid-conversation system-role policy: latest_reminder for DeepSeek-family
-  models (even proxied through gateway plans), drop everywhere else
+* mid-conversation system-role policy: latest_reminder is a native-DeepSeek
+  capability only; gateway plans (even serving DeepSeek-family model names)
+  drop mid-conversation system messages
 * empty ``reasoning_content`` churn gate in the shared stream assembler
   (feature 10)
 """
@@ -87,9 +88,14 @@ def test_mid_conversation_system_dropped_for_non_deepseek_model(
 
 
 @pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
-def test_mid_conversation_system_becomes_latest_reminder_for_deepseek_model(
+def test_mid_conversation_system_dropped_for_deepseek_named_model_on_gateway(
     provider_id: str,
 ) -> None:
+    # Console Go (opencode_go) proxies models named "deepseek-*" but its
+    # schema only accepts tool/assistant/user/system roles: sending the
+    # native DeepSeek ``latest_reminder`` tag there is a live 422
+    # ("Input tag 'latest_reminder' ... does not match any of the expected
+    # tags"). The capability belongs to the provider, never the model name.
     body = _chat_body(
         _opencode_provider(provider_id),
         {
@@ -103,30 +109,18 @@ def test_mid_conversation_system_becomes_latest_reminder_for_deepseek_model(
     assert body["messages"] == [
         {"role": "system", "content": "Conversation-wide instructions"},
         {"role": "user", "content": "hi"},
-        {
-            "role": "latest_reminder",
-            "content": "<system-reminder>tick</system-reminder>",
-        },
     ]
 
 
 @pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        ("deepseek-v4-flash", {"role": "latest_reminder", "content": "Reminder"}),
-        ("DeepSeek/deepseek-chat", {"role": "latest_reminder", "content": "Reminder"}),
-        ("qwen3.8-flash", None),
-    ],
+    "model",
+    ["deepseek-v4-flash", "DeepSeek/deepseek-chat", "qwen3.8-flash"],
 )
-def test_gateway_model_name_selects_mid_conversation_behavior(
-    model: str,
-    expected: dict | None,
-) -> None:
-    """Gateway model names alone select the behavior on an OpenCode plan.
+def test_gateway_model_name_never_selects_latest_reminder(model: str) -> None:
+    """Mid-conversation system messages drop on gateways for *any* model name.
 
-    DeepSeek-family model names keep the native ``latest_reminder`` role even
-    through a non-DeepSeek gateway profile; other names drop the message (the
-    top-level system prompt stays at index zero).
+    The top-level system prompt always stays at index zero; only the native
+    DEEPSEEK provider (covered in test_deepseek.py) uses the native role.
     """
     body = _chat_body(
         _opencode_provider("opencode_go"),
@@ -141,12 +135,11 @@ def test_gateway_model_name_selects_mid_conversation_behavior(
         },
     )
 
-    assert body["messages"][0] == {"role": "system", "content": "S"}
-    assert body["messages"][1] == {"role": "user", "content": "Hello"}
-    if expected is None:
-        assert len(body["messages"]) == 2
-    else:
-        assert body["messages"][2] == expected
+    assert body["messages"] == [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "Hello"},
+    ]
+    assert all(message["role"] != "latest_reminder" for message in body["messages"])
 
 
 @pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])

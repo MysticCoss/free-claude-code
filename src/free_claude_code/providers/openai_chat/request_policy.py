@@ -44,31 +44,20 @@ class OpenAIChatRequestPolicy:
     normalize_n_to_one: bool = False
 
 
-def _is_deepseek_model(model: str) -> bool:
-    """True when the upstream model name is a DeepSeek model.
-
-    Case-insensitive substring match: catches ``deepseek-chat``,
-    ``DeepSeek-V4-Pro``, and OpenRouter-namespaced forms like
-    ``deepseek/deepseek-chat``.
-    """
-    return "deepseek" in model.lower()
-
-
 def _mid_conversation_system_mode(
     policy: OpenAIChatRequestPolicy,
-    request_data: MessagesRequest,
 ) -> MidConversationSystemMode:
     """Choose how mid-conversation system messages reach the upstream.
 
-    DeepSeek models (directly or proxied on another gateway) understand a
-    dedicated ``latest_reminder`` role, so they receive the system text under
-    that role. Other OpenAI Chat upstreams cannot represent the system role
-    mid-conversation, so those messages are dropped rather than demoted into
-    user content. Selection is model-name driven (with a shortcut for the
-    DeepSeek provider itself) so gateway-proxied DeepSeek models keep the
-    native role while non-DeepSeek gateway traffic is unaffected.
+    Only the native DeepSeek provider documents the dedicated
+    ``latest_reminder`` role, so only it receives the system text under that
+    role. Every other OpenAI Chat upstream cannot represent the system role
+    mid-conversation — gateways serving DeepSeek-family model names are not
+    DeepSeek (Console Go rejects the tag with a 422), so those messages are
+    dropped rather than demoted into user content. Selection is
+    provider-capability driven, never model-name driven.
     """
-    if policy.provider_name == "DEEPSEEK" or _is_deepseek_model(request_data.model):
+    if policy.provider_name == "DEEPSEEK":
         return MidConversationSystemMode.LATEST_REMINDER
     return MidConversationSystemMode.DROP
 
@@ -92,7 +81,7 @@ def build_openai_chat_request_body(
             request_data,
             default_max_tokens=policy.default_max_tokens,
             reasoning_replay=policy.reasoning_replay,
-            mid_conversation_system=_mid_conversation_system_mode(policy, request_data),
+            mid_conversation_system=_mid_conversation_system_mode(policy),
         )
     except OpenAIConversionError as exc:
         raise InvalidRequestError(str(exc)) from exc
