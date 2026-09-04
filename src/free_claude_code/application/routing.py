@@ -13,7 +13,10 @@ from free_claude_code.config.provider_catalog import (
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
-from free_claude_code.core.gateway_model_ids import decode_gateway_model_id
+from free_claude_code.core.gateway_model_ids import (
+    decode_claude_desktop_model_id,
+    decode_gateway_model_id,
+)
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 
@@ -113,6 +116,18 @@ class ModelRouter:
             direct_provider_model,
             force_reasoning_off,
         ) = self._direct_provider_model(claude_model_name)
+        if (
+            direct_provider_id is None or direct_provider_model is None
+        ) and self._settings.enable_claude_desktop_3p:
+            # Claude Desktop 3P mode advertises claude-<provider>-<model> ids;
+            # decode them back to the exact provider/model they were built from.
+            decoded = decode_claude_desktop_model_id(
+                claude_model_name, SUPPORTED_PROVIDER_IDS
+            )
+            if decoded is not None:
+                direct_provider_id = decoded.provider_id
+                direct_provider_model = decoded.provider_model
+                force_reasoning_off = decoded.force_reasoning_off
         if direct_provider_id is not None and direct_provider_model is not None:
             stripped_provider_model = _strip_1m_suffix(direct_provider_model)
             reasoning_preference = (

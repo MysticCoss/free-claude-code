@@ -12,6 +12,7 @@ from free_claude_code.application.routing import ONE_M_CONTEXT_SUFFIX
 from free_claude_code.config.model_refs import configured_chat_model_refs
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
+    claude_desktop_model_id,
     gateway_model_id,
     no_thinking_gateway_model_id,
 )
@@ -147,6 +148,7 @@ def _build_claude_models_response(
     """Preserve the established Claude-compatible catalog exactly."""
     models: list[ModelResponse] = []
     seen: set[str] = set()
+    desktop_mode = settings.enable_claude_desktop_3p
 
     for ref in configured_chat_model_refs(settings):
         model_info = runtime.cached_model_info(ref.provider_id, ref.model_id)
@@ -157,6 +159,7 @@ def _build_claude_models_response(
             supports_thinking=(
                 model_info.supports_thinking if model_info is not None else None
             ),
+            desktop_mode=desktop_mode,
         )
 
     for model_info in runtime.cached_prefixed_model_infos():
@@ -165,6 +168,7 @@ def _build_claude_models_response(
             seen,
             model_info.model_id,
             supports_thinking=model_info.supports_thinking,
+            desktop_mode=desktop_mode,
         )
 
     one_m_refs = settings.one_m_model_refs()
@@ -178,6 +182,7 @@ def _build_claude_models_response(
                     seen,
                     f"{ref.model_ref}{ONE_M_CONTEXT_SUFFIX}",
                     supports_thinking=supports_thinking,
+                    desktop_mode=desktop_mode,
                 )
         for model_info in runtime.cached_prefixed_model_infos():
             if model_info.model_id in one_m_refs:
@@ -186,6 +191,7 @@ def _build_claude_models_response(
                     seen,
                     f"{model_info.model_id}{ONE_M_CONTEXT_SUFFIX}",
                     supports_thinking=model_info.supports_thinking,
+                    desktop_mode=desktop_mode,
                 )
 
     for model in SUPPORTED_CLAUDE_MODELS:
@@ -341,16 +347,21 @@ def _append_provider_model_variants(
     provider_model_ref: str,
     *,
     supports_thinking: bool | None = None,
+    desktop_mode: bool = False,
 ) -> None:
     if supports_thinking is not False:
         _append_unique_model(
             models,
             seen,
             _discovered_model_response(
-                gateway_model_id(provider_model_ref),
+                claude_desktop_model_id(provider_model_ref)
+                if desktop_mode
+                else gateway_model_id(provider_model_ref),
                 display_name=provider_model_ref,
             ),
         )
+    # The no-thinking id already starts with "claude-", so it passes the
+    # Claude Desktop 3P filter unchanged in both modes.
     _append_unique_model(
         models,
         seen,
