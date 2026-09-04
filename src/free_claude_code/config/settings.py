@@ -396,6 +396,15 @@ class Settings(BaseModel):
         default=None, validation_alias="FCC_1M_MODELS"
     )
 
+    # Claude Desktop's 3P model mode only lists ids matching claude-* /
+    # anthropic/claude-*. When enabled, /v1/models advertises each
+    # configured/discovered model as a single-segment
+    # claude-<provider>-<model> id and the router decodes those ids back to
+    # their provider/model ref.
+    enable_claude_desktop_3p: bool = Field(
+        default=False, validation_alias="ENABLE_CLAUDE_DESKTOP_3P"
+    )
+
     # ==================== Per-Provider Proxy ====================
     openai_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="OPENAI_PROXY"

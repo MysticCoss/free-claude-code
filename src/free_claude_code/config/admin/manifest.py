@@ -157,6 +157,16 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         "so Claude Code grants the 1M-token context window.",
     ),
     ConfigFieldSpec(
+        "ENABLE_CLAUDE_DESKTOP_3P",
+        "Claude Desktop 3P Mode",
+        "models",
+        "boolean",
+        settings_attr="enable_claude_desktop_3p",
+        description="Advertise every model as claude-<provider>-<model> in /v1/models "
+        "so Claude Desktop's 3P filter (claude-* / anthropic/claude-*) accepts it, "
+        "and route those ids back to their provider.",
+    ),
+    ConfigFieldSpec(
         "REASONING_POLICY",
         "Reasoning Policy",
         "reasoning",
