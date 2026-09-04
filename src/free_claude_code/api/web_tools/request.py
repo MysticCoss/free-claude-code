@@ -41,27 +41,6 @@ def is_web_server_tool_request(request: MessagesRequest) -> bool:
     return has_tool_named(request, forced)
 
 
-def is_listed_web_server_tool_request(request: MessagesRequest) -> str | None:
-    """Return tool name ('web_search' or 'web_fetch') when listed (not forced) AND
-    the last user turn contains a plausible query or URL. This lets the gateway
-    eagerly execute server tools for OpenAI Chat upstreams that cannot process them.
-    """
-    from .parsers import extract_query, extract_url
-
-    if not has_listed_anthropic_server_tools(request):
-        return None
-    text = forced_tool_turn_text(request)
-    # Prefer web_fetch when the user explicitly supplied a URL.
-    if has_tool_named(request, "web_fetch") and extract_url(text) != text.strip():
-        return "web_fetch"
-    # Otherwise, if web_search is listed and there's a non-trivial query, use it.
-    if has_tool_named(request, "web_search"):
-        query = extract_query(text)
-        if len(query) >= 2:
-            return "web_search"
-    return None
-
-
 def is_anthropic_server_tool_definition(tool: Tool) -> bool:
     """Whether ``tool`` refers to an Anthropic server tool (web_search / web_fetch family)."""
     name = (tool.name or "").strip()

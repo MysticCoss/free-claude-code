@@ -23,7 +23,6 @@ from .request import (
     forced_server_tool_name,
     forced_tool_turn_text,
     has_tool_named,
-    is_listed_web_server_tool_request,
 )
 
 
@@ -50,8 +49,6 @@ async def stream_web_server_tool_response(
     hosted Anthropic citation or encrypted-content pipeline.
     """
     tool_name = forced_server_tool_name(request)
-    if tool_name is None:
-        tool_name = is_listed_web_server_tool_request(request)
     if tool_name is None or not has_tool_named(request, tool_name):
         return
 

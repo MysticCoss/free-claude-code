@@ -1,7 +1,6 @@
 """Message and tool format converters."""
 
 import json
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,6 +23,18 @@ class ReasoningReplayMode(StrEnum):
     THINK_TAGS = "think_tags"
     REASONING_CONTENT = "reasoning_content"
     REASONING = "reasoning"
+
+
+class MidConversationSystemMode(StrEnum):
+    """How mid-conversation system messages map onto the OpenAI wire.
+
+    The request-level ``system`` field is unaffected: it always becomes the
+    index-zero system message.
+    """
+
+    DEMOTE_USER = "demote_user"
+    DROP = "drop"
+    LATEST_REMINDER = "latest_reminder"
 
 
 def _reasoning_replay_field(mode: ReasoningReplayMode) -> str | None:
@@ -165,108 +176,6 @@ def _assert_no_forbidden_assistant_block(block: Any) -> None:
         )
 
 
-# Tag for messages that started out as a system-role message and were
-# demoted to user role by the mid-conversation system→user conversion.
-# The wrapper is a well-formed XML tag so the model can see both that
-# the content originated as a system instruction and where the boundary
-# lies. A ``role`` attribute distinguishes ``<system-reminder>`` injections
-# (``"reminder"``) from other system content (``"system"``).
-_SYSTEM_AS_USER_TAG = "system-msg"
-
-
-def _wrap_as_user_system(content: Any, kind: str) -> str:
-    """Wrap demoted system content with an XML marker tag.
-
-    *kind* is ``"reminder"`` (content includes ``<system-reminder>``)
-    or ``"system"`` (any other system content).
-
-    String content is wrapped directly. List-of-blocks content is
-    collapsed to a single string by joining the text portions.
-    """
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
-                else:
-                    parts.append(str(block))
-            else:
-                btype = getattr(block, "type", None)
-                if btype == "text":
-                    parts.append(str(getattr(block, "text", "") or ""))
-                else:
-                    parts.append(str(block))
-        joined = "\n".join(p for p in parts if p)
-        content = joined
-    s = str(content) if not isinstance(content, str) else content
-    return f'<{_SYSTEM_AS_USER_TAG} role="{kind}">{s}</{_SYSTEM_AS_USER_TAG}>'
-
-
-# Regex matching the reminder wrapper emitted by ``_wrap_as_user_system``.
-# Anchored on both ends so a ``<system-msg>`` substring that appears inside
-# genuine user content is left alone. ``re.DOTALL`` lets the body span
-# newlines. Only the ``reminder`` kind is matched here — non-reminder
-# system messages keep the generic OpenAI Chat demotion.
-_DEMOTED_REMINDER_RE = re.compile(
-    r'^<system-msg role="reminder">(?P<body>.*)</system-msg>$',
-    re.DOTALL,
-)
-
-# Matches a user message whose entire content is a single ``<system-msg>``
-# wrapper — the result of demoting a system message to user role. Used by
-# ``_coalesce_openai_user_messages`` to keep such messages as separate
-# entries, so ``promote_demoted_reminders`` can still re-promote the
-# reminder variant to DeepSeek V4's native ``latest_reminder`` role.
-_DEMOTED_USER_ONLY_RE = re.compile(
-    r'^<system-msg role="[^"]*">.*</system-msg>$',
-    re.DOTALL,
-)
-
-
-def _is_pure_demoted_user_message(message: dict[str, Any]) -> bool:
-    """Return True if *message* is a user message whose content is a single
-    ``<system-msg>...</system-msg>`` wrapper produced by the system→user
-    demotion in ``convert_messages``. Pure wrappers must not be coalesced
-    with adjacent user content, because the regex used by
-    ``promote_demoted_reminders`` is anchored and only matches when the
-    wrapper occupies the full content.
-    """
-    if message.get("role") != "user":
-        return False
-    content = message.get("content")
-    return isinstance(content, str) and _DEMOTED_USER_ONLY_RE.match(content) is not None
-
-
-def promote_demoted_reminders(messages: list[Any]) -> int:
-    """Rewrite ``<system-msg role="reminder">`` wrappers to ``role: latest_reminder``.
-
-    The base OpenAI Chat demotion in
-    :func:`AnthropicToOpenAIConverter.convert_messages` downgrades mid-conversation
-    ``role: system`` messages to ``role: user`` and wraps the content in
-    ``<system-msg role="…">`` so the byte sequence stays stable for upstream
-    prefix caching. DeepSeek V4 understands a dedicated ``latest_reminder``
-    role natively, so this function unwraps the reminder variant and
-    rewrites the role. Non-reminder system wrappers (kind="system") are
-    left untouched — they keep the demotion. The list is mutated in place.
-    Returns the number of reminders promoted.
-    """
-    promoted = 0
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if not isinstance(content, str):
-            continue
-        match = _DEMOTED_REMINDER_RE.match(content)
-        if match is None:
-            continue
-        message["role"] = "latest_reminder"
-        message["content"] = match.group("body")
-        promoted += 1
-    return promoted
-
-
 def _openai_system_text(
     content: Any,
     *,
@@ -354,21 +263,13 @@ def _merge_openai_user_content(first: Any, second: Any) -> str | list[dict[str, 
 def _coalesce_openai_user_messages(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Combine adjacent user messages after transcript ordering is complete.
-
-    Pure ``<system-msg>...</system-msg>`` wrapper messages (produced by
-    the system→user demotion in :func:`convert_messages`) are preserved as
-    separate entries so :func:`promote_demoted_reminders` can re-promote
-    the reminder variant to DeepSeek V4's native ``latest_reminder`` role.
-    """
+    """Combine adjacent user messages after transcript ordering is complete."""
     result: list[dict[str, Any]] = []
     for message in messages:
         if (
             message.get("role") == "user"
             and result
             and result[-1].get("role") == "user"
-            and not _is_pure_demoted_user_message(message)
-            and not _is_pure_demoted_user_message(result[-1])
         ):
             previous = result[-1]
             previous["content"] = _merge_openai_user_content(
@@ -548,33 +449,46 @@ class AnthropicToOpenAIConverter:
         messages: list[Any],
         *,
         reasoning_replay: ReasoningReplayMode = ReasoningReplayMode.THINK_TAGS,
+        mid_conversation_system: MidConversationSystemMode = (
+            MidConversationSystemMode.DEMOTE_USER
+        ),
     ) -> list[dict[str, Any]]:
         ledger = _OpenAIChatHistoryLedger()
 
         for msg in messages:
             role = msg.role
             content = msg.content
-
-            # Demote system-role messages to user role in-place.
-            # OpenAI Chat Completions providers expect the system role
-            # only at position 0 (inserted from the top-level ``system``
-            # field below). Mid-array ``role: system`` messages confuse
-            # most providers and break the position-based prefix cache.
-            # Flipping the role to ``user`` and wrapping the content
-            # with a ``<system-msg>`` marker keeps the byte sequence
-            # stable for upstream caching while still letting the model
-            # recognise the content as system-level instruction.
-            if role == "system":
-                role = "user"
-                kind = "reminder" if "<system-reminder>" in str(content) else "system"
-                content = _wrap_as_user_system(content, kind)
-
             reasoning_content = _clean_reasoning_content(
                 getattr(msg, "reasoning_content", None)
             )
 
             if role == "user" and isinstance(content, list):
                 ledger.add_user_blocks(content)
+                continue
+
+            if (
+                role == "system"
+                and mid_conversation_system is not MidConversationSystemMode.DEMOTE_USER
+            ):
+                if mid_conversation_system is MidConversationSystemMode.DROP:
+                    continue
+                system_text = _openai_system_text(
+                    content,
+                    context="an inline Anthropic system message",
+                )
+                if system_text is None:
+                    raise OpenAIConversionError(
+                        "OpenAI chat conversion requires an inline Anthropic system "
+                        "message to contain text."
+                    )
+                ledger.add_plain(
+                    [
+                        {
+                            "role": MidConversationSystemMode.LATEST_REMINDER.value,
+                            "content": system_text,
+                        }
+                    ]
+                )
                 continue
 
             segments = AnthropicToOpenAIConverter._convert_message_to_segments(
@@ -871,12 +785,16 @@ def build_base_request_body(
     *,
     default_max_tokens: int | None = None,
     reasoning_replay: ReasoningReplayMode = ReasoningReplayMode.THINK_TAGS,
+    mid_conversation_system: MidConversationSystemMode = (
+        MidConversationSystemMode.DEMOTE_USER
+    ),
 ) -> dict[str, Any]:
     """Build the common parts of an OpenAI-format request body."""
     _openai_reject_native_only_top_level_fields(request_data)
     messages = AnthropicToOpenAIConverter.convert_messages(
         request_data.messages,
         reasoning_replay=reasoning_replay,
+        mid_conversation_system=mid_conversation_system,
     )
 
     system = request_data.system

@@ -37,21 +37,15 @@
 
 This fork adds several enhancements on top of upstream:
 
-**OpenCode Go — Anthropic Messages fallback.** When the primary OpenAI-compatible request to `opencode_go` fails (e.g. 400 on unsupported blocks or rate limits), the provider retries through the native Anthropic `/messages` endpoint on the same base URL. This improves reliability for DeepSeek V4 and other models on OpenCode Go. Set in the Admin UI via `OPENCODE_API_KEY` with the `opencode_go/` prefix.
+**MODEL_COMPACT — dedicated compaction routing.** Route Claude Code compaction/summarization requests to a cheaper model. Set `MODEL_COMPACT` in the Admin UI to a provider/model slug (e.g. `opencode_go/deepseek-v4-flash`). This keeps your main model for coding and a lighter model for context compaction, reducing cost. Falls back to normal routing when unset.
 
-**OpenCode Go — DeepSeek V4 reasoning effort forwarding.** Anthropic adaptive thinking effort levels (`output_config.effort` or `thinking.budget_tokens`) are mapped to DeepSeek's `reasoning_effort` parameter (`high` / `max`) for `deepseek-v4-pro` and `deepseek-v4-flash` on OpenCode Go.
+**FCC_1M_MODELS — 1M-token context window variants.** Configure `FCC_1M_MODELS` in the Admin UI as a comma-separated list of provider/model refs (e.g. `opencode_go/deepseek-v4-pro`). Each matching model gets a `[1m]`-suffixed variant in the `/v1/models` response, signaling Claude Code to grant the full 1M-token context window for those models. The suffix is stripped before the request reaches the upstream provider.
 
-**DeepSeek — image hint injection.** DeepSeek V4 models lack native vision support. When image blocks appear in user messages, this fork strips them and injects a hint telling the model to use the `understand_image` MCP tool instead. This applies both to the native `deepseek` provider (Anthropic-compatible path) and to DeepSeek V4 models on `opencode_go` (OpenAI chat path), where the hint prevents an `OpenAIConversionError`.
+**OpenCode — session/billing correlation.** The Claude Code session id is mapped deterministically to an opencode-style session id and forwarded as `x-opencode-client` / `x-opencode-session` headers (plus `x-opencode-request` when available) on `opencode_go` and `opencode_zen` requests, so the OpenCode billing dashboard can group requests by Claude session.
 
-**FCC_1M_MODELS — 1M-token context window variants.** Configure `FCC_1M_MODELS` in the Admin UI as a comma-separated list of provider/model refs (e.g. `opencode_go/deepseek-v4-pro`). Each matching model gets a `[1m]`-suffixed variant in the `/v1/models` response, signaling Claude Code to grant the full 1M-token context window for those models.
+**Mid-conversation system messages.** The request-level `system` prompt is unaffected (index-zero system message, as upstream). For the remaining mid-conversation `role: system` messages on OpenAI-compatible wires: DeepSeek models (native provider, or any gateway whose model name contains `deepseek`) receive them under DeepSeek's native `latest_reminder` role; all other models drop them, since they cannot represent the system role mid-conversation.
 
-**MODEL_COMPACT — dedicated compaction routing.** Route Claude Code compaction/summarization requests to a cheaper model. Set `MODEL_COMPACT` in the Admin UI to a provider/model slug (e.g. `opencode_go/deepseek-v4-flash`). This keeps your main model for coding and a lighter model for context compaction, reducing cost.
-
-**Compaction reliability fixes.** Multiple fixes ensure compaction requests succeed across providers: orphan `tool_result` blocks are sanitized, system messages are merged, provider-incompatible fields are stripped, and the compaction falls back to the original model if the compact model fails.
-
-**Suggestion mode detection fix.** Claude Code suggestion mode is detected from the last user message only, preventing false positives when tool results earlier in the conversation contain suggestion-like content.
-
-**Web search/fetch — listed tool support for OpenAI Chat upstreams.** Anthropic server-side tools (`web_search` and `web_fetch`) are now intercepted locally even when the client only lists them (without `tool_choice` forcing). Older Claude Code releases *force* the tools via `tool_choice`, but newer releases *list* them under `tools` instead. Without this fix the proxy rejected listed tools with a 400 error on OpenAI Chat upstreams (opencode_go, etc.). The fix detects listed tools from the last user turn, executes them locally, and streams the result back — the request never reaches the upstream provider.
+**Streaming content-block fix.** OpenAI-compatible relays that keep `reasoning_content` present as an empty string on every content chunk (e.g. the OpenCode qwen gateway) no longer cause a content-block churn in the Anthropic SSE stream, which previously fragmented assistant output into many tiny blocks in Claude Code.
 
 ## Quick Start
 

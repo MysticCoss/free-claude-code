@@ -120,10 +120,11 @@ def is_suggestion_mode_request(request_data: MessagesRequest) -> bool:
     Suggestion mode requests contain "[SUGGESTION MODE:" in the user's message,
     used for auto-suggesting what the user might type next.
     """
-    for msg in reversed(request_data.messages):
+    for msg in request_data.messages:
         if msg.role == "user":
             text = extract_text_from_content(msg.content)
-            return "[SUGGESTION MODE:" in text
+            if "[SUGGESTION MODE:" in text:
+                return True
     return False
 
 

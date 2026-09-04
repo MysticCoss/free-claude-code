@@ -239,7 +239,7 @@ class OpenAIChatProvider(BaseProvider):
         )
         # Inject per-request x-opencode-* headers for OpenCode providers so
         # the billing dashboard correlates requests from the same Claude session.
-        if self._provider_name in ("OPENCODE", "OPENCODE_GO"):
+        if self._provider_name in ("OPENCODE_GO", "OPENCODE_ZEN"):
             from free_claude_code.core.session_id import claude_to_opencode_session_id
 
             session_id = claude_to_opencode_session_id(
