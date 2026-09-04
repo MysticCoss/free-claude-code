@@ -40,9 +40,12 @@ class ResponsesHandler:
         model_router: ModelRouter | None = None,
         provider_executor: ProviderExecutor | None = None,
         generation_id: int | None = None,
+        desktop_mode: bool = False,
     ) -> None:
         self._settings = settings
-        self._model_router = model_router or ModelRouter(settings)
+        self._model_router = model_router or ModelRouter(
+            settings, desktop_mode=desktop_mode
+        )
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,
             progress_timeout_seconds=settings.provider_progress_timeout,

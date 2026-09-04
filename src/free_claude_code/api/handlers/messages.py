@@ -82,9 +82,12 @@ class MessagesHandler:
         token_counter: TokenCounter = get_token_count,
         provider_executor: ProviderExecutor | None = None,
         generation_id: int | None = None,
+        desktop_mode: bool = False,
     ) -> None:
         self._settings = settings
-        self._model_router = model_router or ModelRouter(settings)
+        self._model_router = model_router or ModelRouter(
+            settings, desktop_mode=desktop_mode
+        )
         self._token_counter = token_counter
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,

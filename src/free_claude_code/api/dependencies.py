@@ -23,6 +23,25 @@ def get_settings(services: ApiServices = Depends(get_services)) -> Settings:
     return services.requests.current_settings()
 
 
+def is_claude_desktop_request(request: Request, settings: Settings) -> bool:
+    """True when the request was accepted on the Claude Desktop 3P listener.
+
+    The dedicated listener shares the ASGI app with the main port, so the
+    accepting socket (uvicorn's ``scope["server"]``, never the
+    client-controlled Host header) is what marks a request as desktop-served.
+    """
+    if not settings.enable_claude_desktop_3p:
+        return False
+    server = request.scope.get("server")
+    if not isinstance(server, tuple | list) or len(server) < 2:
+        return False
+    try:
+        accepted_port = int(server[1])
+    except TypeError, ValueError:
+        return False
+    return accepted_port == settings.claude_desktop_port
+
+
 def resolve_provider(
     provider_type: str,
     *,

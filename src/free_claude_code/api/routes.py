@@ -21,6 +21,7 @@ from free_claude_code.core.trace import (
 from .dependencies import (
     get_services,
     get_settings,
+    is_claude_desktop_request,
     require_anthropic_proxy_auth,
     require_proxy_auth,
     resolve_provider,
@@ -48,6 +49,7 @@ async def _create_messages_response(
     request_data: MessagesRequest,
     *,
     request_id: str,
+    desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
@@ -57,6 +59,7 @@ async def _create_messages_response(
             provider_resolver=_provider_resolver(lease),
             token_counter=get_token_count,
             generation_id=lease.generation_id,
+            desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -80,6 +83,7 @@ async def _create_responses_response(
     request_data: OpenAIResponsesRequest,
     *,
     request_id: str,
+    desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
@@ -88,6 +92,7 @@ async def _create_responses_response(
             lease.settings,
             provider_resolver=_provider_resolver(lease),
             generation_id=lease.generation_id,
+            desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -115,6 +120,7 @@ async def create_message(
     request: Request,
     request_data: MessagesRequest,
     services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
     _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Create a message (JSON by default; stream=true returns Anthropic SSE)."""
@@ -125,6 +131,7 @@ async def create_message(
         services,
         request_data,
         request_id=get_request_id(request),
+        desktop_mode=is_claude_desktop_request(request, settings),
     )
 
 
@@ -138,6 +145,7 @@ async def create_response(
     request: Request,
     request_data: OpenAIResponsesRequest,
     services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """Create an OpenAI Responses-compatible response through this proxy."""
@@ -145,6 +153,7 @@ async def create_response(
         services,
         request_data,
         request_id=get_request_id(request),
+        desktop_mode=is_claude_desktop_request(request, settings),
     )
 
 
@@ -161,7 +170,11 @@ async def count_tokens(
     _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Count tokens for a request."""
-    handler = TokenCountHandler(settings, token_counter=get_token_count)
+    handler = TokenCountHandler(
+        settings,
+        token_counter=get_token_count,
+        desktop_mode=is_claude_desktop_request(request, settings),
+    )
     return handler.count(request_data, request_id=get_request_id(request))
 
 
@@ -203,6 +216,7 @@ async def probe_health():
     response_model_exclude_none=True,
 )
 async def list_models(
+    request: Request,
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
     services: ApiServices = Depends(get_services),
     settings: Settings = Depends(get_settings),
@@ -210,7 +224,12 @@ async def list_models(
 ):
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
-    return build_models_list_response(settings, services.requests, view=view)
+    return build_models_list_response(
+        settings,
+        services.requests,
+        view=view,
+        desktop_mode=is_claude_desktop_request(request, settings),
+    )
 
 
 @router.get(

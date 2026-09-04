@@ -397,12 +397,16 @@ class Settings(BaseModel):
     )
 
     # Claude Desktop's 3P model mode only lists ids matching claude-* /
-    # anthropic/claude-*. When enabled, /v1/models advertises each
+    # anthropic/claude-*. When enabled, FCC starts a dedicated second
+    # listener (see CLAUDE_DESKTOP_PORT) whose /v1/models advertises each
     # configured/discovered model as a single-segment
-    # claude-<provider>-<model> id and the router decodes those ids back to
-    # their provider/model ref.
+    # claude-<provider>-<model> id and whose router decodes those ids back
+    # to their provider/model ref. The main PORT stays untouched.
     enable_claude_desktop_3p: bool = Field(
         default=False, validation_alias="ENABLE_CLAUDE_DESKTOP_3P"
+    )
+    claude_desktop_port: int = Field(
+        default=8083, validation_alias="CLAUDE_DESKTOP_PORT"
     )
 
     # ==================== Per-Provider Proxy ====================
@@ -849,5 +853,15 @@ class Settings(BaseModel):
             raise ValueError(
                 "NVIDIA_NIM_API_KEY is required when WHISPER_DEVICE is 'nvidia_nim'. "
                 "Set it in the Admin UI."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_claude_desktop_port_isolation(self) -> Settings:
+        if self.enable_claude_desktop_3p and self.claude_desktop_port == self.port:
+            raise ValueError(
+                "CLAUDE_DESKTOP_PORT must differ from PORT: the Claude "
+                "Desktop 3P listener exists to serve claude-* ids on a "
+                "separate port while the main port stays untouched."
             )
         return self

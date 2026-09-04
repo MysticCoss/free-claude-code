@@ -135,20 +135,25 @@ def build_models_list_response(
     runtime: RequestRuntimePort,
     *,
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
+    desktop_mode: bool = False,
 ) -> ModelsListResponse:
     """Return the application model inventory in the requested client view."""
     if view is ModelCatalogView.CLAUDE:
-        return _build_claude_models_response(settings, runtime)
+        return _build_claude_models_response(settings, runtime, desktop_mode)
     return _build_direct_models_response(settings, runtime, view=view)
 
 
 def _build_claude_models_response(
-    settings: Settings, runtime: RequestRuntimePort
+    settings: Settings, runtime: RequestRuntimePort, desktop_mode: bool
 ) -> ModelsListResponse:
-    """Preserve the established Claude-compatible catalog exactly."""
+    """Preserve the established Claude-compatible catalog exactly.
+
+    ``desktop_mode`` is the per-request Claude Desktop 3P flag (the request
+    was accepted on the dedicated desktop listener); it rewrites provider
+    variant ids to claude-<provider>-<model> so the desktop filter sees them.
+    """
     models: list[ModelResponse] = []
     seen: set[str] = set()
-    desktop_mode = settings.enable_claude_desktop_3p
 
     for ref in configured_chat_model_refs(settings):
         model_info = runtime.cached_model_info(ref.provider_id, ref.model_id)
