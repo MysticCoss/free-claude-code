@@ -107,8 +107,9 @@ class RoutedTokenCountRequest:
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, desktop_mode: bool = False):
         self._settings = settings
+        self._desktop_mode = desktop_mode
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
         (
@@ -118,7 +119,7 @@ class ModelRouter:
         ) = self._direct_provider_model(claude_model_name)
         if (
             direct_provider_id is None or direct_provider_model is None
-        ) and self._settings.enable_claude_desktop_3p:
+        ) and self._desktop_mode:
             # Claude Desktop 3P mode advertises claude-<provider>-<model> ids;
             # decode them back to the exact provider/model they were built from.
             decoded = decode_claude_desktop_model_id(

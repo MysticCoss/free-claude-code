@@ -162,9 +162,19 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         "models",
         "boolean",
         settings_attr="enable_claude_desktop_3p",
-        description="Advertise every model as claude-<provider>-<model> in /v1/models "
-        "so Claude Desktop's 3P filter (claude-* / anthropic/claude-*) accepts it, "
-        "and route those ids back to their provider.",
+        description="Start a second listener on Claude Desktop Port that advertises "
+        "every model as claude-<provider>-<model> so Claude Desktop's 3P filter "
+        "(claude-* / anthropic/claude-*) accepts it, and route those ids back to "
+        "their provider. The main port is never rewritten.",
+    ),
+    ConfigFieldSpec(
+        "CLAUDE_DESKTOP_PORT",
+        "Claude Desktop Port",
+        "models",
+        "number",
+        settings_attr="claude_desktop_port",
+        description="Dedicated port for the Claude Desktop 3P listener "
+        "(must differ from PORT). Point Claude Desktop's gateway base URL here.",
     ),
     ConfigFieldSpec(
         "REASONING_POLICY",
