@@ -9,14 +9,12 @@ from loguru import logger
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.core.anthropic import (
+    MidConversationSystemMode,
     OpenAIToolNameCodec,
     ReasoningReplayMode,
     build_base_request_body,
 )
-from free_claude_code.core.anthropic.conversion import (
-    OpenAIConversionError,
-    promote_demoted_reminders,
-)
+from free_claude_code.core.anthropic.conversion import OpenAIConversionError
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 
@@ -43,6 +41,32 @@ class OpenAIChatRequestPolicy:
     normalize_n_to_one: bool = False
 
 
+def _is_deepseek_model(model: str) -> bool:
+    """True when the upstream model name is a DeepSeek model.
+
+    Case-insensitive substring match: catches ``deepseek-chat``,
+    ``DeepSeek-V4-Pro``, and OpenRouter-namespaced forms like
+    ``deepseek/deepseek-chat``.
+    """
+    return "deepseek" in model.lower()
+
+
+def _mid_conversation_system_mode(
+    policy: OpenAIChatRequestPolicy,
+    request_data: MessagesRequest,
+) -> MidConversationSystemMode:
+    """Choose how mid-conversation system messages reach the upstream.
+
+    DeepSeek models understand a dedicated ``latest_reminder`` role, so they
+    receive the system text under that role. Other OpenAI Chat upstreams
+    cannot represent the system role mid-conversation, so those messages are
+    dropped rather than demoted into user content.
+    """
+    if policy.provider_name == "DEEPSEEK" or _is_deepseek_model(request_data.model):
+        return MidConversationSystemMode.LATEST_REMINDER
+    return MidConversationSystemMode.DROP
+
+
 def build_openai_chat_request_body(
     request_data: MessagesRequest,
     *,
@@ -62,6 +86,7 @@ def build_openai_chat_request_body(
             request_data,
             default_max_tokens=policy.default_max_tokens,
             reasoning_replay=policy.reasoning_replay,
+            mid_conversation_system=_mid_conversation_system_mode(policy, request_data),
         )
     except OpenAIConversionError as exc:
         raise InvalidRequestError(str(exc)) from exc
@@ -85,7 +110,6 @@ def build_openai_chat_request_body(
         postprocess(body, request_data, reasoning)
 
     _encode_openai_tool_names(body, OpenAIToolNameCodec.from_request(request_data))
-    _apply_deepseek_native_reminder(body, request_data)
 
     logger.debug(
         "{}_REQUEST: conversion done model={} msgs={} tools={}",
@@ -180,43 +204,3 @@ def _normalize_max_completion_tokens(body: dict[str, Any]) -> None:
         return
     if "max_tokens" in body and body["max_tokens"] is not None:
         body["max_completion_tokens"] = body.pop("max_tokens")
-
-
-def _is_deepseek_model(model: str) -> bool:
-    """True when the upstream model name is a DeepSeek model.
-
-    Case-insensitive substring match: catches ``deepseek-chat``,
-    ``DeepSeek-V4-Pro``, and OpenRouter-namespaced forms like
-    ``deepseek/deepseek-chat``.
-    """
-    return "deepseek" in model.lower()
-
-
-def _apply_deepseek_native_reminder(
-    body: dict[str, Any], request_data: MessagesRequest
-) -> None:
-    """Re-promote demoted reminder wrappers to DeepSeek's native role.
-
-    The base OpenAI Chat demotion rewrites mid-conversation ``role: system``
-    messages to ``role: user`` with a ``<system-msg role="…">`` wrapper so the
-    byte sequence stays stable for upstream prefix caching. DeepSeek V4
-    understands a dedicated ``latest_reminder`` role natively, so for any
-    DeepSeek model served by an OpenAI Chat SDK provider we unwrap the
-    reminder variant of the wrapper and rewrite the role to
-    ``latest_reminder``. Non-reminder system wrappers are left demoted —
-    the model accepts the wrapped form fine, and keeping the demotion
-    preserves cache prefix portability with other OpenAI Chat providers.
-    """
-    model = body.get("model") or request_data.model
-    if not isinstance(model, str) or not _is_deepseek_model(model):
-        return
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return
-    promoted = promote_demoted_reminders(messages)
-    if promoted:
-        logger.debug(
-            "DEEPSEEK_NATIVE_REMINDER: promoted model={} count={}",
-            model,
-            promoted,
-        )

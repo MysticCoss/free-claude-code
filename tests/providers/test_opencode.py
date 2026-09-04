@@ -7,6 +7,7 @@ import pytest
 
 from free_claude_code.core.anthropic.models import Message, MessagesRequest
 from free_claude_code.core.anthropic.stream_contracts import parse_sse_text
+from free_claude_code.core.session_id import claude_to_opencode_session_id
 from free_claude_code.providers.base import ProviderConfig
 from tests.providers.support import (
     capture_openai_chat_wire_body,
@@ -249,3 +250,154 @@ async def test_stream_keeps_one_text_block_when_content_chunks_carry_empty_reaso
     assert len(thinking_starts) == 1
     assert thinking_deltas == ["plan"]
     assert text_deltas == ["Hello", " world"]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("deepseek-v4-flash", {"role": "latest_reminder", "content": "Reminder"}),
+        ("DeepSeek/deepseek-chat", {"role": "latest_reminder", "content": "Reminder"}),
+        ("qwen3.8-flash", None),
+    ],
+)
+def test_gateway_mid_conversation_system_selection(
+    model: str,
+    expected: dict | None,
+) -> None:
+    """Gateway model name alone selects the mid-conversation system behavior.
+
+    DeepSeek-family models get the native ``latest_reminder`` role even when
+    served through a non-DeepSeek gateway profile; other models drop the
+    message (the top-level system prompt stays at index zero).
+    """
+    provider = profiled_provider(
+        "opencode_go",
+        ProviderConfig(
+            api_key="test_opencode_key",
+            base_url="https://example.invalid/v1",
+            rate_limit=1,
+            rate_window=1,
+        ),
+        admission=immediate_admission(),
+    )
+    request = MessagesRequest.model_validate(
+        {
+            "model": model,
+            "system": "S",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Reminder"},
+            ],
+        }
+    )
+
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
+
+    assert body["messages"][0] == {"role": "system", "content": "S"}
+    assert body["messages"][1] == {"role": "user", "content": "Hello"}
+    if expected is None:
+        assert len(body["messages"]) == 2
+    else:
+        assert body["messages"][2] == expected
+
+
+def _profiled(provider_id: str):
+    return profiled_provider(
+        provider_id,
+        ProviderConfig(
+            api_key="test_opencode_key",
+            base_url="https://example.invalid/v1",
+            rate_limit=1,
+            rate_window=1,
+        ),
+        admission=immediate_admission(),
+    )
+
+
+def _system_policy_request(model: str) -> MessagesRequest:
+    return MessagesRequest.model_validate(
+        {
+            "model": model,
+            "system": "Conversation-wide instructions",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "system",
+                    "content": "<system-reminder>tick</system-reminder>",
+                },
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
+def test_mid_conversation_system_dropped_for_non_deepseek_model(
+    provider_id: str,
+) -> None:
+    provider = _profiled(provider_id)
+    request = _system_policy_request("qwen3.8-flash")
+
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
+
+    assert body["messages"] == [
+        {"role": "system", "content": "Conversation-wide instructions"},
+        {"role": "user", "content": "hi"},
+    ]
+
+
+@pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
+def test_mid_conversation_system_becomes_latest_reminder_for_deepseek_model(
+    provider_id: str,
+) -> None:
+    provider = _profiled(provider_id)
+    request = _system_policy_request("deepseek-v4-flash")
+
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
+
+    assert body["messages"] == [
+        {"role": "system", "content": "Conversation-wide instructions"},
+        {"role": "user", "content": "hi"},
+        {
+            "role": "latest_reminder",
+            "content": "<system-reminder>tick</system-reminder>",
+        },
+    ]
+
+
+@pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
+def test_opencode_session_headers_forward_mapped_session_id(
+    provider_id: str,
+) -> None:
+    provider = _profiled(provider_id)
+    request = MessagesRequest.model_validate(
+        {
+            "model": "some-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "fcc_session_id": "session-abc",
+        }
+    )
+
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
+
+    assert body["extra_headers"] == {
+        "x-opencode-client": "fcc",
+        "x-opencode-session": claude_to_opencode_session_id("session-abc"),
+    }
+
+
+def test_non_opencode_profile_does_not_inject_session_headers() -> None:
+    provider = _profiled("xai")
+    request = MessagesRequest.model_validate(
+        {
+            "model": "grok",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "fcc_session_id": "session-abc",
+        }
+    )
+
+    body = provider._build_request_body(request, reasoning=reasoning_for(request))
+
+    assert "extra_headers" not in body

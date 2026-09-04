@@ -72,9 +72,7 @@ def get_token_count(
                     if isinstance(content, str):
                         total_tokens += _count_text_tokens(content)
                     else:
-                        total_tokens += _count_text_tokens(
-                            json.dumps(content, default=str, ensure_ascii=False)
-                        )
+                        total_tokens += _count_text_tokens(json.dumps(content))
                     total_tokens += _count_text_tokens(str(tool_use_id))
                     total_tokens += 8
                 elif b_type in (

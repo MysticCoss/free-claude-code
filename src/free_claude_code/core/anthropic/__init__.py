@@ -3,6 +3,7 @@
 from .content import extract_text_from_content, get_block_attr, get_block_type
 from .conversion import (
     AnthropicToOpenAIConverter,
+    MidConversationSystemMode,
     OpenAIConversionError,
     ReasoningReplayMode,
     build_base_request_body,
@@ -70,6 +71,7 @@ __all__ = [
     "Message",
     "MessagesRequest",
     "MessagesResponse",
+    "MidConversationSystemMode",
     "OpenAIConversionError",
     "OpenAIToolNameCodec",
     "ReasoningReplayMode",
