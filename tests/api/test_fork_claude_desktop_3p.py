@@ -6,6 +6,8 @@ id codec, the dedicated-port request detection, the /v1/models desktop view,
 the supervisor listener plan, and inbound routing.
 """
 
+import re
+
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -34,17 +36,21 @@ def _settings(
     desktop: bool,
     model: str = "deepseek/deepseek-chat",
     model_sonnet: str | None = None,
+    model_opus: str | None = None,
+    model_haiku: str | None = None,
+    model_fable: str | None = None,
+    model_compact: str | None = None,
     fcc_1m_models: str | None = None,
     port: int = 8082,
     claude_desktop_port: int = 8083,
 ) -> Settings:
     return Settings.model_construct(
         model=model,
-        model_fable=None,
-        model_opus=None,
+        model_fable=model_fable,
+        model_opus=model_opus,
         model_sonnet=model_sonnet,
-        model_haiku=None,
-        model_compact=None,
+        model_haiku=model_haiku,
+        model_compact=model_compact,
         model_fallbacks=None,
         fcc_1m_models=fcc_1m_models,
         enable_claude_desktop_3p=desktop,
@@ -189,11 +195,11 @@ def test_settings_reject_same_port_when_desktop_enabled() -> None:
     assert settings.claude_desktop_port == 8083
 
 
-def _get_model_ids(
+def _get_model_entries(
     settings: Settings,
     cache: dict[str, list[str]],
     base_url: str = _MAIN_BASE_URL,
-) -> list[str]:
+) -> list[dict[str, object]]:
     app = create_test_app(settings)
     for provider_id, model_ids in cache.items():
         provider_manager_for_app(app).cache_model_infos(
@@ -202,7 +208,133 @@ def _get_model_ids(
         )
     response = TestClient(app, base_url=base_url).get("/v1/models")
     assert response.status_code == 200
-    return [item["id"] for item in response.json()["data"]]
+    return list(response.json()["data"])
+
+
+def _get_model_ids(
+    settings: Settings,
+    cache: dict[str, list[str]],
+    base_url: str = _MAIN_BASE_URL,
+) -> list[str]:
+    return [str(entry["id"]) for entry in _get_model_entries(settings, cache, base_url)]
+
+
+# Claude Desktop 3P discovery keeps a /v1/models entry only when its id
+# passes a "recognizably Claude" name check: the lowercase id must contain no
+# third-party vendor token (blacklist wins even when the id starts with
+# "claude-"), and it must match one of the family names. A valid
+# ``anthropic_family_tier`` on the entry bypasses the name check entirely.
+# The constants below replicate the filter shipped in Claude Desktop 1.46388.
+_DESKTOP_FAMILY_TIERS = ("sonnet", "opus", "haiku", "fable", "mythos")
+_DESKTOP_VENDOR_BLACKLIST = re.compile(
+    r"ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm"
+    r"|\bling\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan"
+    r"|qwen|tc-code|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova"
+    r"|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic"
+    r"|solar|mercury|zamba|kat-coder|\bds-|dpsk"
+)
+
+
+def _desktop_name_filter_passes(model_id: str) -> bool:
+    lowered = model_id.lower()
+    if _DESKTOP_VENDOR_BLACKLIST.search(lowered):
+        return False
+    return any(
+        token in lowered for token in ("claude", *_DESKTOP_FAMILY_TIERS, "anthropic")
+    )
+
+
+def _desktop_keeps_entry(entry: dict[str, object]) -> bool:
+    tier = entry.get("anthropic_family_tier")
+    if isinstance(tier, str) and tier.lower() in _DESKTOP_FAMILY_TIERS:
+        return True
+    return _desktop_name_filter_passes(str(entry["id"]))
+
+
+def test_desktop_catalog_entries_all_survive_desktop_discovery_filter() -> None:
+    entries = _get_model_entries(
+        _settings(desktop=True),
+        {"open_router": ["deepseek/deepseek-v4-pro", "qwen/qwen3.8-flash"]},
+        base_url=_DESKTOP_BASE_URL,
+    )
+
+    assert entries
+    rejected = [
+        str(entry["id"]) for entry in entries if not _desktop_keeps_entry(entry)
+    ]
+    assert rejected == []
+
+
+def test_desktop_family_tier_rescues_blacklisted_vendor_names() -> None:
+    # The codec's "claude-" prefix alone is not enough: Desktop's blacklist
+    # wins over the claude-substring pass, so these ids need the tier field.
+    assert not _desktop_name_filter_passes("claude-deepseek-deepseek-chat")
+    assert not _desktop_name_filter_passes(
+        "claude-3-freecc-no-thinking/open_router/qwen/qwen3.8-flash"
+    )
+
+    entries = _get_model_entries(
+        _settings(desktop=True),
+        {"open_router": ["qwen/qwen3.8-flash"]},
+        base_url=_DESKTOP_BASE_URL,
+    )
+    by_id = {str(entry["id"]): entry for entry in entries}
+    for model_id in (
+        "claude-deepseek-deepseek-chat",
+        "claude-open_router-qwen/qwen3.8-flash",
+        "claude-3-freecc-no-thinking/deepseek/deepseek-chat",
+        "claude-3-freecc-no-thinking/open_router/qwen/qwen3.8-flash",
+    ):
+        assert model_id in by_id, model_id
+        assert by_id[model_id].get("anthropic_family_tier") == "sonnet", model_id
+
+
+def test_desktop_family_tier_follows_configured_aliases() -> None:
+    entries = _get_model_entries(
+        _settings(
+            desktop=True,
+            model="deepseek/deepseek-chat",
+            model_opus="groq/llama-3.3-70b",
+            model_haiku="groq/llama-3.3-70b",
+            model_fable="open_router/qwen/qwen3.8-flash",
+            model_compact="deepseek/deepseek-chat",
+            fcc_1m_models="groq/llama-3.3-70b",
+        ),
+        {},
+        base_url=_DESKTOP_BASE_URL,
+    )
+    tiers = {str(entry["id"]): entry.get("anthropic_family_tier") for entry in entries}
+
+    # model_compact claims the default chat ref first in table order.
+    assert tiers["claude-deepseek-deepseek-chat"] == "haiku"
+    assert tiers["claude-3-freecc-no-thinking/deepseek/deepseek-chat"] == "haiku"
+    # Aliases that share a ref resolve in declared order: opus before haiku.
+    assert tiers["claude-groq-llama-3.3-70b"] == "opus"
+    # [1m] catalog variants keep the alias tier of their base ref.
+    assert tiers["claude-groq-llama-3.3-70b[1m]"] == "opus"
+    assert tiers["claude-open_router-qwen/qwen3.8-flash"] == "fable"
+    # Unmapped models fall back to the neutral everyday-work tier.
+    assert tiers["claude-3-freecc-no-thinking/groq/llama-3.3-70b"] == "opus"
+
+
+def test_main_port_catalog_omits_family_tier_field() -> None:
+    entries = _get_model_entries(
+        _settings(desktop=True),
+        {"open_router": ["qwen/qwen3.8-flash"]},
+    )
+
+    assert entries
+    assert all("anthropic_family_tier" not in entry for entry in entries)
+
+
+def test_disabled_desktop_port_catalog_omits_family_tier_field() -> None:
+    entries = _get_model_entries(
+        _settings(desktop=False),
+        {"open_router": ["qwen/qwen3.8-flash"]},
+        base_url=_DESKTOP_BASE_URL,
+    )
+
+    assert all("anthropic_family_tier" not in entry for entry in entries)
 
 
 def test_desktop_listener_advertises_claude_prefixed_ids() -> None:
