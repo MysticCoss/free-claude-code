@@ -7,7 +7,7 @@ import subprocess
 import time
 import uuid
 import wave
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +33,7 @@ from free_claude_code.messaging.workflow import MessagingWorkflow
 from smoke.lib.child_process import run_captured_text
 from smoke.lib.config import ProviderModel, SmokeConfig, auth_headers
 from smoke.lib.server import RunningServer, start_server
-from smoke.lib.skips import fail_missing_env
+from smoke.lib.skips import fail_missing_env, skip_if_upstream_unavailable_events
 
 
 @dataclass(slots=True)
@@ -59,11 +59,13 @@ class SmokeServerDriver:
         *,
         name: str,
         env_overrides: dict[str, str] | None = None,
+        env_unset: Iterable[str] = (),
         command: list[str] | None = None,
     ) -> None:
         self.config = config
         self.name = name
         self.env_overrides = env_overrides
+        self.env_unset = tuple(env_unset)
         self.command = command
 
     @contextmanager
@@ -71,6 +73,7 @@ class SmokeServerDriver:
         with start_server(
             self.config,
             env_overrides=self.env_overrides,
+            env_unset=self.env_unset,
             command=self.command,
             name=self.name,
         ) as server:
@@ -278,7 +281,7 @@ class ClientProtocolDriver:
     ) -> subprocess.CompletedProcess[str]:
         env = build_claude_proxy_env(
             proxy_root_url=server.base_url,
-            auth_token=config.settings.anthropic_auth_token,
+            auth_token=config.settings.proxy_auth_token,
             base_env=os.environ,
         )
         command = [
@@ -751,3 +754,14 @@ def assert_product_stream(events: list[SSEEvent]) -> None:
     assert text_content(events).strip() or has_tool_use(events), (
         "product stream emitted neither text nor tool_use"
     )
+
+
+def assert_native_thinking_stream(events: list[SSEEvent], *, context: str) -> None:
+    skip_if_upstream_unavailable_events(events)
+    assert_anthropic_stream_contract(events)
+    assert any(
+        event.event == "content_block_delta"
+        and isinstance(delta := event.data.get("delta"), dict)
+        and delta.get("type") == "thinking_delta"
+        for event in events
+    ), f"{context} completed without native thinking output"

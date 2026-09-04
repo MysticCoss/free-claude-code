@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from free_claude_code.config.provider_catalog import CEREBRAS_DEFAULT_BASE
-from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     REASONING_OFF,
     immediate_admission,
+    make_provider_config,
     profiled_provider,
     reasoning_for,
 )
@@ -53,7 +53,7 @@ def make_reasoning_tool_history_request():
 
 @pytest.fixture
 def cerebras_config():
-    return ProviderConfig(
+    return make_provider_config(
         api_key="test_cerebras_key",
         base_url=CEREBRAS_DEFAULT_BASE,
         rate_limit=10,
@@ -119,7 +119,7 @@ def test_build_request_body_replays_reasoning_as_tagged_content(cerebras_provide
 def test_replay_is_independent_of_current_turn_reasoning_control():
     provider = profiled_provider(
         "cerebras",
-        ProviderConfig(
+        make_provider_config(
             api_key="test_cerebras_key",
             base_url=CEREBRAS_DEFAULT_BASE,
             rate_limit=10,
@@ -186,7 +186,7 @@ def test_build_request_body_preserves_caller_extra_body(cerebras_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_text(cerebras_provider):
+async def test_stream_messages_text(cerebras_provider):
     """Text content deltas are emitted as text blocks."""
     req = make_request()
 
@@ -211,7 +211,7 @@ async def test_stream_response_text(cerebras_provider):
     ) as mock_create:
         mock_create.return_value = mock_stream()
 
-        events = [event async for event in cerebras_provider.stream_response(req)]
+        events = [event async for event in cerebras_provider.stream_messages(req)]
 
         assert any(
             '"text_delta"' in event and "Hello back!" in event for event in events
@@ -219,7 +219,7 @@ async def test_stream_response_text(cerebras_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning(cerebras_provider):
+async def test_stream_messages_reasoning(cerebras_provider):
     """Cerebras reasoning deltas are emitted as thinking blocks."""
     req = make_request()
 
@@ -244,7 +244,7 @@ async def test_stream_response_reasoning(cerebras_provider):
     ) as mock_create:
         mock_create.return_value = mock_stream()
 
-        events = [event async for event in cerebras_provider.stream_response(req)]
+        events = [event async for event in cerebras_provider.stream_messages(req)]
 
         assert any(
             '"thinking_delta"' in event and "Thinking..." in event for event in events

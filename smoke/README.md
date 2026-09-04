@@ -55,8 +55,8 @@ Default targets do not send real bot messages or load voice backends:
 | --- | --- | --- |
 | `api` | messages, count_tokens full payload, errors, `/stop`, optimizations | configured provider only for streaming messages |
 | `auth` | canonical bearer auth, conflicting legacy headers, invalid/missing auth | none; test sets an isolated token |
-| `cli` | server entrypoint, Claude CLI adaptive thinking, session cleanup | Claude CLI binary and provider only for real CLI |
-| `clients` | VS Code and JetBrains protocol payloads | configured provider |
+| `cli` | server entrypoint, Claude CLI adaptive thinking, automatic WebSearch, Auto-mode classifier, session cleanup | Claude CLI binary and provider only for real CLI; connected OpenAI account for Auto mode; `FCC_SMOKE_RUN_WEB_TOOLS=1` for WebSearch |
+| `clients` | VS Code and JetBrains protocol payloads; Pi, OpenCode, Aider, Cline, Hermes, DeepSeek Harness, Grok Build, and Muse Code CLI prompts | configured provider; installed Pi/OpenCode/Aider/Cline binaries; Hermes, DSH, Grok, and Muse use a local fake upstream |
 | `config` | env precedence, removed-env migration, proxy/timeouts | none |
 | `extensibility` | provider runtime and platform factory construction | none |
 | `messaging` | fake Discord/Telegram full flow, literal clear scopes, trees, persistence, voice cancel | none |
@@ -72,6 +72,7 @@ Heavy/side-effectful targets are opt-in:
 | Target | Product scenarios | Required environment |
 | --- | --- | --- |
 | `nvidia_nim_cli` | Claude Code CLI feature matrix across NIM models | `NVIDIA_NIM_API_KEY`, Claude CLI |
+| `nvidia_nim_vision` | Claude-style image tool result reaches a NIM vision model as pixels | `NVIDIA_NIM_API_KEY`, `FCC_SMOKE_MODEL_NVIDIA_NIM_VISION` |
 | `openrouter_free_cli` | Claude Code CLI feature matrix across OpenRouter free models | `OPENROUTER_API_KEY`, Claude CLI |
 | `telegram` | getMe, send, edit, delete, optional manual inbound | token and chat/user ID |
 | `discord` | channel access, send, edit, delete, optional manual inbound | token and channel ID |
@@ -102,15 +103,23 @@ uv run pytest smoke/product -n 0 -s --tb=short
 ```powershell
 $env:FCC_LIVE_SMOKE = "1"
 $env:FCC_SMOKE_TARGETS = "nvidia_nim_cli"
-$env:FCC_SMOKE_NIM_MODELS = "z-ai/glm-5.2,moonshotai/kimi-k2.6,minimaxai/minimax-m2.7,minimaxai/minimax-m3,nvidia/nemotron-3-super-120b-a12b,deepseek-ai/deepseek-v4-pro,deepseek-ai/deepseek-v4-flash"
+$env:FCC_SMOKE_NIM_MODELS = "nvidia/nemotron-3.5-lightning-30b-a3b,moonshotai/kimi-k3,minimaxai/minimax-m3,nvidia/nemotron-3-super-120b-a12b"
 uv run pytest smoke/product -n 0 -s --tb=short
 ```
 
 ```powershell
 $env:FCC_LIVE_SMOKE = "1"
 $env:FCC_SMOKE_TARGETS = "openrouter_free_cli"
-$env:FCC_SMOKE_OPENROUTER_FREE_MODELS = "nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-120b:free,poolside/laguna-m.1:free"
+$env:FCC_SMOKE_OPENROUTER_FREE_MODELS = "nvidia/nemotron-3-super-120b-a12b:free,poolside/laguna-s-2.1:free,poolside/laguna-xs-2.1:free"
 uv run pytest smoke/product -n 0 -s --tb=short
+```
+
+```powershell
+$env:FCC_LIVE_SMOKE = "1"
+$env:FCC_SMOKE_TARGETS = "cli"
+$env:FCC_SMOKE_PROVIDER_MATRIX = "openai"
+$env:FCC_SMOKE_MODEL_OPENAI = "gpt-5.6-luna"
+uv run pytest smoke/product/test_client_product_live.py -n 0 -s --tb=short -k claude_auto_mode_openai_connected
 ```
 
 ```powershell
@@ -119,9 +128,28 @@ $env:FCC_SMOKE_TARGETS = "messaging,config,extensibility"
 uv run pytest smoke/product -n 0 -s --tb=short
 ```
 
+NVIDIA NIM vision regression (PowerShell):
+
+```powershell
+$env:FCC_LIVE_SMOKE = "1"
+$env:FCC_SMOKE_TARGETS = "nvidia_nim_vision"
+$env:FCC_SMOKE_MODEL_NVIDIA_NIM_VISION = "meta/llama-3.2-11b-vision-instruct"
+uv run pytest smoke/product/test_nvidia_nim_vision_product_live.py -n 0 -s --tb=short
+```
+
+NVIDIA NIM vision regression (POSIX):
+
+```bash
+FCC_LIVE_SMOKE=1 \
+FCC_SMOKE_TARGETS=nvidia_nim_vision \
+FCC_SMOKE_MODEL_NVIDIA_NIM_VISION=meta/llama-3.2-11b-vision-instruct \
+uv run pytest smoke/product/test_nvidia_nim_vision_product_live.py -n 0 -s --tb=short
+```
+
 ## Environment
 
-- `FCC_ENV_FILE`: explicit dotenv path for startup/config scenarios.
+- Runtime settings use the isolated managed `~/.fcc/.env`; `FCC_ENV_FILE` is
+  exercised only by the one-time legacy migration smoke.
 - `FCC_LIVE_SMOKE=1`: enables live smoke execution.
 - `FCC_ALLOW_NO_PROVIDER_SMOKE=1`: permits no-provider live smoke for harness work.
 - `FCC_SMOKE_TARGETS`: comma-separated targets, or `all`.
@@ -130,6 +158,8 @@ uv run pytest smoke/product -n 0 -s --tb=short
   Use the uppercase provider ID, such as `FCC_SMOKE_MODEL_KILO`; the complete
   variable inventory is in [.env.example](../.env.example). Values may include
   the provider prefix or just the model name for that provider.
+- `FCC_SMOKE_MODEL_NVIDIA_NIM_VISION`: required explicit NIM vision model for
+  the opt-in `nvidia_nim_vision` target; it never falls back to the text model.
 - `FCC_SMOKE_MODEL_MISTRAL_REASONING`: optional override for the dedicated
   Mistral native reasoning smoke, default `mistral/mistral-medium-3-5`.
 - `FCC_SMOKE_NIM_MODELS`: optional comma-separated NVIDIA NIM CLI matrix models
@@ -142,6 +172,9 @@ uv run pytest smoke/product -n 0 -s --tb=short
   free CLI matrix models appended to the default or replacement set.
 - `FCC_SMOKE_TIMEOUT_S`: per-request/subprocess timeout, default `45`.
 - `FCC_SMOKE_CLAUDE_BIN`: Claude CLI executable name, default `claude`.
+- `FCC_SMOKE_RUN_WEB_TOOLS=1`: enables the combined real-provider automatic
+  WebSearch and installed Claude Code WebSearch scenario, including a public
+  DuckDuckGo request.
 - `FCC_SMOKE_TELEGRAM_CHAT_ID`: Telegram chat/user ID for send/edit/delete.
 - `FCC_SMOKE_DISCORD_CHANNEL_ID`: Discord channel ID for send/edit/delete.
 - `FCC_SMOKE_INTERACTIVE=1`: enables manual inbound Telegram/Discord checks.

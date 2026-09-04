@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -15,13 +16,19 @@ from free_claude_code.application.model_metadata import (
     ProviderModelRefreshResult,
 )
 from free_claude_code.config.admin.values import MASKED_SECRET
+from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.server_urls import local_admin_url
 from free_claude_code.config.settings import Settings
-from tests.api.support import create_test_app, provider_manager_for_app
+from free_claude_code.core.version import package_version
+from tests.api.support import create_test_app, provider_manager_for_app, runtime_for_app
 
 
 def _local_client(app):
-    return TestClient(app, client=("127.0.0.1", 50000))
+    return TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    )
 
 
 def _set_home(monkeypatch, tmp_path: Path) -> None:
@@ -33,6 +40,7 @@ def _set_home(monkeypatch, tmp_path: Path) -> None:
 def _clear_process_config(monkeypatch) -> None:
     for key in (
         "MODEL",
+        "MODEL_FALLBACKS",
         "NVIDIA_NIM_API_KEY",
         "HUGGINGFACE_API_KEY",
         "OPENROUTER_API_KEY",
@@ -41,6 +49,7 @@ def _clear_process_config(monkeypatch) -> None:
         "BEDROCK_PROXY",
         "OLLAMA_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "PROXY_AUTH_ENABLED",
         "TELEGRAM_PROXY_URL",
         "FCC_ENV_FILE",
         "CLOUDFLARE_API_TOKEN",
@@ -58,6 +67,23 @@ def _clear_process_config(monkeypatch) -> None:
         "CLAUDE_CLI_BIN",
     ):
         monkeypatch.delenv(key, raising=False)
+    for descriptor in PROVIDER_CATALOG.values():
+        if descriptor.proxy_attr is None:
+            continue
+        alias = Settings.model_fields[descriptor.proxy_attr].validation_alias
+        if alias is not None:
+            monkeypatch.delenv(str(alias), raising=False)
+
+
+def _catalog_proxy_env_keys() -> tuple[str, ...]:
+    keys: list[str] = []
+    for descriptor in PROVIDER_CATALOG.values():
+        if descriptor.proxy_attr is None:
+            continue
+        alias = Settings.model_fields[descriptor.proxy_attr].validation_alias
+        if alias is not None:
+            keys.append(str(alias))
+    return tuple(keys)
 
 
 def test_admin_page_is_loopback_only(monkeypatch, tmp_path):
@@ -69,12 +95,95 @@ def test_admin_page_is_loopback_only(monkeypatch, tmp_path):
     assert remote_client.get("/admin").status_code == 403
 
 
+def test_admin_page_uses_installed_version(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "free_claude_code.api.admin_routes.package_version",
+        lambda: "9.8.7",
+    )
+
+    response = _local_client(create_test_app()).get("/admin")
+
+    assert response.status_code == 200
+    assert "<p>Server Control · v9.8.7</p>" in response.text
+    assert 'href="https://github.com/Alishahryar1/free-claude-code"' in response.text
+    assert 'target="_blank"' in response.text
+    assert 'rel="noopener noreferrer"' in response.text
+    assert 'aria-label="Open Free Claude Code on GitHub"' in response.text
+    assert 'src="/admin/assets/9.8.7/app-icon.svg"' in response.text
+    assert 'href="/admin/assets/9.8.7/admin.css"' in response.text
+    assert 'href="/admin/assets/9.8.7/chat_sessions.css"' in response.text
+    assert 'src="/admin/assets/9.8.7/model_combobox.js"' in response.text
+    assert 'src="/admin/assets/9.8.7/chat_sessions.js"' in response.text
+    assert 'src="/admin/assets/9.8.7/admin.js"' in response.text
+    assert 'href="/admin/assets/admin.css"' not in response.text
+    assert 'href="/admin/assets/chat_sessions.css"' not in response.text
+    assert 'src="/admin/assets/chat_sessions.js"' not in response.text
+    assert 'src="/admin/assets/admin.js"' not in response.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "media_type"),
+    (
+        ("admin.css", "text/css"),
+        ("admin.js", "text/javascript"),
+        ("chat_sessions.css", "text/css"),
+        ("chat_sessions.js", "text/javascript"),
+        ("model_combobox.js", "text/javascript"),
+    ),
+)
+def test_admin_versioned_assets_serve_packaged_files(
+    monkeypatch,
+    tmp_path,
+    filename,
+    media_type,
+):
+    asset_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "free_claude_code"
+        / "api"
+        / "admin_static"
+        / filename
+    )
+    _set_home(monkeypatch, tmp_path)
+    response = _local_client(create_test_app()).get(
+        f"/admin/assets/{package_version()}/{filename}"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(media_type)
+    assert response.content == asset_path.read_bytes()
+
+
+def test_admin_versioned_logo_reuses_packaged_app_icon(monkeypatch, tmp_path):
+    asset_path = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "free_claude_code"
+        / "assets"
+        / "app-icon.svg"
+    )
+    _set_home(monkeypatch, tmp_path)
+    response = _local_client(create_test_app()).get(
+        f"/admin/assets/{package_version()}/app-icon.svg"
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert response.content == asset_path.read_bytes()
+
+
 @pytest.mark.parametrize(
     "path",
     (
         "/admin",
-        "/admin/assets/admin.css",
-        "/admin/assets/admin.js",
+        f"/admin/assets/{package_version()}/app-icon.svg",
+        f"/admin/assets/{package_version()}/admin.css",
+        f"/admin/assets/{package_version()}/admin.js",
+        f"/admin/assets/{package_version()}/chat_sessions.css",
+        f"/admin/assets/{package_version()}/chat_sessions.js",
+        f"/admin/assets/{package_version()}/model_combobox.js",
         "/admin/api/config",
     ),
 )
@@ -90,7 +199,22 @@ def test_admin_responses_are_never_cached(monkeypatch, tmp_path, path):
     ("path", "client_host", "expected_status"),
     (
         ("/admin", "203.0.113.10", 403),
-        ("/admin/assets/missing.js", "127.0.0.1", 404),
+        ("/admin/assets/admin.js", "127.0.0.1", 404),
+        (
+            f"/admin/assets/{package_version()}.stale/admin.js",
+            "127.0.0.1",
+            404,
+        ),
+        (
+            f"/admin/assets/{package_version()}/missing.js",
+            "127.0.0.1",
+            404,
+        ),
+        (
+            f"/admin/assets/{package_version()}/admin.js",
+            "203.0.113.10",
+            403,
+        ),
     ),
 )
 def test_admin_http_errors_are_never_cached(
@@ -101,7 +225,11 @@ def test_admin_http_errors_are_never_cached(
     expected_status,
 ):
     _set_home(monkeypatch, tmp_path)
-    client = TestClient(create_test_app(), client=(client_host, 50000))
+    client = TestClient(
+        create_test_app(),
+        base_url="http://127.0.0.1",
+        client=(client_host, 50000),
+    )
 
     response = client.get(path)
 
@@ -109,11 +237,11 @@ def test_admin_http_errors_are_never_cached(
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_admin_validation_errors_are_never_cached(monkeypatch, tmp_path):
+def test_admin_apply_payload_validation_errors_are_never_cached(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
 
     response = _local_client(create_test_app()).post(
-        "/admin/api/config/validate",
+        "/admin/api/config/apply",
         content="{",
         headers={"Content-Type": "application/json"},
     )
@@ -126,6 +254,7 @@ def test_admin_unexpected_errors_are_never_cached(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     client = TestClient(
         create_test_app(),
+        base_url="http://127.0.0.1",
         client=("127.0.0.1", 50000),
         raise_server_exceptions=False,
     )
@@ -264,15 +393,6 @@ def test_admin_rejects_auth_routes_for_non_connected_provider(monkeypatch, tmp_p
     assert response.status_code == 404
 
 
-def test_admin_provider_cards_support_non_key_configuration():
-    script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
-        encoding="utf-8"
-    )
-
-    assert '"missing_config"' in script
-    assert ": provider.configuration;" in script
-
-
 def test_admin_page_no_longer_renders_generated_env_panel(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     app = create_test_app()
@@ -332,23 +452,27 @@ def test_admin_static_model_combobox_owns_dropdown_and_search_behavior():
     script = Path("src/free_claude_code/api/admin_static/admin.js").read_text(
         encoding="utf-8"
     )
+    combobox_script = Path(
+        "src/free_claude_code/api/admin_static/model_combobox.js"
+    ).read_text(encoding="utf-8")
     styles = Path("src/free_claude_code/api/admin_static/admin.css").read_text(
         encoding="utf-8"
     )
 
     assert 'api("/admin/api/models" + (refresh ? "/refresh" : "")' in script
     assert 'field.type === "model" || field.type === "optional_model"' in script
-    assert 'input.setAttribute("role", "combobox")' in script
-    assert 'listbox.setAttribute("role", "listbox")' in script
-    assert 'toggle.className = "model-combobox-toggle"' in script
-    assert "class ModelCombobox" in script
-    assert 'input.addEventListener("click", () => this.open())' in script
-    assert "value.toLocaleLowerCase().includes(normalizedQuery)" in script
-    assert 'event.key === "ArrowDown" || event.key === "ArrowUp"' in script
-    assert "this.setActive(this.visibleOptions.length - 1)" in script
-    assert 'event.key === "Enter"' in script
-    assert 'event.key === "Escape"' in script
-    assert 'document.createElement("datalist")' not in script
+    assert "new window.FccModelCombobox" in script
+    assert 'input.setAttribute("role", "combobox")' in combobox_script
+    assert 'this.listbox.setAttribute("role", "listbox")' in combobox_script
+    assert 'this.toggle.className = "model-combobox-toggle"' in combobox_script
+    assert "class FccModelCombobox" in combobox_script
+    assert 'input.addEventListener("click", () => this.open())' in combobox_script
+    assert "value.toLocaleLowerCase().includes(normalizedQuery)" in combobox_script
+    assert 'event.key === "ArrowDown" || event.key === "ArrowUp"' in combobox_script
+    assert "this.setActive(this.visibleOptions.length - 1)" in combobox_script
+    assert 'event.key === "Enter"' in combobox_script
+    assert 'event.key === "Escape"' in combobox_script
+    assert 'document.createElement("datalist")' not in combobox_script
     assert ".model-combobox-list" in styles
     assert ".model-combobox-option.active" in styles
     assert styles.count("background-image: var(--dropdown-chevron)") == 2
@@ -362,7 +486,7 @@ def test_admin_static_model_combobox_preserves_custom_slugs_and_none_semantics()
     assert '? ["None", ...state.modelOptions]' in script
     assert "You can still enter a custom slug." in script
     assert 'input.dataset.fieldType === "optional_model"' in script
-    assert 'return "";' in script
+    assert "return null;" in script
     assert "await hydrateModelOptions();" in script
     assert "Model fields remain editable" in script
     assert "result.failed_providers || []" in script
@@ -382,6 +506,8 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
     assert "MODEL_FABLE" in keys
     assert "REASONING_FABLE" in keys
     assert "ANTHROPIC_AUTH_TOKEN" in keys
+    assert "PROXY_AUTH_ENABLED" in keys
+    assert "LOG_LEVEL" in keys
     assert "OPENROUTER_API_KEY" in keys
     assert "AWS_BEARER_TOKEN_BEDROCK" in keys
     assert "BEDROCK_BASE_URL" in keys
@@ -405,22 +531,56 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
     )
     assert auth_field["secret"] is True
     assert auth_field["value"] == MASKED_SECRET
-    assert auth_field["source"] == "template"
+    assert auth_field["source"] == "default"
+    assert auth_field["nullable"] is False
     telegram_proxy_field = next(
         field for field in body["fields"] if field["key"] == "TELEGRAM_PROXY_URL"
     )
     assert telegram_proxy_field["secret"] is True
+    assert telegram_proxy_field["value"] is None
+    assert telegram_proxy_field["configured"] is False
+    assert telegram_proxy_field["nullable"] is True
+    assert body["paths"] == {"managed": str(tmp_path / ".fcc" / ".env")}
+    catalog_smoke_keys = {
+        f"FCC_SMOKE_MODEL_{provider_id.upper()}" for provider_id in PROVIDER_CATALOG
+    }
+    actual_smoke_keys = {
+        field["key"]
+        for field in body["fields"]
+        if field["key"].startswith("FCC_SMOKE_MODEL_")
+    }
+    assert actual_smoke_keys == catalog_smoke_keys | {
+        "FCC_SMOKE_MODEL_MISTRAL_REASONING"
+    }
     open_browser_field = next(
         field for field in body["fields"] if field["key"] == "FCC_OPEN_BROWSER"
     )
     assert open_browser_field["type"] == "boolean"
     assert open_browser_field["value"] == "true"
     assert open_browser_field["restart_required"] is False
+    progress_timeout_field = next(
+        field for field in body["fields"] if field["key"] == "PROVIDER_PROGRESS_TIMEOUT"
+    )
+    assert progress_timeout_field["label"] == "Provider Progress Timeout"
+    assert progress_timeout_field["section"] == "runtime"
+    assert progress_timeout_field["type"] == "number"
+    assert progress_timeout_field["value"] == "600.0"
+    assert progress_timeout_field["advanced"] is True
+    assert progress_timeout_field["restart_required"] is False
+    assert "non-empty protocol event" in progress_timeout_field["description"]
+    assert "Independent of HTTP Read Timeout" in progress_timeout_field["description"]
     model_field_types = {
         field["key"]: field["type"]
         for field in body["fields"]
         if field["key"]
-        in {"MODEL", "MODEL_FABLE", "MODEL_OPUS", "MODEL_SONNET", "MODEL_HAIKU"}
+        in {
+            "MODEL",
+            "MODEL_FABLE",
+            "MODEL_OPUS",
+            "MODEL_SONNET",
+            "MODEL_HAIKU",
+            "MODEL_FALLBACKS",
+        }
     }
     assert model_field_types == {
         "MODEL": "model",
@@ -428,7 +588,18 @@ def test_admin_config_masks_secrets_and_exposes_manifest(monkeypatch, tmp_path):
         "MODEL_OPUS": "optional_model",
         "MODEL_SONNET": "optional_model",
         "MODEL_HAIKU": "optional_model",
+        "MODEL_FALLBACKS": "model_list",
     }
+    fallback_field = next(
+        field for field in body["fields"] if field["key"] == "MODEL_FALLBACKS"
+    )
+    assert fallback_field["label"] == "Fallback Models"
+    assert fallback_field["value"] is None
+    assert fallback_field["nullable"] is True
+    assert fallback_field["restart_required"] is False
+    assert "fails before output" in fallback_field["description"]
+    assert "every client" in fallback_field["description"]
+    assert "multiple providers" in fallback_field["description"]
     reasoning_policy = next(
         field for field in body["fields"] if field["key"] == "REASONING_POLICY"
     )
@@ -581,6 +752,101 @@ def test_admin_apply_persists_open_browser_for_next_launch(monkeypatch, tmp_path
     assert "FCC_OPEN_BROWSER=false" in managed_env.read_text(encoding="utf-8")
 
 
+def test_admin_apply_hot_publishes_provider_progress_timeout(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"PROVIDER_PROGRESS_TIMEOUT": 900}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is True
+    assert body["pending_fields"] == []
+    assert body["restart"]["required"] is False
+    assert (
+        provider_manager_for_app(app).current_settings().provider_progress_timeout
+        == 900.0
+    )
+    managed_env = tmp_path / ".fcc" / ".env"
+    assert "PROVIDER_PROGRESS_TIMEOUT=900" in managed_env.read_text(encoding="utf-8")
+
+
+def test_admin_apply_hot_publishes_ordered_model_fallbacks(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+    value = "open_router/vendor/model-a,groq/vendor/model-b"
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL_FALLBACKS": value}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is True
+    assert body["restart"]["required"] is False
+    assert provider_manager_for_app(app).current_settings().model_fallbacks == (
+        "open_router/vendor/model-a",
+        "groq/vendor/model-b",
+    )
+    managed_env = tmp_path / ".fcc" / ".env"
+    assert f"MODEL_FALLBACKS={value}" in managed_env.read_text(encoding="utf-8")
+
+    loaded = _local_client(app).get("/admin/api/config").json()
+    field = next(item for item in loaded["fields"] if item["key"] == "MODEL_FALLBACKS")
+    assert field["value"] == value
+    assert field["source"] == "managed_env"
+
+
+def test_admin_apply_null_removes_model_fallbacks(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "FCC_CONFIG_SCHEMA=1\nMODEL_FALLBACKS=open_router/vendor/model-a\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL_FALLBACKS": None}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    assert provider_manager_for_app(app).current_settings().model_fallbacks is None
+    assert "MODEL_FALLBACKS=" not in env_file.read_text(encoding="utf-8")
+
+
+def test_admin_rejects_invalid_provider_progress_timeout_without_writing(
+    monkeypatch,
+    tmp_path,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"PROVIDER_PROGRESS_TIMEOUT": 0}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert any("PROVIDER_PROGRESS_TIMEOUT" in error for error in body["errors"])
+    managed_env = tmp_path / ".fcc" / ".env"
+    assert "PROVIDER_PROGRESS_TIMEOUT=" not in managed_env.read_text(encoding="utf-8")
+
+
 def test_admin_apply_masks_telegram_proxy_credentials(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
@@ -602,20 +868,264 @@ def test_admin_apply_masks_telegram_proxy_credentials(monkeypatch, tmp_path):
     assert f"TELEGRAM_PROXY_URL={proxy_url}" in text
 
 
-def test_admin_validate_rejects_bad_model_shape(monkeypatch, tmp_path):
+def test_admin_apply_null_removes_optional_secret(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "FCC_CONFIG_SCHEMA=1\nTELEGRAM_PROXY_URL=https://secret.invalid\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"TELEGRAM_PROXY_URL": None}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    assert "TELEGRAM_PROXY_URL=" not in env_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("submitted", [MASKED_SECRET, "", "   "])
+def test_admin_apply_masked_or_blank_secret_is_unchanged(
+    monkeypatch,
+    tmp_path,
+    submitted,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "FCC_CONFIG_SCHEMA=1\nOPENROUTER_API_KEY=original-secret\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"OPENROUTER_API_KEY": submitted}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    assert "OPENROUTER_API_KEY=original-secret" in env_file.read_text(encoding="utf-8")
+
+
+def test_admin_apply_rejects_bad_model_shape(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
     app = create_test_app()
 
     response = _local_client(app).post(
-        "/admin/api/config/validate",
+        "/admin/api/config/apply",
         json={"values": {"MODEL": "missing-provider-prefix"}},
     )
 
     assert response.status_code == 200
     body = response.json()
+    assert body["applied"] is False
     assert body["valid"] is False
     assert any("provider type" in error for error in body["errors"])
+
+
+def test_admin_apply_rejects_duplicate_model_fallbacks(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+    duplicate = "groq/vendor/model,groq/vendor/model"
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL_FALLBACKS": duplicate}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert any("duplicate" in error.lower() for error in body["errors"])
+
+
+@pytest.mark.parametrize("proxy_key", _catalog_proxy_env_keys())
+def test_admin_apply_rejects_invalid_catalog_provider_proxy(
+    monkeypatch,
+    tmp_path,
+    proxy_key,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    invalid_proxy = "not-a-proxy://user:leaked-secret@proxy.example:8080"
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/apply",
+        json={"values": {proxy_key: invalid_proxy}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert body["errors"] == [
+        (
+            f"{proxy_key}: must be a proxy URL with a supported scheme and host "
+            "(for example http://127.0.0.1:8080 or socks5://127.0.0.1:1080)"
+        )
+    ]
+    assert invalid_proxy not in response.text
+    assert "leaked-secret" not in response.text
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    (
+        "http://user:password@127.0.0.1:8080",
+        "https://proxy.example:8443",
+        "socks5://127.0.0.1:1080",
+        "socks5h://proxy.example:1080",
+        "  http://127.0.0.1:8080  ",
+    ),
+)
+def test_admin_apply_accepts_httpx_provider_proxy(monkeypatch, tmp_path, proxy):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/apply",
+        json={"values": {"OPENAI_PROXY": proxy}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    assert response.json()["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    (
+        "copied Admin page text",
+        "socks://127.0.0.1:1080",
+        "http://",
+        "http:///path",
+        "http://proxy.example:notaport",
+    ),
+)
+def test_admin_apply_rejects_unusable_provider_proxy(monkeypatch, tmp_path, proxy):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/apply",
+        json={"values": {"OPENAI_PROXY": proxy}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert len(body["errors"]) == 1
+    assert body["errors"][0].startswith("OPENAI_PROXY: must be a proxy URL")
+    assert "OPENAI_PROXY=********" in body["env_preview"]
+
+
+def test_admin_apply_rejects_invalid_provider_proxy_without_side_effects(
+    monkeypatch,
+    tmp_path,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("MODEL=open_router/test-model\n", encoding="utf-8")
+    callbacks: list[str] = []
+
+    async def restart_callback() -> None:
+        callbacks.append("restart")
+
+    app = create_test_app(restart_callback=restart_callback)
+    _local_client(app).get("/admin/api/config")
+    baseline = env_file.read_bytes()
+    invalid_proxy = "invalid://user:leaked-secret@proxy.example:8080"
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"OPENAI_PROXY": invalid_proxy}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["valid"] is False
+    assert body["applied"] is False
+    assert body["pending_fields"] == []
+    assert env_file.read_bytes() == baseline
+    assert callbacks == []
+    assert invalid_proxy not in response.text
+    assert "leaked-secret" not in response.text
+
+
+def test_admin_apply_validates_retained_proxy_and_allows_removal(
+    monkeypatch,
+    tmp_path,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    invalid_proxy = "invalid://proxy.example:8080"
+    original = f"GROQ_PROXY={invalid_proxy}\n"
+    env_file.write_text(original, encoding="utf-8")
+    app = create_test_app()
+    _local_client(app).get("/admin/api/config")
+    baseline = env_file.read_bytes()
+
+    rejected = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL": "open_router/test-model"}},
+    )
+
+    assert rejected.status_code == 200
+    assert rejected.json()["applied"] is False
+    assert env_file.read_bytes() == baseline
+
+    removed = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"GROQ_PROXY": None}},
+    )
+
+    assert removed.status_code == 200
+    assert removed.json()["applied"] is True
+    assert "GROQ_PROXY=" not in env_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("submitted", (MASKED_SECRET, "", "   "))
+def test_admin_apply_preserves_valid_stored_proxy_secret(
+    monkeypatch,
+    tmp_path,
+    submitted,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "OPENAI_PROXY=http://user:password@127.0.0.1:8080\n",
+        encoding="utf-8",
+    )
+
+    response = _local_client(create_test_app()).post(
+        "/admin/api/config/apply",
+        json={"values": {"OPENAI_PROXY": submitted}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is True
+    assert body["valid"] is True
+    assert "OPENAI_PROXY=********" in body["env_preview"]
+    assert "password" not in response.text
 
 
 def test_admin_apply_writes_complete_managed_env_and_masks_preview(
@@ -643,7 +1153,10 @@ def test_admin_apply_writes_complete_managed_env_and_masks_preview(
     text = env_file.read_text("utf-8")
     assert "MODEL=open_router/test-model" in text
     assert "OPENROUTER_API_KEY=router-secret" in text
-    assert "ANTHROPIC_AUTH_TOKEN=" in text
+    assert "ANTHROPIC_AUTH_TOKEN=" not in text
+    assert "PROXY_AUTH_ENABLED=" not in text
+    assert "HOST=" not in text
+    assert "PORT=" not in text
     assert body["restart"] == {
         "required": False,
         "automatic": False,
@@ -850,7 +1363,7 @@ def test_admin_apply_writes_huggingface_key_and_masks_preview(monkeypatch, tmp_p
     assert response.status_code == 200
     body = response.json()
     assert body["applied"] is True
-    assert body["pending_fields"] == []
+    assert body["pending_fields"] == ["HUGGINGFACE_API_KEY"]
     assert "HUGGINGFACE_API_KEY=********" in body["env_preview"]
     env_file = tmp_path / ".fcc" / ".env"
     text = env_file.read_text(encoding="utf-8")
@@ -1035,7 +1548,7 @@ def test_admin_apply_preserves_hidden_diagnostics_and_smoke_values(
     assert "FCC_SMOKE_MODEL_ZAI=zai/smoke-model" in text
 
 
-def test_admin_apply_omits_stale_zai_base_url(monkeypatch, tmp_path):
+def test_admin_apply_preserves_unrecognized_managed_zai_base_url(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
     env_file = tmp_path / ".fcc" / ".env"
@@ -1063,10 +1576,10 @@ def test_admin_apply_omits_stale_zai_base_url(monkeypatch, tmp_path):
     assert body["applied"] is True
     text = env_file.read_text("utf-8")
     assert "ZAI_API_KEY=zai-secret" in text
-    assert "ZAI_BASE_URL" not in text
+    assert "ZAI_BASE_URL=https://custom.zai.invalid/v1" in text
 
 
-def test_admin_apply_omits_stale_fixed_claude_runtime_settings(monkeypatch, tmp_path):
+def test_admin_apply_preserves_unrecognized_managed_assignments(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
     env_file = tmp_path / ".fcc" / ".env"
@@ -1094,8 +1607,8 @@ def test_admin_apply_omits_stale_fixed_claude_runtime_settings(monkeypatch, tmp_
     assert body["applied"] is True
     text = env_file.read_text("utf-8")
     assert "MODEL=open_router/test-model" in text
-    assert "CLAUDE_WORKSPACE" not in text
-    assert "CLAUDE_CLI_BIN" not in text
+    assert "CLAUDE_WORKSPACE=C:/custom/workspace" in text
+    assert "CLAUDE_CLI_BIN=claude-custom" in text
 
 
 def test_admin_apply_restart_required_reports_automatic_restart(monkeypatch, tmp_path):
@@ -1169,7 +1682,30 @@ def test_admin_process_env_values_are_locked_and_not_written(monkeypatch, tmp_pa
     assert "deepseek/managed-model" not in env_file.read_text("utf-8")
 
 
-def test_admin_first_apply_migrates_repo_env(monkeypatch, tmp_path):
+def test_admin_process_model_fallbacks_are_locked_and_not_written(
+    monkeypatch, tmp_path
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    monkeypatch.setenv("MODEL_FALLBACKS", "open_router/process-model")
+    app = create_test_app()
+
+    config = _local_client(app).get("/admin/api/config").json()
+    field = next(item for item in config["fields"] if item["key"] == "MODEL_FALLBACKS")
+    assert field["locked"] is True
+    assert field["source"] == "process"
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL_FALLBACKS": "groq/managed-model"}},
+    )
+
+    assert response.status_code == 200
+    env_file = tmp_path / ".fcc" / ".env"
+    assert "MODEL_FALLBACKS=" not in env_file.read_text("utf-8")
+
+
+def test_admin_never_reads_arbitrary_current_directory_env(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -1181,8 +1717,8 @@ def test_admin_first_apply_migrates_repo_env(monkeypatch, tmp_path):
 
     config = _local_client(app).get("/admin/api/config").json()
     model_field = next(field for field in config["fields"] if field["key"] == "MODEL")
-    assert model_field["value"] == "deepseek/deepseek-chat"
-    assert model_field["source"] == "repo_env"
+    assert model_field["value"] == "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
+    assert model_field["source"] == "default"
 
     response = _local_client(app).post(
         "/admin/api/config/apply",
@@ -1191,8 +1727,117 @@ def test_admin_first_apply_migrates_repo_env(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     managed_text = (tmp_path / ".fcc" / ".env").read_text("utf-8")
-    assert "MODEL=deepseek/deepseek-chat" in managed_text
-    assert "DEEPSEEK_API_KEY=deepseek-secret" in managed_text
+    assert "MODEL=deepseek/deepseek-chat" not in managed_text
+    assert "DEEPSEEK_API_KEY=deepseek-secret" not in managed_text
+
+
+def test_admin_migration_removes_blank_required_managed_values(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "MESSAGING_PLATFORM=\nWHISPER_DEVICE=\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"NVIDIA_NIM_API_KEY": "nim-secret"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    managed_text = (tmp_path / ".fcc" / ".env").read_text("utf-8")
+    assert "NVIDIA_NIM_API_KEY=nim-secret" in managed_text
+    assert "MESSAGING_PLATFORM=" not in managed_text
+    assert "WHISPER_DEVICE=" not in managed_text
+
+
+def test_admin_migrates_empty_auth_token_to_explicit_disabled_state(
+    monkeypatch, tmp_path
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "ANTHROPIC_AUTH_TOKEN=\nPROVIDER_RATE_LIMIT=1\n",
+        encoding="utf-8",
+    )
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"PROVIDER_RATE_LIMIT": "2"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    managed_lines = env_file.read_text("utf-8").splitlines()
+    assert not any(line.startswith("ANTHROPIC_AUTH_TOKEN=") for line in managed_lines)
+    assert "PROXY_AUTH_ENABLED=false" in managed_lines
+    assert "PROVIDER_RATE_LIMIT=2" in managed_lines
+
+
+@pytest.mark.parametrize(
+    ("submitted", "message"),
+    [
+        (None, "this setting cannot be removed"),
+        ("", "this setting cannot be blank"),
+        ("   ", "this setting cannot be blank"),
+    ],
+)
+def test_admin_apply_rejects_missing_required_value_without_writing(
+    monkeypatch,
+    tmp_path,
+    submitted,
+    message,
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True)
+    original = "ANTHROPIC_AUTH_TOKEN=\nMESSAGING_PLATFORM=none\n"
+    env_file.write_text(original, encoding="utf-8")
+    app = create_test_app()
+    _local_client(app).get("/admin/api/config")
+    baseline = env_file.read_bytes()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MESSAGING_PLATFORM": submitted}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is False
+    assert body["valid"] is False
+    assert f"MESSAGING_PLATFORM: {message}" in body["errors"]
+    assert env_file.read_bytes() == baseline
+
+
+def test_admin_apply_preserves_false_and_numeric_zero(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={
+            "values": {
+                "FCC_OPEN_BROWSER": False,
+                "HTTP_WRITE_TIMEOUT": 0,
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    managed = (tmp_path / ".fcc" / ".env").read_text(encoding="utf-8")
+    assert "FCC_OPEN_BROWSER=false" in managed
+    assert "HTTP_WRITE_TIMEOUT=0" in managed
 
 
 def test_admin_local_provider_status_reports_reachable(monkeypatch, tmp_path):
@@ -1219,6 +1864,130 @@ def test_admin_local_provider_status_reports_reachable(monkeypatch, tmp_path):
     assert response.status_code == 200
     providers = response.json()["providers"]
     assert {provider["status"] for provider in providers} == {"reachable"}
+
+
+def test_admin_local_provider_status_checks_all_providers_concurrently(
+    monkeypatch, tmp_path
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+    calls = 0
+    active = 0
+    max_active = 0
+
+    class SlowAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url: str):
+            nonlocal active, calls, max_active
+            calls += 1
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return httpx.Response(200, json={"data": []})
+
+    with patch("free_claude_code.api.admin_routes.httpx.AsyncClient", SlowAsyncClient):
+        response = _local_client(app).get("/admin/api/providers/local-status")
+
+    assert response.status_code == 200
+    assert calls == 3
+    assert max_active == 3
+
+
+def test_admin_config_exposes_structured_provider_configuration_targets(
+    monkeypatch, tmp_path
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+
+    response = _local_client(create_test_app()).get("/admin/api/config")
+
+    assert response.status_code == 200
+    providers = {
+        provider["provider_id"]: provider
+        for provider in response.json()["provider_status"]
+    }
+    assert providers["nvidia_nim"]["configuration_keys"] == ["NVIDIA_NIM_API_KEY"]
+    assert providers["nvidia_nim"]["missing_configuration_keys"] == [
+        "NVIDIA_NIM_API_KEY"
+    ]
+    assert "configuration" not in providers["nvidia_nim"]
+    assert providers["lmstudio"]["status"] == "configured"
+    assert providers["lmstudio"]["configuration_keys"] == ["LM_STUDIO_BASE_URL"]
+
+
+def test_admin_local_provider_failure_does_not_return_exception_text(
+    monkeypatch, tmp_path
+):
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    app = create_test_app()
+
+    class FailingAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url: str):
+            raise RuntimeError(
+                "Provider rejected credential CREDENTIAL[unrecognized-format-987654321]"
+            )
+
+    with patch(
+        "free_claude_code.api.admin_routes.httpx.AsyncClient",
+        return_value=FailingAsyncClient(),
+    ):
+        response = _local_client(app).get("/admin/api/providers/local-status")
+
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert {provider["status"] for provider in providers} == {"offline"}
+    for provider in providers:
+        assert provider["message"] == (
+            "Could not connect. Verify the URL and that the local provider is running."
+        )
+        assert "CREDENTIAL[unrecognized-format-987654321]" not in provider["message"]
+        assert "RuntimeError" not in provider["message"]
+        assert "error_type" not in provider
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        {"provider_id": "nvidia_nim", "ok": True, "models": ["model-a"]},
+        {
+            "provider_id": "nvidia_nim",
+            "ok": False,
+            "message": "NVIDIA_NIM_API_KEY is not set.",
+        },
+    ),
+)
+def test_admin_provider_test_route_preserves_runtime_result(
+    monkeypatch, tmp_path, result
+):
+    _set_home(monkeypatch, tmp_path)
+    app = create_test_app()
+    runtime = runtime_for_app(app)
+
+    with patch.object(runtime, "test_provider", new=AsyncMock(return_value=result)):
+        response = _local_client(app).post(
+            "/admin/api/providers/nvidia_nim/test",
+            json={},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == result
 
 
 def test_admin_launch_url_uses_loopback_for_wildcard_host():

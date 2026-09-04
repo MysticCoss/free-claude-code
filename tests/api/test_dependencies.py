@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request
 from free_claude_code.api.dependencies import (
     get_services,
     get_settings,
+    require_anthropic_proxy_auth,
     require_proxy_auth,
     resolve_provider,
 )
@@ -16,7 +17,12 @@ from free_claude_code.config.settings import Settings
 from tests.api.support import create_test_app
 
 
-def _request(*, headers: dict[str, str], token: str) -> tuple[Request, Settings]:
+def _request(
+    *,
+    headers: dict[str, str],
+    token: str = "freecc",
+    enabled: bool = True,
+) -> tuple[Request, Settings]:
     request = Request(
         {
             "type": "http",
@@ -27,7 +33,10 @@ def _request(*, headers: dict[str, str], token: str) -> tuple[Request, Settings]
             ],
         }
     )
-    settings = Settings.model_construct(anthropic_auth_token=token)
+    settings = Settings.model_construct(
+        proxy_auth_enabled=enabled,
+        proxy_auth_token=token,
+    )
     return request, settings
 
 
@@ -55,7 +64,8 @@ def test_get_settings_reads_current_request_runtime_settings() -> None:
     app = create_test_app(
         Settings.model_construct(
             model="deepseek/test-model",
-            anthropic_auth_token="",
+            proxy_auth_enabled=False,
+            proxy_auth_token="freecc",
         )
     )
 
@@ -106,8 +116,8 @@ def test_resolve_provider_unrelated_error_is_not_reclassified() -> None:
         resolve_provider("nvidia_nim", lease=lease)
 
 
-def test_require_proxy_auth_allows_when_no_token_configured():
-    request, settings = _request(headers={}, token="")
+def test_require_proxy_auth_allows_when_disabled_with_retained_token():
+    request, settings = _request(headers={}, enabled=False)
 
     require_proxy_auth(request, settings)
 
@@ -200,3 +210,108 @@ def test_require_proxy_auth_rejects_invalid_bearer_when_legacy_header_matches():
 
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid proxy authentication token"
+
+
+def test_require_anthropic_proxy_auth_allows_when_disabled() -> None:
+    request, settings = _request(
+        headers={
+            "authorization": "Basic wrong",
+            "x-api-key": "wrong",
+            "anthropic-auth-token": "wrong",
+        },
+        token="retained-token",
+        enabled=False,
+    )
+
+    require_anthropic_proxy_auth(request, settings)
+
+
+def test_require_anthropic_proxy_auth_accepts_exact_bearer_token() -> None:
+    request, settings = _request(
+        headers={"authorization": "  bEaReR secret:with:colons  "},
+        token="secret:with:colons",
+    )
+
+    require_anthropic_proxy_auth(request, settings)
+
+
+def test_require_anthropic_proxy_auth_accepts_exact_x_api_key() -> None:
+    request, settings = _request(
+        headers={"x-api-key": "  secret:with:colons  "},
+        token="secret:with:colons",
+    )
+
+    require_anthropic_proxy_auth(request, settings)
+
+
+def test_require_anthropic_proxy_auth_rejects_missing_credentials() -> None:
+    request, settings = _request(headers={}, token="secret")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_anthropic_proxy_auth(request, settings)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Missing proxy authentication token"
+
+
+@pytest.mark.parametrize("x_api_key", ["", "   ", "wrong", "secret:model-suffix"])
+def test_require_anthropic_proxy_auth_rejects_invalid_x_api_key(
+    x_api_key: str,
+) -> None:
+    request, settings = _request(
+        headers={"x-api-key": x_api_key},
+        token="secret",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_anthropic_proxy_auth(request, settings)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid proxy authentication token"
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    ["", "   ", "secret", "Basic secret", "Bearer", "Bearer wrong"],
+)
+def test_require_anthropic_proxy_auth_rejects_authorization_before_x_api_key(
+    authorization: str,
+) -> None:
+    request, settings = _request(
+        headers={
+            "authorization": authorization,
+            "x-api-key": "secret",
+        },
+        token="secret",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_anthropic_proxy_auth(request, settings)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid proxy authentication token"
+
+
+def test_require_anthropic_proxy_auth_prefers_valid_authorization() -> None:
+    request, settings = _request(
+        headers={
+            "authorization": "Bearer secret",
+            "x-api-key": "wrong",
+        },
+        token="secret",
+    )
+
+    require_anthropic_proxy_auth(request, settings)
+
+
+def test_require_anthropic_proxy_auth_rejects_anthropic_auth_token_only() -> None:
+    request, settings = _request(
+        headers={"anthropic-auth-token": "secret"},
+        token="secret",
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_anthropic_proxy_auth(request, settings)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Missing proxy authentication token"

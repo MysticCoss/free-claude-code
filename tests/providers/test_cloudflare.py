@@ -17,7 +17,11 @@ from free_claude_code.providers.cloudflare import (
     CloudflareProvider,
     cloudflare_ai_base_url,
 )
-from tests.providers.support import immediate_admission, reasoning_for
+from tests.providers.support import (
+    immediate_admission,
+    make_provider_config,
+    reasoning_for,
+)
 
 _ACCOUNT_ID = "account-123"
 _BASE_URL = f"{CLOUDFLARE_AI_REST_ROOT}/accounts/{_ACCOUNT_ID}/ai/v1"
@@ -26,7 +30,7 @@ _MODEL_SEARCH_URL = f"{CLOUDFLARE_AI_REST_ROOT}/accounts/{_ACCOUNT_ID}/ai/models
 
 @pytest.fixture
 def cloudflare_config() -> ProviderConfig:
-    return ProviderConfig(
+    return make_provider_config(
         api_key="test-cloudflare-token",
         base_url=CLOUDFLARE_AI_REST_ROOT,
         rate_limit=10,
@@ -221,7 +225,7 @@ async def test_stream_uses_openai_chat_completions(
         return_value=_stream(_chunk(delta)),
     ) as mock_create:
         events = [
-            event async for event in cloudflare_provider.stream_response(_request())
+            event async for event in cloudflare_provider.stream_messages(_request())
         ]
 
     parsed = parse_sse_text("".join(events))
@@ -252,7 +256,7 @@ async def test_stream_maps_cloudflare_reasoning_delta_to_thinking(
         return_value=_stream(_chunk(delta)),
     ):
         events = [
-            event async for event in cloudflare_provider.stream_response(_request())
+            event async for event in cloudflare_provider.stream_messages(_request())
         ]
 
     parsed = parse_sse_text("".join(events))
@@ -302,7 +306,7 @@ async def test_stream_maps_openai_tool_calls_to_tool_use(
         new_callable=AsyncMock,
         return_value=_stream(_chunk(delta, finish_reason="tool_calls")),
     ):
-        events = [event async for event in cloudflare_provider.stream_response(request)]
+        events = [event async for event in cloudflare_provider.stream_messages(request)]
 
     parsed = parse_sse_text("".join(events))
     assert any(

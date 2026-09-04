@@ -14,9 +14,10 @@ from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
 from free_claude_code.core.gateway_model_ids import decode_gateway_model_id
+from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 
-from .reasoning import resolve_reasoning_policy
+from .reasoning import resolve_reasoning_policy, resolve_responses_reasoning_policy
 
 _ROUTE_SETTINGS = (
     ("fable", "model_fable", "reasoning_fable"),
@@ -62,26 +63,42 @@ def _is_compaction_request(request: MessagesRequest) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedModel:
-    original_model: str
+class ProviderModelTarget:
+    """One canonical provider/model execution target."""
+
     provider_id: str
     provider_model: str
     provider_model_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedModelRoute:
+    """One public model resolved to a primary and ordered fallbacks."""
+
+    original_model: str
+    primary: ProviderModelTarget
+    fallbacks: tuple[ProviderModelTarget, ...]
     reasoning_preference: ReasoningPreference
 
 
 @dataclass(frozen=True, slots=True)
 class RoutedMessagesRequest:
     request: MessagesRequest
-    resolved: ResolvedModel
+    resolved: ResolvedModelRoute
     reasoning: ReasoningPolicy
-    is_compaction_override: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedResponsesRequest:
+    request: OpenAIResponsesRequest
+    resolved: ResolvedModelRoute
+    reasoning: ReasoningPolicy
 
 
 @dataclass(frozen=True, slots=True)
 class RoutedTokenCountRequest:
     request: TokenCountRequest
-    resolved: ResolvedModel
+    resolved: ResolvedModelRoute
 
 
 class ModelRouter:
@@ -90,7 +107,7 @@ class ModelRouter:
     def __init__(self, settings: Settings):
         self._settings = settings
 
-    def resolve(self, claude_model_name: str) -> ResolvedModel:
+    def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
         (
             direct_provider_id,
             direct_provider_model,
@@ -110,45 +127,71 @@ class ModelRouter:
                 stripped_provider_model,
                 reasoning_preference.value,
             )
-            return ResolvedModel(
+            primary = self._target(direct_provider_id, stripped_provider_model)
+            return ResolvedModelRoute(
                 original_model=claude_model_name,
-                provider_id=direct_provider_id,
-                provider_model=stripped_provider_model,
-                provider_model_ref=claude_model_name,
+                primary=primary,
+                fallbacks=self._fallback_targets(primary),
                 reasoning_preference=reasoning_preference,
             )
 
         provider_model_ref = self._resolve_model_ref(claude_model_name)
         reasoning_preference = self._resolve_reasoning_preference(claude_model_name)
-        provider_id = parse_provider_type(provider_model_ref)
-        self._validate_provider_id(provider_id)
-        provider_model = _strip_1m_suffix(parse_model_name(provider_model_ref))
-        if provider_model != claude_model_name:
+        primary = self._target(
+            parse_provider_type(provider_model_ref),
+            _strip_1m_suffix(parse_model_name(provider_model_ref)),
+        )
+        if primary.provider_model != claude_model_name:
             logger.debug(
-                "MODEL MAPPING: '{}' -> '{}'", claude_model_name, provider_model
+                "MODEL MAPPING: '{}' -> '{}'",
+                claude_model_name,
+                primary.provider_model,
             )
-        return ResolvedModel(
+        return ResolvedModelRoute(
             original_model=claude_model_name,
-            provider_id=provider_id,
-            provider_model=provider_model,
-            provider_model_ref=provider_model_ref,
+            primary=primary,
+            fallbacks=self._fallback_targets(primary),
             reasoning_preference=reasoning_preference,
         )
 
-    def _resolve_compact_override(self) -> ResolvedModel | None:
-        """Resolve ``settings.model_compact`` into a ResolvedModel, validating the provider."""
+    def _resolve_compact_override(self) -> ResolvedModelRoute | None:
+        """Resolve ``settings.model_compact`` into a route, validating the provider."""
         ref = self._settings.model_compact
         if ref is None:
             return None
-        provider_id = parse_provider_type(ref)
-        self._validate_provider_id(provider_id)
-        return ResolvedModel(
+        target = self._target(
+            parse_provider_type(ref),
+            _strip_1m_suffix(parse_model_name(ref)),
+        )
+        return ResolvedModelRoute(
             original_model="<compact>",
-            provider_id=provider_id,
-            provider_model=_strip_1m_suffix(parse_model_name(ref)),
-            provider_model_ref=ref,
+            primary=target,
+            fallbacks=(),
             reasoning_preference=self._settings.reasoning_policy,
         )
+
+    def _target_from_ref(self, provider_model_ref: str) -> ProviderModelTarget:
+        return self._target(
+            parse_provider_type(provider_model_ref),
+            parse_model_name(provider_model_ref),
+        )
+
+    def _target(self, provider_id: str, provider_model: str) -> ProviderModelTarget:
+        self._validate_provider_id(provider_id)
+        return ProviderModelTarget(
+            provider_id=provider_id,
+            provider_model=provider_model,
+            provider_model_ref=f"{provider_id}/{provider_model}",
+        )
+
+    def _fallback_targets(
+        self, primary: ProviderModelTarget
+    ) -> tuple[ProviderModelTarget, ...]:
+        configured = tuple(
+            self._target_from_ref(model_ref)
+            for model_ref in self._settings.model_fallbacks or ()
+        )
+        return tuple(target for target in configured if target != primary)
 
     @staticmethod
     def _validate_provider_id(provider_id: str) -> None:
@@ -215,11 +258,11 @@ class ModelRouter:
             resolved = self._resolve_compact_override()
             if resolved is not None:
                 routed = request.model_copy(deep=True)
-                routed.model = resolved.provider_model
+                routed.model = resolved.primary.provider_model
                 logger.debug(
                     "MODEL COMPACT: routing compaction request -> provider='{}' model='{}'",
-                    resolved.provider_id,
-                    resolved.provider_model,
+                    resolved.primary.provider_id,
+                    resolved.primary.provider_model,
                 )
                 return RoutedMessagesRequest(
                     request=routed,
@@ -228,11 +271,10 @@ class ModelRouter:
                         routed,
                         resolved.reasoning_preference,
                     ),
-                    is_compaction_override=True,
                 )
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
-        routed.model = resolved.provider_model
+        routed.model = resolved.primary.provider_model
         return RoutedMessagesRequest(
             request=routed,
             resolved=resolved,
@@ -242,12 +284,49 @@ class ModelRouter:
             ),
         )
 
+    def resolve_messages_request_with_policy(
+        self,
+        request: MessagesRequest,
+        *,
+        reasoning: ReasoningPolicy,
+    ) -> RoutedMessagesRequest:
+        """Route an application-owned Messages request with resolved intent."""
+
+        resolved = self.resolve(request.model)
+        routed = request.model_copy(
+            update={"model": resolved.primary.provider_model},
+            deep=True,
+        )
+        return RoutedMessagesRequest(
+            request=routed,
+            resolved=resolved,
+            reasoning=reasoning,
+        )
+
     def resolve_token_count_request(
         self, request: TokenCountRequest
     ) -> RoutedTokenCountRequest:
         """Return an internal token-count request context."""
         resolved = self.resolve(request.model)
         routed = request.model_copy(
-            update={"model": resolved.provider_model}, deep=True
+            update={"model": resolved.primary.provider_model}, deep=True
         )
         return RoutedTokenCountRequest(request=routed, resolved=resolved)
+
+    def resolve_responses_request(
+        self,
+        request: OpenAIResponsesRequest,
+    ) -> RoutedResponsesRequest:
+        """Route a Responses request without converting its protocol shape."""
+
+        resolved = self.resolve(request.model)
+        routed = request.model_copy(deep=True)
+        routed.model = resolved.primary.provider_model
+        return RoutedResponsesRequest(
+            request=routed,
+            resolved=resolved,
+            reasoning=resolve_responses_reasoning_policy(
+                routed,
+                resolved.reasoning_preference,
+            ),
+        )

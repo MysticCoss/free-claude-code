@@ -5,13 +5,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from free_claude_code.config.loader import clear_settings_cache, get_settings
 from free_claude_code.config.model_refs import parse_model_name, parse_provider_type
 from free_claude_code.config.provider_catalog import (
     PROVIDER_CATALOG,
     SUPPORTED_PROVIDER_IDS,
     ProviderAuthKind,
 )
-from free_claude_code.config.settings import Settings, get_settings
+from free_claude_code.config.settings import Settings
 from free_claude_code.providers.runtime.config import has_provider_configuration
 
 DEFAULT_TARGETS = frozenset(
@@ -32,7 +33,9 @@ DEFAULT_TARGETS = frozenset(
     }
 )
 SIDE_EFFECT_TARGETS = frozenset({"discord", "telegram", "voice"})
-OPT_IN_TARGETS = frozenset({"nvidia_nim_cli", "openrouter_free_cli"})
+OPT_IN_TARGETS = frozenset(
+    {"nvidia_nim_cli", "nvidia_nim_vision", "openrouter_free_cli"}
+)
 ALL_TARGETS = DEFAULT_TARGETS | SIDE_EFFECT_TARGETS | OPT_IN_TARGETS
 TARGET_ALIASES = {
     "contract": "api",
@@ -48,7 +51,7 @@ SECRET_KEY_PARTS = ("KEY", "TOKEN", "SECRET", "WEBHOOK", "AUTH")
 PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
     "nvidia_nim": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
     "azure_openai": "azure_openai/gpt-5.1",
-    "open_router": "open_router/moonshotai/kimi-k2.6:free",
+    "open_router": "open_router/nvidia/nemotron-3-super-120b-a12b:free",
     "mistral": "mistral/devstral-small-latest",
     "mistral_codestral": "mistral_codestral/codestral-latest",
     "deepseek": "deepseek/deepseek-v4-pro",
@@ -67,11 +70,14 @@ PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
     "cohere": "cohere/command-a-plus-05-2026",
     "github_models": "github_models/openai/gpt-4.1",
     "zai": "zai/glm-5.2",
+    "zai_api": "zai_api/glm-4.7-flash",
     "gemini": "gemini/models/gemini-3.1-flash-lite",
     "vertex": "vertex/google/gemini-3.5-flash",
-    "groq": "groq/llama-3.3-70b-versatile",
+    "groq": "groq/openai/gpt-oss-20b",
+    "cline_pass": "cline_pass/cline-pass/deepseek-v4-flash",
     "xai": "xai/grok-4.5",
     "qwencloud": "qwencloud/qwen3.7-plus",
+    "qwencloud_coding": "qwencloud_coding/qwen3.7-plus",
     "together": "together/zai-org/GLM-5.2",
     "deepinfra": "deepinfra/deepseek-ai/DeepSeek-V4-Flash",
     "siliconflow": "siliconflow/Qwen/Qwen3-32B",
@@ -85,25 +91,25 @@ PROVIDER_SMOKE_DEFAULT_MODELS: dict[str, str] = {
     "cloudflare": "cloudflare/@cf/moonshotai/kimi-k2.6",
     "tokenrouter": "tokenrouter/moonshotai/kimi-k3-free",
     "nararoute": "nararoute/kimi-k3-free",
+    "poolside": "poolside/poolside/laguna-s-2.1",
+    "llm7": "llm7/default",
     "agnes": "agnes/agnes-2.0-flash",
     "zenmux": "zenmux/deepseek/deepseek-v4-flash-free",
+    "wandb": "wandb/openai/gpt-oss-20b",
 }
 MISTRAL_REASONING_SMOKE_DEFAULT_MODEL = "mistral/mistral-medium-3-5"
 
 NVIDIA_NIM_CLI_DEFAULT_MODELS: tuple[str, ...] = (
-    "z-ai/glm-5.2",
-    "moonshotai/kimi-k2.6",
-    "minimaxai/minimax-m2.7",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "moonshotai/kimi-k3",
     "minimaxai/minimax-m3",
     "nvidia/nemotron-3-super-120b-a12b",
-    "deepseek-ai/deepseek-v4-pro",
-    "deepseek-ai/deepseek-v4-flash",
 )
 
 OPENROUTER_FREE_CLI_DEFAULT_MODELS: tuple[str, ...] = (
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
-    "poolside/laguna-m.1:free",
+    "poolside/laguna-s-2.1:free",
+    "poolside/laguna-xs-2.1:free",
 )
 
 
@@ -124,6 +130,10 @@ TARGET_REQUIRED_ENV: dict[str, tuple[str, ...]] = {
     "nvidia_nim_cli": (
         "NVIDIA_NIM_API_KEY",
         "FCC_SMOKE_CLAUDE_BIN or claude on PATH",
+    ),
+    "nvidia_nim_vision": (
+        "NVIDIA_NIM_API_KEY",
+        "FCC_SMOKE_MODEL_NVIDIA_NIM_VISION",
     ),
     "openrouter_free_cli": (
         "OPENROUTER_API_KEY",
@@ -169,7 +179,7 @@ class SmokeConfig:
     @classmethod
     def load(cls) -> SmokeConfig:
         root = Path(__file__).resolve().parents[2]
-        get_settings.cache_clear()
+        clear_settings_cache()
         settings = get_settings()
         return cls(
             root=root,
@@ -235,6 +245,18 @@ class SmokeConfig:
             ProviderModel(provider="nvidia_nim", full_model=full_model, source=source)
             for full_model, source in nvidia_nim_cli_model_refs().items()
         ]
+
+    def nvidia_nim_vision_model(self) -> ProviderModel | None:
+        """Return only an explicitly selected NVIDIA NIM vision model."""
+        override_env = "FCC_SMOKE_MODEL_NVIDIA_NIM_VISION"
+        override = os.getenv(override_env)
+        if override is None:
+            return None
+        return ProviderModel(
+            provider="nvidia_nim",
+            full_model=_normalize_provider_model("nvidia_nim", override),
+            source=override_env,
+        )
 
     def openrouter_free_cli_models(self) -> list[ProviderModel]:
         """Return OpenRouter free models for Claude Code CLI characterization."""
@@ -388,7 +410,7 @@ def openrouter_free_cli_model_refs(
 
 def auth_headers(token: str | None = None) -> dict[str, str]:
     settings = get_settings()
-    resolved = token if token is not None else settings.anthropic_auth_token
+    resolved = token if token is not None else settings.proxy_auth_token
     headers = {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",

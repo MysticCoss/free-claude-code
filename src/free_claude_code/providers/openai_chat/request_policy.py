@@ -10,12 +10,15 @@ from loguru import logger
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.core.anthropic import (
     MidConversationSystemMode,
-    OpenAIToolNameCodec,
     ReasoningReplayMode,
     build_base_request_body,
 )
 from free_claude_code.core.anthropic.conversion import OpenAIConversionError
 from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.openai_tool_names import (
+    OpenAIToolNameCodec,
+    encode_openai_chat_tool_names,
+)
 from free_claude_code.core.reasoning import ReasoningPolicy
 
 MaxTokensField = Literal["max_tokens", "max_completion_tokens"]
@@ -57,10 +60,13 @@ def _mid_conversation_system_mode(
 ) -> MidConversationSystemMode:
     """Choose how mid-conversation system messages reach the upstream.
 
-    DeepSeek models understand a dedicated ``latest_reminder`` role, so they
-    receive the system text under that role. Other OpenAI Chat upstreams
-    cannot represent the system role mid-conversation, so those messages are
-    dropped rather than demoted into user content.
+    DeepSeek models (directly or proxied on another gateway) understand a
+    dedicated ``latest_reminder`` role, so they receive the system text under
+    that role. Other OpenAI Chat upstreams cannot represent the system role
+    mid-conversation, so those messages are dropped rather than demoted into
+    user content. Selection is model-name driven (with a shortcut for the
+    DeepSeek provider itself) so gateway-proxied DeepSeek models keep the
+    native role while non-DeepSeek gateway traffic is unaffected.
     """
     if policy.provider_name == "DEEPSEEK" or _is_deepseek_model(request_data.model):
         return MidConversationSystemMode.LATEST_REMINDER
@@ -104,12 +110,12 @@ def build_openai_chat_request_body(
                     raise InvalidRequestError(str(exc)) from exc
             body["extra_body"] = extra_body
 
-    _apply_common_openai_chat_policy(body, policy)
+    apply_openai_chat_body_policy(body, policy)
 
     for postprocess in postprocessors:
         postprocess(body, request_data, reasoning)
 
-    _encode_openai_tool_names(body, OpenAIToolNameCodec.from_request(request_data))
+    encode_openai_chat_tool_names(body, OpenAIToolNameCodec.from_request(request_data))
 
     logger.debug(
         "{}_REQUEST: conversion done model={} msgs={} tools={}",
@@ -121,67 +127,24 @@ def build_openai_chat_request_body(
     return body
 
 
-def _encode_openai_tool_names(body: dict[str, Any], codec: OpenAIToolNameCodec) -> None:
-    """Encode only canonical OpenAI Chat tool-name locations."""
-    if not codec.has_aliases:
-        return
-
-    tools = body.get("tools")
-    if isinstance(tools, list):
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            function = tool.get("function")
-            if not isinstance(function, dict):
-                continue
-            name = function.get("name")
-            if isinstance(name, str):
-                function["name"] = codec.encode(name)
-
-    messages = body.get("messages")
-    if isinstance(messages, list):
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            tool_calls = message.get("tool_calls")
-            if not isinstance(tool_calls, list):
-                continue
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-                function = tool_call.get("function")
-                if not isinstance(function, dict):
-                    continue
-                name = function.get("name")
-                if isinstance(name, str):
-                    function["name"] = codec.encode(name)
-
-    tool_choice = body.get("tool_choice")
-    if not isinstance(tool_choice, dict):
-        return
-    function = tool_choice.get("function")
-    if not isinstance(function, dict):
-        return
-    name = function.get("name")
-    if not isinstance(name, str):
-        return
-    encoded = codec.encode(name)
-    if encoded == name:
-        return
-    body["tool_choice"] = {
-        **tool_choice,
-        "function": {**function, "name": encoded},
-    }
-
-
-def _apply_common_openai_chat_policy(
+def apply_openai_chat_body_policy(
     body: dict[str, Any], policy: OpenAIChatRequestPolicy
 ) -> None:
+    """Apply source-independent Chat Completions body policy."""
     if policy.strip_message_names:
         _strip_message_names(body.get("messages"))
 
     for key in policy.unsupported_body_keys:
         body.pop(key, None)
+
+    # unsupported_body_keys must also be stripped from a caller-supplied
+    # extra_body: it becomes the SDK's own extra_body= kwarg and gets merged
+    # into the wire-level JSON verbatim, so a key unsupported at the top
+    # level is equally unsupported when it arrives this way (#1548).
+    extra_body = body.get("extra_body")
+    if isinstance(extra_body, dict):
+        for key in policy.unsupported_body_keys:
+            extra_body.pop(key, None)
 
     if policy.max_tokens_field == "max_completion_tokens":
         _normalize_max_completion_tokens(body)

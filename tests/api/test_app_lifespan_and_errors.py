@@ -19,7 +19,6 @@ from free_claude_code.providers.nvidia_nim.voice import NvidiaNimTranscriber
 from free_claude_code.runtime.application import (
     ApplicationRuntime,
     startup_failure_message,
-    warn_if_process_auth_token,
 )
 from free_claude_code.runtime.asgi import RuntimeASGIApp
 from free_claude_code.runtime.bootstrap import _create_transcriber, build_asgi_app
@@ -36,29 +35,6 @@ def _redirect_fcc_home(monkeypatch, tmp_path):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-
-
-def test_warn_if_process_auth_token_logs_warning(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "process-token")
-    monkeypatch.setitem(Settings.model_config, "env_file", ())
-
-    with patch("free_claude_code.runtime.application.logger.warning") as warning:
-        warn_if_process_auth_token(Settings.model_construct())
-
-    warning.assert_called_once()
-    assert "ANTHROPIC_AUTH_TOKEN" in warning.call_args.args[0]
-
-
-def test_warn_if_process_auth_token_skips_explicit_dotenv_config(monkeypatch, tmp_path):
-    env_file = tmp_path / ".env"
-    env_file.write_text("ANTHROPIC_AUTH_TOKEN=\n", encoding="utf-8")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "process-token")
-    monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
-
-    with patch("free_claude_code.runtime.application.logger.warning") as warning:
-        warn_if_process_auth_token(Settings.model_construct())
-
-    warning.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -336,6 +312,17 @@ def test_bootstrap_configures_default_log_and_publishes_only_services(tmp_path):
     assert set(api_app.state._state) == {"services"}
 
 
+def test_bootstrap_app_transparently_exposes_fastapi_interface() -> None:
+    with patch("free_claude_code.runtime.bootstrap.configure_logging"):
+        asgi_app = build_asgi_app(_settings())
+
+    api_app = cast(FastAPI, asgi_app.app)
+    assert asgi_app.router is api_app.router
+    assert asgi_app.routes is api_app.routes
+    assert asgi_app.state is api_app.state
+    assert asgi_app.openapi == api_app.openapi
+
+
 def test_bootstrap_wires_the_codex_catalog_publisher() -> None:
     publisher = MagicMock()
 
@@ -383,6 +370,7 @@ def test_bootstrap_constructs_fresh_runtime_owned_transcribers() -> None:
 async def test_bootstrap_constructs_isolated_runtime_resource_graphs() -> None:
     settings = _settings(
         model="nvidia_nim/test-model",
+        nvidia_nim_api_key="test-key",
         voice_note_enabled=True,
         whisper_device="cpu",
     )

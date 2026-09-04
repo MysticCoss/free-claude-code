@@ -39,7 +39,7 @@ _PRODUCT_REQUESTS = (
 def _settings(**updates: object) -> Settings:
     return Settings().model_copy(
         update={
-            "anthropic_auth_token": "",
+            "proxy_auth_enabled": False,
             "log_api_error_tracebacks": False,
             **updates,
         }
@@ -101,7 +101,7 @@ def test_missing_provider_credential_is_protocol_specific_503_without_terminal_h
     payload: dict[str, object],
 ) -> None:
     message = (
-        "OPENROUTER_API_KEY is not set. Add it to your .env file. "
+        "OPENROUTER_API_KEY is not set. Add it in the Admin UI. "
         "Get a key at https://openrouter.ai/keys"
     )
     app = create_test_app(
@@ -196,7 +196,12 @@ def test_preflight_rejection_is_protocol_specific_400_without_terminal_header(
 ) -> None:
     message = "bad tool shape"
     provider = MagicMock()
-    provider.preflight_stream.side_effect = InvalidRequestError(message)
+    preflight = (
+        provider.preflight_responses
+        if wire_api == "responses"
+        else provider.preflight_messages
+    )
+    preflight.side_effect = InvalidRequestError(message)
     app = create_test_app(_settings())
 
     with (
@@ -208,7 +213,12 @@ def test_preflight_rejection_is_protocol_specific_400_without_terminal_header(
     ):
         response = client.post(path, json=payload)
 
-    provider.stream_response.assert_not_called()
+    stream = (
+        provider.stream_responses
+        if wire_api == "responses"
+        else provider.stream_messages
+    )
+    stream.assert_not_called()
     _assert_ordinary_protocol_error(
         response,
         wire_api=wire_api,
@@ -241,7 +251,7 @@ def test_proxy_auth_preserves_ingress_detail_contract(
     headers: dict[str, str],
     detail: str,
 ) -> None:
-    app = create_test_app(_settings(anthropic_auth_token="secret"))
+    app = create_test_app(_settings(proxy_auth_enabled=True, proxy_auth_token="secret"))
 
     with TestClient(app) as client:
         response = client.post(path, json=payload, headers=headers)

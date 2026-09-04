@@ -12,12 +12,12 @@ from free_claude_code.core.anthropic.stream_contracts import (
     parse_sse_text,
     thinking_content,
 )
-from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     REASONING_OFF,
     immediate_admission,
+    make_provider_config,
     profiled_provider,
     reasoning_for,
 )
@@ -29,7 +29,7 @@ OLLAMA_CLOUD_MODEL = "qwen3-coder:480b"
 def _provider(base_url: str = OLLAMA_DEFAULT_BASE) -> OpenAIChatProvider:
     return profiled_provider(
         "ollama",
-        ProviderConfig(api_key="ollama", base_url=base_url),
+        make_provider_config(api_key="ollama", base_url=base_url),
         admission=immediate_admission(),
     )
 
@@ -37,7 +37,7 @@ def _provider(base_url: str = OLLAMA_DEFAULT_BASE) -> OpenAIChatProvider:
 def _cloud_provider() -> OpenAIChatProvider:
     return profiled_provider(
         "ollama_cloud",
-        ProviderConfig(
+        make_provider_config(
             api_key="ollama-cloud-key",
             base_url=OLLAMA_CLOUD_DEFAULT_BASE,
         ),
@@ -168,7 +168,7 @@ def test_replay_is_independent_of_disabled_current_turn_reasoning(provider) -> N
 
 
 @pytest.mark.asyncio
-async def test_stream_response_uses_shared_openai_chat_provider() -> None:
+async def test_stream_messages_uses_shared_openai_chat_provider() -> None:
     provider = _provider()
     chunk = MagicMock()
     chunk.choices = [
@@ -195,7 +195,7 @@ async def test_stream_response_uses_shared_openai_chat_provider() -> None:
         output = "".join(
             [
                 event
-                async for event in provider.stream_response(
+                async for event in provider.stream_messages(
                     make_messages_request(OLLAMA_MODEL)
                 )
             ]
@@ -235,7 +235,7 @@ async def test_cloud_stream_maps_ollama_reasoning_delta_to_anthropic_thinking() 
         output = "".join(
             [
                 event
-                async for event in client.stream_response(
+                async for event in client.stream_messages(
                     make_messages_request(OLLAMA_CLOUD_MODEL)
                 )
             ]

@@ -7,15 +7,16 @@ import pytest
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.config.provider_catalog import LMSTUDIO_DEFAULT_BASE
+from free_claude_code.core.anthropic import get_token_count
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
-from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.lmstudio import LMStudioProvider
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     REASONING_OFF,
     REASONING_ON,
     immediate_admission,
+    make_provider_config,
 )
 
 
@@ -25,7 +26,7 @@ def make_request(**overrides):
 
 @pytest.fixture
 def lmstudio_config():
-    return ProviderConfig(
+    return make_provider_config(
         api_key="lm-studio",
         base_url=LMSTUDIO_DEFAULT_BASE,
         rate_limit=10,
@@ -67,7 +68,8 @@ def test_adaptive_client_reasoning_uses_documented_named_effort(lmstudio_provide
 
     body = lmstudio_provider._build_request_body(req, reasoning=REASONING_ON)
 
-    assert body["reasoning_effort"] == "high"
+    assert body["extra_body"]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in body
 
 
 def test_exact_client_budget_is_not_derived_from_output_tokens(lmstudio_provider):
@@ -81,7 +83,8 @@ def test_exact_client_budget_is_not_derived_from_output_tokens(lmstudio_provider
         ),
     )
 
-    assert body["reasoning_tokens"] == 1024
+    assert body["extra_body"]["reasoning_tokens"] == 1024
+    assert "reasoning_tokens" not in body
     assert body["max_tokens"] == 8192
 
 
@@ -121,9 +124,8 @@ def test_preflight_builds_before_context_budget_and_preserves_policy(
         calls.append(("build", reasoning))
         return {}
 
-    def check_context(request_arg):
-        assert request_arg is request
-        calls.append(("context", request_arg))
+    def check_context(estimate: int):
+        calls.append(("context", estimate))
 
     with (
         patch.object(lmstudio_provider, "_build_request_body", side_effect=build),
@@ -133,9 +135,12 @@ def test_preflight_builds_before_context_budget_and_preserves_policy(
             side_effect=check_context,
         ),
     ):
-        lmstudio_provider.preflight_stream(request, reasoning=REASONING_OFF)
+        lmstudio_provider.preflight_messages(request, reasoning=REASONING_OFF)
 
-    assert calls == [("build", REASONING_OFF), ("context", request)]
+    assert calls == [
+        ("build", REASONING_OFF),
+        ("context", get_token_count(request.messages, request.system, request.tools)),
+    ]
 
 
 def test_preflight_conversion_failure_skips_context_budget(lmstudio_provider):
@@ -151,13 +156,13 @@ def test_preflight_conversion_failure_skips_context_budget(lmstudio_provider):
         patch.object(lmstudio_provider, "_preflight_context_budget") as context,
         pytest.raises(InvalidRequestError, match="invalid request conversion"),
     ):
-        lmstudio_provider.preflight_stream(request, reasoning=REASONING_ON)
+        lmstudio_provider.preflight_messages(request, reasoning=REASONING_ON)
 
     context.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_stream_response_text(lmstudio_provider):
+async def test_stream_messages_text(lmstudio_provider):
     """Text content deltas are emitted through the shared OpenAI-chat provider."""
     req = make_request()
 
@@ -180,11 +185,54 @@ async def test_stream_response_text(lmstudio_provider):
     ) as mock_create:
         mock_create.return_value = mock_stream()
 
-        events = [event async for event in lmstudio_provider.stream_response(req)]
+        events = [event async for event in lmstudio_provider.stream_messages(req)]
 
         assert any(
             '"text_delta"' in event and "Hello back!" in event for event in events
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_passes_exact_reasoning_budget_via_extra_body(
+    lmstudio_provider,
+):
+    req = make_request()
+    policy = ReasoningPolicy.on(
+        effort=ReasoningEffort.HIGH,
+        budget_tokens=1024,
+    )
+
+    mock_chunk = MagicMock()
+    mock_chunk.choices = [
+        MagicMock(
+            delta=MagicMock(content="Done", reasoning_content=None, tool_calls=None),
+            finish_reason="stop",
+        )
+    ]
+    mock_chunk.usage = MagicMock(completion_tokens=1, prompt_tokens=1)
+
+    async def mock_stream():
+        yield mock_chunk
+
+    with patch.object(
+        lmstudio_provider._client.chat.completions, "create", new_callable=AsyncMock
+    ) as mock_create:
+        mock_create.return_value = mock_stream()
+
+        events = [
+            event
+            async for event in lmstudio_provider.stream_messages(
+                req,
+                reasoning=policy,
+            )
+        ]
+
+    await_args = mock_create.await_args
+    assert await_args is not None
+    create_kwargs = await_args.kwargs
+    assert create_kwargs["extra_body"] == {"reasoning_tokens": 1024}
+    assert "reasoning_tokens" not in create_kwargs
+    assert any("message_stop" in event for event in events)
 
 
 @pytest.mark.asyncio
@@ -200,29 +248,22 @@ async def test_cleanup(lmstudio_provider):
 def test_preflight_context_budget_noop_when_context_length_unknown(lmstudio_provider):
     """No LM Studio /api/v0/models data available -> preflight is a no-op (fail open)."""
     with patch.object(lmstudio_provider, "_loaded_context_length", return_value=None):
-        lmstudio_provider._preflight_context_budget(make_request())  # must not raise
+        lmstudio_provider._preflight_context_budget(1)  # must not raise
 
 
 def test_preflight_context_budget_allows_request_under_budget(lmstudio_provider):
     with patch.object(
         lmstudio_provider, "_loaded_context_length", return_value=100_000
     ):
-        req = make_request(
-            messages=[{"role": "user", "content": "hi"}], system=None, tools=[]
-        )
-        lmstudio_provider._preflight_context_budget(req)  # must not raise
+        lmstudio_provider._preflight_context_budget(1)  # must not raise
 
 
 def test_preflight_context_budget_rejects_request_over_90_percent(lmstudio_provider):
     with (
         patch.object(lmstudio_provider, "_loaded_context_length", return_value=1000),
-        patch(
-            "free_claude_code.providers.lmstudio.client.get_token_count",
-            return_value=901,
-        ),
         pytest.raises(ExecutionFailure) as exc_info,
     ):
-        lmstudio_provider._preflight_context_budget(make_request())
+        lmstudio_provider._preflight_context_budget(901)
 
     failure = exc_info.value
     assert failure.kind is FailureKind.CONTEXT_WINDOW_EXCEEDED

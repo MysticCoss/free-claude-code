@@ -14,11 +14,11 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
-from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.support import (
     REASONING_OFF,
     immediate_admission,
+    make_provider_config,
     profiled_provider,
     reasoning_for,
 )
@@ -44,7 +44,7 @@ class AsyncStream:
 def minimax_provider():
     return profiled_provider(
         "minimax",
-        ProviderConfig(
+        make_provider_config(
             api_key="test-minimax-key",
             base_url=MINIMAX_DEFAULT_BASE,
             rate_limit=10,
@@ -156,7 +156,7 @@ async def test_stream_preserves_reasoning_content(minimax_provider):
         new_callable=AsyncMock,
         return_value=stream,
     ) as create:
-        events = [event async for event in minimax_provider.stream_response(request)]
+        events = [event async for event in minimax_provider.stream_messages(request)]
 
     parsed = parse_sse_text("".join(events))
     assert thinking_content(parsed) == "plan"

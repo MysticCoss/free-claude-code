@@ -1,17 +1,25 @@
-"""Tests for config/settings.py and config/nim.py"""
+"""Contracts for pure Settings and canonical source composition."""
 
-from typing import Any, cast
+from enum import Enum
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
+from free_claude_code.application.routing import ModelRouter
+from free_claude_code.config import loader
 from free_claude_code.config.constants import (
     ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
     HTTP_CONNECT_TIMEOUT_DEFAULT,
 )
-from free_claude_code.config.env_files import (
-    ANTHROPIC_AUTH_TOKEN_ENV,
-    process_env_key_is_effective,
+from free_claude_code.config.env_files import dotenv_values_from_file
+from free_claude_code.config.loader import (
+    ConfigSource,
+    clear_settings_cache,
+    compose_settings_snapshot,
+    get_settings,
+    repair_invalid_managed_provider_proxies,
 )
 from free_claude_code.config.model_refs import (
     configured_chat_model_refs,
@@ -19,784 +27,520 @@ from free_claude_code.config.model_refs import (
     parse_provider_type,
 )
 from free_claude_code.config.nim import NimSettings
-from free_claude_code.config.paths import messaging_state_dir_path
+from free_claude_code.config.paths import (
+    managed_env_path,
+    messaging_state_dir_path,
+    server_log_path,
+)
 from free_claude_code.config.reasoning import ReasoningPreference
+from free_claude_code.config.settings import Settings
 
 
-class TestSettings:
-    """Test Settings configuration."""
+def test_settings_defaults_are_valid_and_nonempty() -> None:
+    settings = Settings()
 
-    def test_settings_loads(self):
-        """Ensure Settings can be instantiated."""
-        from free_claude_code.config.settings import Settings
+    assert settings.provider_rate_limit == 1
+    assert settings.provider_rate_window == 2
+    assert settings.provider_max_concurrency == 2
+    assert settings.provider_progress_timeout == 600.0
+    assert settings.http_read_timeout == 120.0
+    assert settings.http_write_timeout == 10.0
+    assert settings.http_connect_timeout == HTTP_CONNECT_TIMEOUT_DEFAULT
+    assert settings.voice_note_enabled is True
+    assert settings.whisper_device == "cpu"
+    assert settings.whisper_model == "base"
+    assert settings.enable_web_server_tools is True
+    assert settings.proxy_auth_enabled is False
+    assert settings.proxy_auth_token == "freecc"
+    assert [
+        name for name, value in settings if isinstance(value, str) and not value
+    ] == []
+    assert [
+        name
+        for name, field in Settings.model_fields.items()
+        if field.get_default(call_default_factory=True) == ""
+    ] == []
 
-        settings = Settings()
-        assert settings is not None
 
-    def test_default_values(self, monkeypatch):
-        """Test default values are set and have correct types."""
-        from free_claude_code.config.settings import Settings
+def test_every_external_setting_has_one_explicit_alias() -> None:
+    aliases = [
+        field.validation_alias
+        for name, field in Settings.model_fields.items()
+        if name != "nim"
+    ]
+    assert all(isinstance(alias, str) for alias in aliases)
+    assert len(aliases) == len(set(aliases))
+    assert Settings.model_fields["nim"].validation_alias is None
 
-        monkeypatch.delenv("CLAUDE_WORKSPACE", raising=False)
-        monkeypatch.delenv("MODEL", raising=False)
-        monkeypatch.delenv("VERTEX_LOCATION", raising=False)
-        monkeypatch.delenv("HTTP_READ_TIMEOUT", raising=False)
-        monkeypatch.delenv("HTTP_CONNECT_TIMEOUT", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        settings = Settings()
-        assert settings.model == "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
-        assert isinstance(settings.provider_rate_limit, int)
-        assert isinstance(settings.provider_rate_window, int)
-        assert isinstance(settings.nim.temperature, float)
-        assert isinstance(settings.fast_prefix_detection, bool)
-        assert settings.reasoning_policy is ReasoningPreference.CLIENT
-        assert settings.http_read_timeout == 120.0
-        assert settings.http_connect_timeout == HTTP_CONNECT_TIMEOUT_DEFAULT
-        assert settings.enable_web_server_tools is False
-        assert settings.log_raw_api_payloads is False
-        assert settings.log_raw_sse_events is False
-        assert settings.debug_platform_edits is False
-        assert settings.debug_subagent_stack is False
-        assert settings.log_level == "INFO"
-        assert settings.open_admin_browser is True
-        assert settings.vertex_location == "global"
 
-    def test_open_admin_browser_loads_from_environment(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
+def test_direct_settings_construction_performs_no_environment_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL", "deepseek/process-model")
+    monkeypatch.setenv("PROVIDER_RATE_LIMIT", "99")
 
-        monkeypatch.setenv("FCC_OPEN_BROWSER", "false")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
+    settings = Settings()
 
-        assert Settings().open_admin_browser is False
+    assert settings.model.startswith("nvidia_nim/")
+    assert settings.provider_rate_limit == 1
 
-    def test_default_claude_workspace_uses_fcc_home(self, monkeypatch, tmp_path):
-        """Unset CLAUDE_WORKSPACE stores agent data under the fixed path helper."""
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_WORKSPACE", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
+@pytest.mark.parametrize(
+    ("key", "attribute", "value", "expected"),
+    [
+        ("MODEL", "model", "deepseek/deepseek-chat", "deepseek/deepseek-chat"),
+        ("PROVIDER_RATE_LIMIT", "provider_rate_limit", "20", 20),
+        (
+            "PROVIDER_PROGRESS_TIMEOUT",
+            "provider_progress_timeout",
+            "900",
+            900.0,
+        ),
+        ("HTTP_READ_TIMEOUT", "http_read_timeout", "600", 600.0),
+        ("FCC_OPEN_BROWSER", "open_admin_browser", "false", False),
+        ("REASONING_POLICY", "reasoning_policy", "off", ReasoningPreference.OFF),
+        ("GROQ_API_KEY", "groq_api_key", " secret ", "secret"),
+        ("OPENROUTER_PROXY", "open_router_proxy", " http://proxy ", "http://proxy"),
+    ],
+)
+def test_process_values_are_parsed_at_the_loader_boundary(
+    key: str,
+    attribute: str,
+    value: str,
+    expected: object,
+) -> None:
+    snapshot = compose_settings_snapshot({}, {key: value})
 
-        settings = Settings()
+    assert getattr(snapshot.settings, attribute) == expected
+    assert snapshot.sources[attribute] is ConfigSource.PROCESS
 
-        assert messaging_state_dir_path() == tmp_path / ".fcc" / "agent_workspace"
-        assert not hasattr(settings, "claude_workspace")
 
-    def test_server_log_path_uses_fcc_home(self, monkeypatch, tmp_path):
-        """The server log location is fixed under ~/.fcc."""
-        from free_claude_code.config.paths import server_log_path
+@pytest.mark.parametrize(
+    "value",
+    [
+        0.0,
+        -1.0,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        float(1 << 64),
+    ],
+)
+def test_provider_progress_timeout_must_be_representable(value: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(provider_progress_timeout=value)
 
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
-        assert server_log_path() == tmp_path / ".fcc" / "logs" / "server.log"
+@pytest.mark.parametrize(
+    "value",
+    ["0", "-1", "inf", "-inf", "nan", str(1 << 64)],
+)
+def test_loader_rejects_invalid_provider_progress_timeout(value: str) -> None:
+    with pytest.raises(ValidationError):
+        compose_settings_snapshot({}, {"PROVIDER_PROGRESS_TIMEOUT": value})
 
-    def test_removed_log_file_env_is_ignored(self, monkeypatch):
-        """Legacy LOG_FILE values do not affect Settings or block startup."""
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("LOG_FILE", "custom/server.log")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GROQ_API_KEY",
+        "OPENROUTER_PROXY",
+        "MODEL_OPUS",
+        "TELEGRAM_BOT_TOKEN",
+        "ALLOWED_DIR",
+    ],
+)
+def test_optional_blank_process_values_normalize_to_none(key: str) -> None:
+    snapshot = compose_settings_snapshot({}, {key: "  "})
+    attribute = next(
+        name
+        for name, field in Settings.model_fields.items()
+        if field.validation_alias == key
+    )
 
-        settings = Settings()
+    assert getattr(snapshot.settings, attribute) is None
 
-        assert not hasattr(settings, "log_file")
 
-    def test_stale_zai_base_url_env_is_ignored(self, monkeypatch):
-        """Cloud Z.ai endpoint is fixed in provider metadata, not settings."""
-        from free_claude_code.config.settings import Settings
+def test_blank_required_process_value_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="MODEL"):
+        compose_settings_snapshot({}, {"MODEL": " "})
 
-        monkeypatch.setenv("ZAI_BASE_URL", "https://custom.zai.invalid/v1")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
 
-        settings = Settings()
+def test_blank_process_auth_token_uses_retained_default() -> None:
+    snapshot = compose_settings_snapshot({}, {"ANTHROPIC_AUTH_TOKEN": ""})
 
-        assert not hasattr(settings, "zai_base_url")
+    assert snapshot.settings.proxy_auth_token == "freecc"
+    assert snapshot.sources["proxy_auth_token"] is ConfigSource.DEFAULT
 
-    def test_blank_claude_workspace_uses_fcc_home(self, monkeypatch, tmp_path):
-        """An explicit blank env value does not affect the fixed workspace helper."""
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
-        monkeypatch.setenv("CLAUDE_WORKSPACE", "")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
+def test_process_precedence_and_managed_token_exception() -> None:
+    snapshot = compose_settings_snapshot(
+        {
+            "MODEL": "deepseek/managed",
+            "ANTHROPIC_AUTH_TOKEN": "managed-token",
+        },
+        {
+            "MODEL": "groq/process",
+            "ANTHROPIC_AUTH_TOKEN": "stale-process-token",
+        },
+    )
 
-        settings = Settings()
+    assert snapshot.settings.model == "groq/process"
+    assert snapshot.sources["model"] is ConfigSource.PROCESS
+    assert snapshot.settings.proxy_auth_token == "managed-token"
+    assert snapshot.sources["proxy_auth_token"] is ConfigSource.MANAGED
 
-        assert messaging_state_dir_path() == tmp_path / ".fcc" / "agent_workspace"
-        assert not hasattr(settings, "claude_workspace")
 
-    def test_explicit_claude_workspace_is_ignored(self, monkeypatch, tmp_path):
-        """Custom CLAUDE_WORKSPACE values do not override the fixed workspace helper."""
-        from free_claude_code.config.settings import Settings
+def test_get_settings_is_cached_and_creates_managed_schema() -> None:
+    clear_settings_cache()
 
-        workspace = tmp_path / "custom-workspace"
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
-        monkeypatch.setenv("CLAUDE_WORKSPACE", str(workspace))
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
+    first = get_settings()
+    second = get_settings()
 
-        settings = Settings()
+    assert first is second
 
-        assert messaging_state_dir_path() == tmp_path / ".fcc" / "agent_workspace"
-        assert not hasattr(settings, "claude_workspace")
 
-    def test_explicit_claude_cli_bin_is_ignored(self, monkeypatch):
-        """Custom CLAUDE_CLI_BIN values do not become Settings fields."""
-        from free_claude_code.config.settings import Settings
+def _write_managed_config(text: str) -> Path:
+    path = managed_env_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
 
-        monkeypatch.setenv("CLAUDE_CLI_BIN", "claude-custom")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
 
-        settings = Settings()
-
-        assert not hasattr(settings, "claude_cli_bin")
-        assert not hasattr(settings, "codex_cli_bin")
-
-    def test_direct_claude_runtime_overrides_are_ignored(self, monkeypatch, tmp_path):
-        """Constructor extras cannot add fixed Claude runtime settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-
-        settings = Settings(
-            **cast(
-                Any,
-                {
-                    "claude_workspace": str(tmp_path / "custom-workspace"),
-                    "claude_cli_bin": "claude-custom",
-                },
+def test_repair_invalid_managed_provider_proxies_removes_all_eligible_values() -> None:
+    invalid_openai = "invalid://user:leaked-secret@proxy.example:8080"
+    managed = _write_managed_config(
+        "\n".join(
+            (
+                "FCC_CONFIG_SCHEMA=1",
+                "MODEL=nvidia_nim/test-model",
+                "OPENROUTER_PROXY=http://proxy.example:notaport",
+                "GROQ_PROXY=https://proxy.example:8443",
+                f"OPENAI_PROXY={invalid_openai}",
+                "PRESERVE_UNKNOWN=present",
+                "",
             )
         )
+    )
 
-        assert messaging_state_dir_path() == tmp_path / ".fcc" / "agent_workspace"
-        assert not hasattr(settings, "claude_workspace")
-        assert not hasattr(settings, "claude_cli_bin")
+    removed = repair_invalid_managed_provider_proxies({})
 
-    def test_get_settings_cached(self):
-        """Test get_settings returns cached instance."""
-        from free_claude_code.config.settings import get_settings
+    values = dotenv_values_from_file(managed)
+    assert removed == ("OPENROUTER_PROXY", "OPENAI_PROXY")
+    assert "OPENROUTER_PROXY" not in values
+    assert "OPENAI_PROXY" not in values
+    assert values["GROQ_PROXY"] == "https://proxy.example:8443"
+    assert values["MODEL"] == "nvidia_nim/test-model"
+    assert values["PRESERVE_UNKNOWN"] == "present"
+    assert list(managed.parent.glob(f".{managed.name}.*.tmp")) == []
 
-        s1 = get_settings()
-        s2 = get_settings()
-        assert s1 is s2  # Same object (cached)
 
-    def test_empty_string_to_none_for_optional_int(self):
-        """Test that empty string converts to None for optional int fields."""
-        from free_claude_code.config.settings import Settings
+def test_repair_valid_managed_provider_proxy_leaves_file_unchanged() -> None:
+    managed = _write_managed_config(
+        "# Keep this exact text on a no-op.\n"
+        "FCC_CONFIG_SCHEMA=1\n"
+        "OPENAI_PROXY=https://proxy.example:8443\n"
+    )
+    baseline = managed.read_bytes()
 
-        # Settings should handle NVIDIA_NIM_SEED="" gracefully
-        settings = Settings()
-        assert settings.nim.seed is None or isinstance(settings.nim.seed, int)
+    assert repair_invalid_managed_provider_proxies({}) == ()
+    assert managed.read_bytes() == baseline
 
-    def test_model_setting(self):
-        """Test model setting exists and is a string."""
-        from free_claude_code.config.settings import Settings
 
-        settings = Settings()
-        assert isinstance(settings.model, str)
-        assert len(settings.model) > 0
+def test_repair_without_managed_file_is_a_noop() -> None:
+    managed = managed_env_path()
 
-    def test_base_url_constant(self):
-        """Test NVIDIA_NIM_DEFAULT_BASE is a constant."""
-        from free_claude_code.config.provider_catalog import NVIDIA_NIM_DEFAULT_BASE
+    assert repair_invalid_managed_provider_proxies({}) == ()
+    assert not managed.exists()
 
-        assert NVIDIA_NIM_DEFAULT_BASE == "https://integrate.api.nvidia.com/v1"
 
-    def test_lm_studio_base_url_from_env(self, monkeypatch):
-        """LM_STUDIO_BASE_URL env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
+@pytest.mark.parametrize("process_value", ("", "invalid://process-proxy"))
+def test_repair_preserves_process_owned_managed_proxy(
+    process_value: str,
+) -> None:
+    invalid_openai = "invalid://managed-proxy"
+    managed = _write_managed_config(
+        "FCC_CONFIG_SCHEMA=1\n"
+        f"OPENAI_PROXY={invalid_openai}\n"
+        "OPENROUTER_PROXY=invalid://unshadowed\n"
+    )
+    process = {"OPENAI_PROXY": process_value, "KEEP_PROCESS": "unchanged"}
+    baseline_process = dict(process)
 
-        monkeypatch.setenv("LM_STUDIO_BASE_URL", "http://custom:5678/v1")
-        settings = Settings()
-        assert settings.lm_studio_base_url == "http://custom:5678/v1"
+    assert repair_invalid_managed_provider_proxies(process) == ("OPENROUTER_PROXY",)
 
-    def test_ollama_base_url_defaults_to_root(self, monkeypatch):
-        """OLLAMA_BASE_URL keeps the customer-facing Ollama root default."""
-        from free_claude_code.config.settings import Settings
+    values = dotenv_values_from_file(managed)
+    assert values["OPENAI_PROXY"] == invalid_openai
+    assert "OPENROUTER_PROXY" not in values
+    assert process == baseline_process
 
-        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        settings = Settings()
-        assert settings.ollama_base_url == "http://localhost:11434"
 
-    def test_ollama_base_url_accepts_v1_suffix(self, monkeypatch):
-        """The adapter accepts either the root URL or the explicit OpenAI path."""
-        from free_claude_code.config.settings import Settings
+def test_repair_propagates_atomic_write_failure_without_changing_source() -> None:
+    managed = _write_managed_config(
+        "FCC_CONFIG_SCHEMA=1\nOPENAI_PROXY=invalid://managed-proxy\n"
+    )
+    baseline = managed.read_bytes()
 
-        monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        assert Settings().ollama_base_url == "http://localhost:11434/v1"
+    with (
+        patch.object(
+            loader,
+            "atomic_write_managed_config",
+            side_effect=OSError("disk full"),
+        ),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        repair_invalid_managed_provider_proxies({})
 
-    def test_ollama_cloud_api_key_from_env(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
+    assert managed.read_bytes() == baseline
 
-        monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
 
-        assert Settings().ollama_api_key == "ollama-cloud-key"
+def test_repair_is_idempotent_and_writes_only_once() -> None:
+    managed = _write_managed_config(
+        "FCC_CONFIG_SCHEMA=1\nOPENAI_PROXY=invalid://managed-proxy\n"
+    )
 
-    def test_provider_rate_limit_from_env(self, monkeypatch):
-        """PROVIDER_RATE_LIMIT env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
+    with patch.object(
+        loader,
+        "atomic_write_managed_config",
+        wraps=loader.atomic_write_managed_config,
+    ) as writer:
+        assert repair_invalid_managed_provider_proxies({}) == ("OPENAI_PROXY",)
+        repaired = managed.read_bytes()
+        assert repair_invalid_managed_provider_proxies({}) == ()
 
-        monkeypatch.setenv("PROVIDER_RATE_LIMIT", "20")
-        settings = Settings()
-        assert settings.provider_rate_limit == 20
+    assert writer.call_count == 1
+    assert managed.read_bytes() == repaired
 
-    def test_provider_rate_window_from_env(self, monkeypatch):
-        """PROVIDER_RATE_WINDOW env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("PROVIDER_RATE_WINDOW", "30")
-        settings = Settings()
-        assert settings.provider_rate_window == 30
+def test_repair_propagates_malformed_managed_config() -> None:
+    managed = _write_managed_config('FCC_CONFIG_SCHEMA=1\nOPENAI_PROXY="unterminated\n')
+    baseline = managed.read_bytes()
 
-    def test_http_read_timeout_from_env(self, monkeypatch):
-        """HTTP_READ_TIMEOUT env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
+    with pytest.raises(ValueError, match="Could not parse configuration file"):
+        repair_invalid_managed_provider_proxies({})
 
-        monkeypatch.setenv("HTTP_READ_TIMEOUT", "600")
-        settings = Settings()
-        assert settings.http_read_timeout == 600.0
+    assert managed.read_bytes() == baseline
 
-    def test_http_write_timeout_from_env(self, monkeypatch):
-        """HTTP_WRITE_TIMEOUT env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("HTTP_WRITE_TIMEOUT", "20")
-        settings = Settings()
-        assert settings.http_write_timeout == 20.0
+def test_repair_propagates_config_lock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    managed = _write_managed_config(
+        "FCC_CONFIG_SCHEMA=1\nOPENAI_PROXY=invalid://managed-proxy\n"
+    )
+    baseline = managed.read_bytes()
 
-    def test_http_connect_timeout_from_env(self, monkeypatch):
-        """HTTP_CONNECT_TIMEOUT env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
+    class UnavailableLock:
+        def __init__(self, _path: Path) -> None:
+            pass
 
-        monkeypatch.setenv("HTTP_CONNECT_TIMEOUT", "5")
-        settings = Settings()
-        assert settings.http_connect_timeout == 5.0
+        def acquire(self, *, wait: bool, timeout: float) -> bool:
+            assert wait is True
+            assert timeout == 10.0
+            return False
 
-    def test_http_connect_timeout_default_matches_shared_constant(
-        self, monkeypatch
+    monkeypatch.setattr(loader, "InterprocessFileLock", UnavailableLock)
+
+    with pytest.raises(TimeoutError, match="Could not acquire managed-config lock"):
+        repair_invalid_managed_provider_proxies({})
+
+    assert managed.read_bytes() == baseline
+
+
+def test_optional_strings_share_one_normalization_rule() -> None:
+    settings = Settings.model_validate(
+        {
+            "GROQ_API_KEY": "  key  ",
+            "OPENROUTER_PROXY": " ",
+            "MODEL_OPUS": "",
+            "ALLOWED_DIR": None,
+        }
+    )
+
+    assert settings.groq_api_key == "key"
+    assert settings.open_router_proxy is None
+    assert settings.model_opus is None
+    assert settings.allowed_dir is None
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", (), []])
+def test_model_fallbacks_empty_values_disable_fallback(value: object) -> None:
+    settings = Settings.model_validate({"MODEL_FALLBACKS": value})
+
+    assert settings.model_fallbacks is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "open_router/vendor/model-a, groq/vendor/model-b ",
+        ("open_router/vendor/model-a", " groq/vendor/model-b "),
+        ["open_router/vendor/model-a", "groq/vendor/model-b"],
+    ],
+)
+def test_model_fallbacks_preserve_order_and_trim_members(value: object) -> None:
+    settings = Settings.model_validate({"MODEL_FALLBACKS": value})
+
+    assert settings.model_fallbacks == (
+        "open_router/vendor/model-a",
+        "groq/vendor/model-b",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "open_router/vendor/model-a,,groq/vendor/model-b",
+        "open_router/vendor/model-a,open_router/vendor/model-a",
+    ],
+)
+def test_model_fallbacks_reject_blank_and_duplicate_members(value: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"MODEL_FALLBACKS": value})
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["MODEL", "HOST", "WHISPER_MODEL", "LOG_LEVEL", "ANTHROPIC_AUTH_TOKEN"],
+)
+def test_required_strings_reject_blank(field: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({field: "   "})
+
+
+def test_model_validation_and_routing() -> None:
+    settings = Settings(
+        model="deepseek/fallback",
+        model_opus="open_router/anthropic/claude-opus",
+    )
+
+    router = ModelRouter(settings)
+    assert router.resolve("claude-opus-4").primary.provider_model_ref == (
+        "open_router/anthropic/claude-opus"
+    )
+    assert router.resolve("unknown").primary.provider_model_ref == "deepseek/fallback"
+    with pytest.raises(ValidationError, match="Invalid provider"):
+        Settings(model="unknown/model")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["MODEL", "MODEL_FABLE", "MODEL_OPUS", "MODEL_SONNET", "MODEL_HAIKU"],
+)
+def test_model_settings_reject_empty_model_suffix(field: str) -> None:
+    with pytest.raises(ValidationError, match="model suffix"):
+        Settings.model_validate({field: "open_router/"})
+
+
+def test_configured_chat_model_refs_are_unique() -> None:
+    settings = Settings(
+        model="deepseek/fallback",
+        model_fable="open_router/anthropic/claude-fable",
+        model_sonnet="deepseek/fallback",
+        model_fallbacks=(
+            "groq/vendor/model-a",
+            "open_router/anthropic/claude-fable",
+            "lmstudio/vendor/model-b",
+        ),
+    )
+
+    refs = configured_chat_model_refs(settings)
+
+    assert [ref.model_ref for ref in refs] == [
+        "deepseek/fallback",
+        "open_router/anthropic/claude-fable",
+        "groq/vendor/model-a",
+        "lmstudio/vendor/model-b",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model_ref", "provider", "model"),
+    [
+        ("nvidia_nim/meta/llama", "nvidia_nim", "meta/llama"),
+        ("open_router/deepseek/r1", "open_router", "deepseek/r1"),
+        ("ollama_cloud/qwen3-coder:480b", "ollama_cloud", "qwen3-coder:480b"),
+    ],
+)
+def test_model_ref_parsing(model_ref: str, provider: str, model: str) -> None:
+    assert parse_provider_type(model_ref) == provider
+    assert parse_model_name(model_ref) == model
+
+
+def test_paths_are_owned_by_fcc_home(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    assert messaging_state_dir_path() == tmp_path / ".fcc" / "agent_workspace"
+    assert server_log_path() == tmp_path / ".fcc" / "logs" / "server.log"
+
+
+def test_nim_settings_keep_request_local_validation() -> None:
+    settings = NimSettings.model_validate(
+        {
+            "max_tokens": "1024",
+            "temperature": "0.5",
+            "seed": "7",
+            "stop": "",
+        }
+    )
+
+    assert settings.max_tokens == 1024
+    assert settings.temperature == 0.5
+    assert settings.seed == 7
+    assert settings.stop is None
+    assert NimSettings().max_tokens == ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
+    assert NimSettings().top_p == 0.95
+    for unsupported_top_p in (0.0, 0.9, 1.0):
+        with pytest.raises(ValidationError):
+            NimSettings(top_p=unsupported_top_p)
+
+
+class TestSettingsEmptyStringNormalization:
+    """Blank optional env values normalize to None at the loader boundary.
+
+    Upstream moved Settings off BaseSettings: direct construction performs no
+    environment I/O, so these fork regression checks go through the loader.
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "attribute", "value", "expected"),
+        [
+            ("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "abc123", "abc123"),
+            ("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "", None),
+            ("ALLOWED_TELEGRAM_USER_ID", "allowed_telegram_user_id", "", None),
+            (
+                "DISCORD_BOT_TOKEN",
+                "discord_bot_token",
+                "discord_token_123",
+                "discord_token_123",
+            ),
+            ("DISCORD_BOT_TOKEN", "discord_bot_token", "", None),
+            (
+                "ALLOWED_DISCORD_CHANNELS",
+                "allowed_discord_channels",
+                "111,222,333",
+                "111,222,333",
+            ),
+            ("MESSAGING_PLATFORM", "messaging_platform", "discord", "discord"),
+            ("WHISPER_DEVICE", "whisper_device", "cpu", "cpu"),
+            ("WHISPER_DEVICE", "whisper_device", "cuda", "cuda"),
+        ],
+    )
+    def test_optional_env_values_at_loader_boundary(
+        self,
+        key: str,
+        attribute: str,
+        value: str,
+        expected: object,
     ) -> None:
-        """Default must match config.constants (and README / .env.example)."""
-        from free_claude_code.config.settings import Settings
+        snapshot = compose_settings_snapshot({}, {key: value})
 
-        monkeypatch.delenv("HTTP_CONNECT_TIMEOUT", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        settings = Settings()
-        assert settings.http_connect_timeout == HTTP_CONNECT_TIMEOUT_DEFAULT
-        assert HTTP_CONNECT_TIMEOUT_DEFAULT == 10.0
+        assert getattr(snapshot.settings, attribute) == expected
 
-    def test_reasoning_policy_from_env(self, monkeypatch):
-        """REASONING_POLICY is loaded as a typed preference."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("REASONING_POLICY", "off")
-        settings = Settings()
-        assert settings.reasoning_policy is ReasoningPreference.OFF
-
-    def test_root_reasoning_policy_cannot_inherit(self, monkeypatch):
-        """Only route overrides may inherit."""
-        from pydantic import ValidationError
-
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("REASONING_POLICY", "inherit")
-
-        with pytest.raises(ValidationError, match="cannot inherit"):
-            Settings()
-
-    def test_wafer_api_key_from_env(self, monkeypatch):
-        """WAFER_API_KEY env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("WAFER_API_KEY", "wafer-key")
-        settings = Settings()
-        assert settings.wafer_api_key == "wafer-key"
-
-    def test_minimax_settings_from_env(self, monkeypatch):
-        """MiniMax key and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MINIMAX_API_KEY", "minimax-key")
-        monkeypatch.setenv("MINIMAX_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.minimax_api_key == "minimax-key"
-        assert settings.minimax_proxy == "http://proxy.test:8080"
-
-    def test_cloudflare_settings_from_env(self, monkeypatch):
-        """Cloudflare token, account, and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
-        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "cf-account")
-        monkeypatch.setenv("CLOUDFLARE_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.cloudflare_api_token == "cf-token"
-        assert settings.cloudflare_account_id == "cf-account"
-        assert settings.cloudflare_proxy == "http://proxy.test:8080"
-
-    def test_azure_openai_settings_from_env(self, monkeypatch):
-        """Azure OpenAI key, resource URL, and proxy load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "azure-key")
-        monkeypatch.setenv(
-            "AZURE_OPENAI_BASE_URL",
-            "https://resource.openai.azure.com/openai/v1/",
-        )
-        monkeypatch.setenv("AZURE_OPENAI_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-
-        assert settings.azure_openai_api_key == "azure-key"
-        assert settings.azure_openai_base_url == (
-            "https://resource.openai.azure.com/openai/v1/"
-        )
-        assert settings.azure_openai_proxy == "http://proxy.test:8080"
-
-    def test_vertex_settings_from_env(self, monkeypatch):
-        """Vertex project, location, and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("VERTEX_PROJECT_ID", "vertex-project")
-        monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
-        monkeypatch.setenv("VERTEX_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.vertex_project_id == "vertex-project"
-        assert settings.vertex_location == "us-central1"
-        assert settings.vertex_proxy == "http://proxy.test:8080"
-
-    def test_vercel_settings_from_env(self, monkeypatch):
-        """Vercel AI Gateway key and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("AI_GATEWAY_API_KEY", "vercel-key")
-        monkeypatch.setenv("VERCEL_AI_GATEWAY_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.vercel_ai_gateway_api_key == "vercel-key"
-        assert settings.vercel_ai_gateway_proxy == "http://proxy.test:8080"
-
-    def test_bedrock_settings_from_official_environment(self, monkeypatch):
-        """Bedrock key, regional base URL, and proxy load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-key")
-        monkeypatch.setenv(
-            "BEDROCK_BASE_URL", "https://bedrock-mantle.us-west-2.api.aws/v1"
-        )
-        monkeypatch.setenv("BEDROCK_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-
-        assert settings.bedrock_api_key == "bedrock-key"
-        assert settings.bedrock_base_url == (
-            "https://bedrock-mantle.us-west-2.api.aws/v1"
-        )
-        assert settings.bedrock_proxy == "http://proxy.test:8080"
-
-    def test_huggingface_settings_from_env(self, monkeypatch):
-        """Hugging Face key and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("HUGGINGFACE_API_KEY", "hf-key")
-        monkeypatch.setenv("HUGGINGFACE_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.huggingface_api_key == "hf-key"
-        assert settings.huggingface_proxy == "http://proxy.test:8080"
-        assert not hasattr(settings, "hf_token")
-
-    def test_cohere_settings_from_env(self, monkeypatch):
-        """Cohere key and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("COHERE_API_KEY", "cohere-key")
-        monkeypatch.setenv("COHERE_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.cohere_api_key == "cohere-key"
-        assert settings.cohere_proxy == "http://proxy.test:8080"
-
-    def test_github_models_settings_from_env(self, monkeypatch):
-        """GitHub Models token and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("GITHUB_MODELS_TOKEN", "github-token")
-        monkeypatch.setenv("GITHUB_MODELS_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.github_models_token == "github-token"
-        assert settings.github_models_proxy == "http://proxy.test:8080"
-
-    def test_sambanova_settings_from_env(self, monkeypatch):
-        """SambaNova key and proxy env vars load into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("SAMBANOVA_API_KEY", "sambanova-key")
-        monkeypatch.setenv("SAMBANOVA_PROXY", "http://proxy.test:8080")
-        settings = Settings()
-        assert settings.sambanova_api_key == "sambanova-key"
-        assert settings.sambanova_proxy == "http://proxy.test:8080"
-
-    def test_legacy_hf_token_env_is_ignored(self, monkeypatch):
-        """HF_TOKEN is migrated by startup config migration, not read by Settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("HF_TOKEN", "legacy-token")
-        monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
-        settings = Settings()
-        assert settings.huggingface_api_key == ""
-        assert not hasattr(settings, "hf_token")
-
-    def test_route_reasoning_from_env(self, monkeypatch):
-        """Route reasoning preferences are loaded into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("REASONING_FABLE", "high")
-        monkeypatch.setenv("REASONING_OPUS", "max")
-        monkeypatch.setenv("REASONING_SONNET", "client")
-        monkeypatch.setenv("REASONING_HAIKU", "off")
-        settings = Settings()
-        assert settings.reasoning_fable is ReasoningPreference.HIGH
-        assert settings.reasoning_opus is ReasoningPreference.MAX
-        assert settings.reasoning_sonnet is ReasoningPreference.CLIENT
-        assert settings.reasoning_haiku is ReasoningPreference.OFF
-
-    def test_route_reasoning_inherits_root_policy(self, monkeypatch):
-        """Inherit defers route reasoning to the root preference."""
-        from free_claude_code.application.routing import ModelRouter
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("REASONING_POLICY", "off")
-        monkeypatch.setenv("REASONING_OPUS", "inherit")
-        settings = Settings()
-        assert settings.reasoning_opus is ReasoningPreference.INHERIT
-        assert (
-            ModelRouter(settings).resolve("claude-opus-4-20250514").reasoning_preference
-            is ReasoningPreference.OFF
-        )
-
-    def test_resolve_reasoning_uses_routes(self, monkeypatch):
-        """ModelRouter applies route preference then root fallback."""
-        from free_claude_code.application.routing import ModelRouter
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("REASONING_POLICY", "off")
-        monkeypatch.setenv("REASONING_FABLE", "high")
-        monkeypatch.setenv("REASONING_OPUS", "max")
-        monkeypatch.setenv("REASONING_HAIKU", "off")
-        settings = Settings()
-        router = ModelRouter(settings)
-        assert (
-            router.resolve("claude-fable-5").reasoning_preference
-            is ReasoningPreference.HIGH
-        )
-        assert (
-            router.resolve("claude-opus-4-20250514").reasoning_preference
-            is ReasoningPreference.MAX
-        )
-        assert (
-            router.resolve("claude-sonnet-4-20250514").reasoning_preference
-            is ReasoningPreference.OFF
-        )
-        assert (
-            router.resolve("claude-haiku-4-20250514").reasoning_preference
-            is ReasoningPreference.OFF
-        )
-        assert (
-            router.resolve("unknown-model").reasoning_preference
-            is ReasoningPreference.OFF
-        )
-
-    def test_anthropic_auth_token_from_env_without_dotenv_key(self, monkeypatch):
-        """ANTHROPIC_AUTH_TOKEN env var is loaded when dotenv does not define it."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "process-token")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        settings = Settings()
-        assert settings.anthropic_auth_token == "process-token"
-        assert (
-            process_env_key_is_effective(
-                Settings.model_config, ANTHROPIC_AUTH_TOKEN_ENV
-            )
-            is True
-        )
-
-    def test_empty_dotenv_anthropic_auth_token_overrides_process_env(
-        self, monkeypatch, tmp_path
-    ):
-        """An explicit empty .env token disables auth despite stale shell tokens."""
-        from free_claude_code.config.settings import Settings
-
-        env_file = tmp_path / ".env"
-        env_file.write_text("ANTHROPIC_AUTH_TOKEN=\n", encoding="utf-8")
-        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-client-token")
-        monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
-
-        settings = Settings()
-        assert settings.anthropic_auth_token == ""
-        assert (
-            process_env_key_is_effective(
-                Settings.model_config, ANTHROPIC_AUTH_TOKEN_ENV
-            )
-            is False
-        )
-
-    def test_dotenv_anthropic_auth_token_overrides_process_env(
-        self, monkeypatch, tmp_path
-    ):
-        """A configured .env token is the server token even with a stale shell token."""
-        from free_claude_code.config.settings import Settings
-
-        env_file = tmp_path / ".env"
-        env_file.write_text(
-            'ANTHROPIC_AUTH_TOKEN="server-token"\n',
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "stale-client-token")
-        monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
-
-        settings = Settings()
-        assert settings.anthropic_auth_token == "server-token"
-        assert (
-            process_env_key_is_effective(
-                Settings.model_config, ANTHROPIC_AUTH_TOKEN_ENV
-            )
-            is False
-        )
-
-    @pytest.mark.parametrize("removed_key", ["NIM_ENABLE_THINKING", "ENABLE_THINKING"])
-    def test_removed_thinking_env_keys_are_ignored(self, monkeypatch, removed_key):
-        """Stale thinking env keys do not block startup or affect settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv(removed_key, "false")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-
-        settings = Settings()
-
-        assert settings.reasoning_policy is ReasoningPreference.CLIENT
-
-    @pytest.mark.parametrize("removed_key", ["NIM_ENABLE_THINKING", "ENABLE_THINKING"])
-    @pytest.mark.parametrize("value", ["false", ""])
-    def test_removed_thinking_dotenv_keys_are_ignored(
-        self, monkeypatch, tmp_path, removed_key, value
-    ):
-        """Stale thinking dotenv keys do not block startup or affect settings."""
-        from free_claude_code.config.settings import Settings
-
-        env_file = tmp_path / ".env"
-        env_file.write_text(f"{removed_key}={value}\n", encoding="utf-8")
-        monkeypatch.delenv(removed_key, raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
-
-        settings = Settings()
-
-        assert settings.reasoning_policy is ReasoningPreference.CLIENT
-
-
-# --- NimSettings Validation Tests ---
-class TestNimSettingsValidBounds:
-    """Test that valid values within bounds are accepted."""
-
-    @pytest.mark.parametrize("top_k", [-1, 0, 1, 100])
-    def test_top_k_valid(self, top_k):
-        """top_k >= -1 should be accepted."""
-        s = NimSettings(top_k=top_k)
-        assert s.top_k == top_k
-
-    @pytest.mark.parametrize("temp", [0.0, 0.5, 1.0, 2.0])
-    def test_temperature_valid(self, temp):
-        s = NimSettings(temperature=temp)
-        assert s.temperature == temp
-
-    @pytest.mark.parametrize("top_p", [0.0, 0.5, 1.0])
-    def test_top_p_valid(self, top_p):
-        s = NimSettings(top_p=top_p)
-        assert s.top_p == top_p
-
-    def test_max_tokens_valid(self):
-        s = NimSettings(max_tokens=1)
-        assert s.max_tokens == 1
-
-    def test_min_tokens_valid(self):
-        s = NimSettings(min_tokens=0)
-        assert s.min_tokens == 0
-
-    @pytest.mark.parametrize("penalty", [-2.0, 0.0, 2.0])
-    def test_presence_penalty_valid(self, penalty):
-        s = NimSettings(presence_penalty=penalty)
-        assert s.presence_penalty == penalty
-
-    @pytest.mark.parametrize("penalty", [-2.0, 0.0, 2.0])
-    def test_frequency_penalty_valid(self, penalty):
-        s = NimSettings(frequency_penalty=penalty)
-        assert s.frequency_penalty == penalty
-
-    @pytest.mark.parametrize("min_p", [0.0, 0.5, 1.0])
-    def test_min_p_valid(self, min_p):
-        s = NimSettings(min_p=min_p)
-        assert s.min_p == min_p
-
-
-class TestNimSettingsInvalidBounds:
-    """Test that out-of-range values raise ValidationError."""
-
-    @pytest.mark.parametrize("top_k", [-2, -100])
-    def test_top_k_below_lower_bound(self, top_k):
-        with pytest.raises((ValidationError, ValueError)):
-            NimSettings(top_k=top_k)
-
-    def test_temperature_negative(self):
-        with pytest.raises(ValidationError):
-            NimSettings(temperature=-0.1)
-
-    @pytest.mark.parametrize("top_p", [-0.1, 1.1])
-    def test_top_p_out_of_range(self, top_p):
-        with pytest.raises(ValidationError):
-            NimSettings(top_p=top_p)
-
-    @pytest.mark.parametrize("penalty", [-2.1, 2.1])
-    def test_presence_penalty_out_of_range(self, penalty):
-        with pytest.raises(ValidationError):
-            NimSettings(presence_penalty=penalty)
-
-    @pytest.mark.parametrize("penalty", [-2.1, 2.1])
-    def test_frequency_penalty_out_of_range(self, penalty):
-        with pytest.raises(ValidationError):
-            NimSettings(frequency_penalty=penalty)
-
-    @pytest.mark.parametrize("min_p", [-0.1, 1.1])
-    def test_min_p_out_of_range(self, min_p):
-        with pytest.raises(ValidationError):
-            NimSettings(min_p=min_p)
-
-    @pytest.mark.parametrize("max_tokens", [0, -1])
-    def test_max_tokens_too_low(self, max_tokens):
-        with pytest.raises(ValidationError):
-            NimSettings(max_tokens=max_tokens)
-
-    def test_min_tokens_negative(self):
-        with pytest.raises(ValidationError):
-            NimSettings(min_tokens=-1)
-
-
-class TestNimSettingsValidators:
-    """Test custom field validators in NimSettings."""
-
-    def test_default_max_tokens_matches_shared_constant(self):
-        assert NimSettings().max_tokens == ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
-
-    @pytest.mark.parametrize(
-        "seed_val,expected",
-        [("", None), (None, None), ("42", 42), (42, 42)],
-        ids=["empty_str", "none", "str_42", "int_42"],
-    )
-    def test_parse_optional_int(self, seed_val, expected):
-        s = NimSettings(seed=seed_val)
-        assert s.seed == expected
-
-    @pytest.mark.parametrize(
-        "stop_val,expected",
-        [("", None), ("STOP", "STOP"), (None, None)],
-        ids=["empty_str", "valid", "none"],
-    )
-    def test_parse_optional_str_stop(self, stop_val, expected):
-        s = NimSettings(stop=stop_val)
-        assert s.stop == expected
-
-    @pytest.mark.parametrize(
-        "chat_template_val,expected",
-        [("", None), ("template", "template")],
-        ids=["empty_str", "valid"],
-    )
-    def test_parse_optional_str_chat_template(self, chat_template_val, expected):
-        s = NimSettings(chat_template=chat_template_val)
-        assert s.chat_template == expected
-
-    def test_extra_forbid_rejects_unknown_field(self):
-        """NimSettings with extra='forbid' rejects unknown fields."""
-        from typing import Any, cast
-
-        with pytest.raises(ValidationError):
-            NimSettings(**cast(Any, {"unknown_field": "value"}))
-
-    def test_enable_thinking_field_removed(self):
-        """NimSettings no longer accepts the removed thinking toggle."""
-        from typing import Any, cast
-
-        with pytest.raises(ValidationError):
-            NimSettings(**cast(Any, {"enable_thinking": True}))
-
-
-class TestSettingsOptionalStr:
-    """Test Settings parse_optional_str validator."""
-
-    def test_empty_telegram_token_to_none(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
-        s = Settings()
-        assert s.telegram_bot_token is None
-
-    def test_valid_telegram_token_preserved(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc123")
-        s = Settings()
-        assert s.telegram_bot_token == "abc123"
-
-    def test_empty_allowed_user_id_to_none(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("ALLOWED_TELEGRAM_USER_ID", "")
-        s = Settings()
-        assert s.allowed_telegram_user_id is None
-
-    def test_discord_bot_token_from_env(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord_token_123")
-        s = Settings()
-        assert s.discord_bot_token == "discord_token_123"
-
-    def test_empty_discord_bot_token_to_none(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("DISCORD_BOT_TOKEN", "")
-        s = Settings()
-        assert s.discord_bot_token is None
-
-    def test_allowed_discord_channels_from_env(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("ALLOWED_DISCORD_CHANNELS", "111,222,333")
-        s = Settings()
-        assert s.allowed_discord_channels == "111,222,333"
-
-    def test_messaging_platform_from_env(self, monkeypatch):
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MESSAGING_PLATFORM", "discord")
-        s = Settings()
-        assert s.messaging_platform == "discord"
-
-    def test_whisper_device_auto_rejected(self, monkeypatch):
-        """WHISPER_DEVICE=auto raises ValidationError (auto removed)."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("WHISPER_DEVICE", "auto")
+    def test_whisper_device_auto_rejected(self) -> None:
         with pytest.raises(ValidationError, match="whisper_device"):
-            Settings()
-
-    @pytest.mark.parametrize("device", ["cpu", "cuda"])
-    def test_whisper_device_valid(self, monkeypatch, device):
-        """Valid whisper_device values are accepted."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("WHISPER_DEVICE", device)
-        s = Settings()
-        assert s.whisper_device == device
+            compose_settings_snapshot({}, {"WHISPER_DEVICE": "auto"})
 
 
 class TestPerModelMapping:
@@ -812,38 +556,49 @@ class TestPerModelMapping:
         assert s.model_sonnet is None
         assert s.model_haiku is None
 
-    def test_model_opus_from_env(self, monkeypatch):
-        """MODEL_OPUS env var is loaded."""
-        from free_claude_code.config.settings import Settings
+    def test_model_opus_loader(self):
+        """MODEL_OPUS env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_OPUS": "open_router/deepseek/deepseek-r1"}
+        )
+        assert snapshot.settings.model_opus == "open_router/deepseek/deepseek-r1"
 
-        monkeypatch.setenv("MODEL_OPUS", "open_router/deepseek/deepseek-r1")
-        s = Settings()
-        assert s.model_opus == "open_router/deepseek/deepseek-r1"
+    def test_model_fable_loader(self):
+        """MODEL_FABLE env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_FABLE": "open_router/anthropic/claude-fable-5"}
+        )
+        assert snapshot.settings.model_fable == "open_router/anthropic/claude-fable-5"
 
-    def test_model_fable_from_env(self, monkeypatch):
-        """MODEL_FABLE env var is loaded."""
-        from free_claude_code.config.settings import Settings
+    def test_model_sonnet_loader(self):
+        """MODEL_SONNET env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_SONNET": "nvidia_nim/meta/llama-3.3-70b-instruct"}
+        )
+        assert (
+            snapshot.settings.model_sonnet == "nvidia_nim/meta/llama-3.3-70b-instruct"
+        )
 
-        monkeypatch.setenv("MODEL_FABLE", "open_router/anthropic/claude-fable-5")
-        s = Settings()
-        assert s.model_fable == "open_router/anthropic/claude-fable-5"
+    def test_model_haiku_loader(self):
+        """MODEL_HAIKU env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot({}, {"MODEL_HAIKU": "lmstudio/qwen2.5-7b"})
+        assert snapshot.settings.model_haiku == "lmstudio/qwen2.5-7b"
 
     @pytest.mark.parametrize(
         "env_var", ["MODEL_FABLE", "MODEL_OPUS", "MODEL_SONNET", "MODEL_HAIKU"]
     )
-    def test_empty_model_override_env_is_unset(self, monkeypatch, env_var):
+    def test_empty_model_override_env_is_unset(self, env_var: str):
         """Empty per-model override env vars are treated as unset."""
         from free_claude_code.application.routing import ModelRouter
-        from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv(env_var, "")
-        s = Settings()
-        assert getattr(s, env_var.lower()) is None
+        settings = compose_settings_snapshot({}, {env_var: ""}).settings
+        assert getattr(settings, env_var.lower()) is None
+        model_name = env_var.removeprefix("MODEL_").lower()
         assert (
-            ModelRouter(s)
-            .resolve(f"claude-{env_var.removeprefix('MODEL_').lower()}-4")
-            .provider_model_ref
-            == s.model
+            ModelRouter(settings)
+            .resolve(f"claude-{model_name}-4")
+            .primary.provider_model_ref
+            == settings.model
         )
 
     @pytest.mark.parametrize(
@@ -890,175 +645,102 @@ class TestPerModelMapping:
         ],
     )
     def test_settings_models_from_env(
-        self, env_vars, expected_model, expected_haiku, monkeypatch
+        self,
+        env_vars: dict[str, str],
+        expected_model: str,
+        expected_haiku: str | None,
     ):
-        """Test environment variables override model defaults."""
+        """Environment variables override model defaults."""
+        settings = compose_settings_snapshot({}, env_vars).settings
+        assert settings.model == expected_model
+        assert settings.model_haiku == expected_haiku
+
+    @pytest.mark.parametrize(
+        ("env_var", "value", "message"),
+        [
+            ("MODEL_OPUS", "bad_provider/some-model", "Invalid provider"),
+            ("MODEL_OPUS", "noprefix", "provider type"),
+            ("MODEL_HAIKU", "invalid/model", "Invalid provider"),
+            ("MODEL_FABLE", "invalid/model", "Invalid provider"),
+            ("MODEL_COMPACT", "invalid/model", "Invalid provider"),
+        ],
+    )
+    def test_invalid_model_refs_raise_at_loader_boundary(
+        self, env_var: str, value: str, message: str
+    ):
+        """Malformed per-model refs are rejected during validation."""
+        with pytest.raises(ValidationError, match=message):
+            compose_settings_snapshot({}, {env_var: value})
+
+    def test_model_compact_loader(self):
+        """MODEL_COMPACT loads through the boundary and blanks to None."""
+        loaded = compose_settings_snapshot(
+            {}, {"MODEL_COMPACT": "opencode_go/anthropic/claude-fable-5"}
+        ).settings
+        assert loaded.model_compact == "opencode_go/anthropic/claude-fable-5"
+
+        blank = compose_settings_snapshot({}, {"MODEL_COMPACT": ""}).settings
+        assert blank.model_compact is None
+
+    def test_model_compact_default_is_none(self):
+        """MODEL_COMPACT defaults to None when unset."""
         from free_claude_code.config.settings import Settings
 
-        for k, v in env_vars.items():
-            monkeypatch.setenv(k, v)
+        assert Settings().model_compact is None
 
-        s = Settings()
-        assert s.model == expected_model
-        assert s.model_haiku == expected_haiku
-
-    def test_model_sonnet_from_env(self, monkeypatch):
-        """MODEL_SONNET env var is loaded."""
+    def test_fcc_1m_models_default_is_none(self):
+        """FCC_1M_MODELS defaults to None when unset (upstream ban on empty strings)."""
         from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("MODEL_SONNET", "nvidia_nim/meta/llama-3.3-70b-instruct")
-        s = Settings()
-        assert s.model_sonnet == "nvidia_nim/meta/llama-3.3-70b-instruct"
+        assert Settings().fcc_1m_models is None
 
-    def test_model_haiku_from_env(self, monkeypatch):
-        """MODEL_HAIKU env var is loaded."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_HAIKU", "lmstudio/qwen2.5-7b")
-        s = Settings()
-        assert s.model_haiku == "lmstudio/qwen2.5-7b"
-
-    def test_model_opus_invalid_provider_raises(self, monkeypatch):
-        """MODEL_OPUS with invalid provider prefix raises ValidationError."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_OPUS", "bad_provider/some-model")
-        with pytest.raises(ValidationError, match="Invalid provider"):
-            Settings()
-
-    def test_model_opus_no_slash_raises(self, monkeypatch):
-        """MODEL_OPUS without provider prefix raises ValidationError."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_OPUS", "noprefix")
-        with pytest.raises(ValidationError, match="provider type"):
-            Settings()
-
-    def test_model_haiku_invalid_provider_raises(self, monkeypatch):
-        """MODEL_HAIKU with invalid provider prefix raises ValidationError."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_HAIKU", "invalid/model")
-        with pytest.raises(ValidationError, match="Invalid provider"):
-            Settings()
-
-    def test_model_fable_invalid_provider_raises(self, monkeypatch):
-        """MODEL_FABLE with invalid provider prefix raises ValidationError."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_FABLE", "invalid/model")
-        with pytest.raises(ValidationError, match="Invalid provider"):
-            Settings()
-
-    def test_model_compact_default_is_none(self, monkeypatch):
-        """MODEL_COMPACT defaults to None when env is unset."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.delenv("MODEL_COMPACT", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.model_compact is None
-
-    def test_model_compact_loaded_from_env(self, monkeypatch):
-        """MODEL_COMPACT env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_COMPACT", "opencode_go/anthropic/claude-fable-5")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.model_compact == "opencode_go/anthropic/claude-fable-5"
-
-    def test_model_compact_empty_string_becomes_none(self, monkeypatch):
-        """Empty MODEL_COMPACT env value coerces to None."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_COMPACT", "")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.model_compact is None
-
-    def test_model_compact_invalid_provider_raises(self, monkeypatch):
-        """MODEL_COMPACT with invalid provider prefix raises ValidationError."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("MODEL_COMPACT", "invalid/model")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        with pytest.raises(ValidationError, match="Invalid provider"):
-            Settings()
-
-    def test_fcc_1m_models_default_is_empty(self, monkeypatch):
-        """FCC_1M_MODELS defaults to empty string when env is unset."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.delenv("FCC_1M_MODELS", raising=False)
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.fcc_1m_models == ""
-
-    def test_fcc_1m_models_loaded_from_env(self, monkeypatch):
+    def test_fcc_1m_models_loaded_from_env(self):
         """FCC_1M_MODELS env var is loaded into settings."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv(
-            "FCC_1M_MODELS",
-            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+        snapshot = compose_settings_snapshot(
+            {},
+            {
+                "FCC_1M_MODELS": (
+                    "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash"
+                )
+            },
         )
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.fcc_1m_models == (
+        assert snapshot.settings.fcc_1m_models == (
             "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash"
         )
 
-    def test_one_m_model_refs_parses_csv(self, monkeypatch):
-        """one_m_model_refs returns a frozenset of trimmed refs from the CSV env var."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv(
-            "FCC_1M_MODELS",
-            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
-        )
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.one_m_model_refs() == frozenset(
-            {"opencode_go/deepseek-v4-pro", "opencode_go/deepseek-v4-flash"}
-        )
-
-    def test_one_m_model_refs_strips_existing_1m_suffix(self, monkeypatch):
-        """one_m_model_refs strips any pre-existing [1m] suffix for idempotency."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("FCC_1M_MODELS", "opencode_go/deepseek-v4-pro[1m]")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.one_m_model_refs() == frozenset({"opencode_go/deepseek-v4-pro"})
-
-    def test_one_m_model_refs_handles_whitespace(self, monkeypatch):
-        """one_m_model_refs trims whitespace around CSV entries."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("FCC_1M_MODELS", " a/b , c/d ")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.one_m_model_refs() == frozenset({"a/b", "c/d"})
-
-    def test_one_m_model_refs_empty_returns_empty_set(self, monkeypatch):
-        """one_m_model_refs returns an empty frozenset when FCC_1M_MODELS is empty."""
-        from free_claude_code.config.settings import Settings
-
-        monkeypatch.setenv("FCC_1M_MODELS", "")
-        monkeypatch.setitem(Settings.model_config, "env_file", ())
-        s = Settings()
-        assert s.one_m_model_refs() == frozenset()
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (
+                "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+                frozenset(
+                    {
+                        "opencode_go/deepseek-v4-pro",
+                        "opencode_go/deepseek-v4-flash",
+                    }
+                ),
+            ),
+            (
+                "opencode_go/deepseek-v4-pro[1m]",
+                frozenset({"opencode_go/deepseek-v4-pro"}),
+            ),
+            (" a/b , c/d ", frozenset({"a/b", "c/d"})),
+            ("", frozenset()),
+        ],
+    )
+    def test_one_m_model_refs_parsing(self, value: str, expected: frozenset[str]):
+        """one_m_model_refs parses, trims, strips [1m], and tolerates blanks."""
+        settings = compose_settings_snapshot({}, {"FCC_1M_MODELS": value}).settings
+        assert settings.one_m_model_refs() == expected
 
     def test_resolve_model_fable_override(self):
         """ModelRouter returns model_fable for Fable model names."""
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model_fable = "open_router/anthropic/claude-fable-5"
+        s = Settings(model_fable="open_router/anthropic/claude-fable-5")
         assert (
-            ModelRouter(s).resolve("claude-fable-5").provider_model_ref
+            ModelRouter(s).resolve("claude-fable-5").primary.provider_model_ref
             == "open_router/anthropic/claude-fable-5"
         )
 
@@ -1067,98 +749,76 @@ class TestPerModelMapping:
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model_opus = "open_router/deepseek/deepseek-r1"
+        s = Settings(model_opus="open_router/deepseek/deepseek-r1")
         router = ModelRouter(s)
-        assert (
-            router.resolve("claude-opus-4-20250514").provider_model_ref
-            == "open_router/deepseek/deepseek-r1"
-        )
-        assert (
-            router.resolve("claude-3-opus").provider_model_ref
-            == "open_router/deepseek/deepseek-r1"
-        )
-        assert (
-            router.resolve("claude-3-opus-20240229").provider_model_ref
-            == "open_router/deepseek/deepseek-r1"
-        )
+        for name in (
+            "claude-opus-4-20250514",
+            "claude-3-opus",
+            "claude-3-opus-20240229",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "open_router/deepseek/deepseek-r1"
+            )
 
     def test_resolve_model_sonnet_override(self):
         """ModelRouter returns model_sonnet for sonnet model names."""
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model_sonnet = "nvidia_nim/meta/llama-3.3-70b-instruct"
+        s = Settings(model_sonnet="nvidia_nim/meta/llama-3.3-70b-instruct")
         router = ModelRouter(s)
-        assert (
-            router.resolve("claude-sonnet-4-20250514").provider_model_ref
-            == "nvidia_nim/meta/llama-3.3-70b-instruct"
-        )
-        assert (
-            router.resolve("claude-3-5-sonnet-20241022").provider_model_ref
-            == "nvidia_nim/meta/llama-3.3-70b-instruct"
-        )
+        for name in ("claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022"):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "nvidia_nim/meta/llama-3.3-70b-instruct"
+            )
 
     def test_resolve_model_haiku_override(self):
         """ModelRouter returns model_haiku for haiku model names."""
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model_haiku = "lmstudio/qwen2.5-7b"
+        s = Settings(model_haiku="lmstudio/qwen2.5-7b")
         router = ModelRouter(s)
-        assert (
-            router.resolve("claude-3-haiku-20240307").provider_model_ref
-            == "lmstudio/qwen2.5-7b"
-        )
-        assert (
-            router.resolve("claude-3-5-haiku-20241022").provider_model_ref
-            == "lmstudio/qwen2.5-7b"
-        )
-        assert (
-            router.resolve("claude-haiku-4-20250514").provider_model_ref
-            == "lmstudio/qwen2.5-7b"
-        )
+        for name in (
+            "claude-3-haiku-20240307",
+            "claude-3-5-haiku-20241022",
+            "claude-haiku-4-20250514",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "lmstudio/qwen2.5-7b"
+            )
 
     def test_resolve_model_fallback_when_override_not_set(self):
         """ModelRouter falls back to MODEL when model override is None."""
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model = "nvidia_nim/fallback-model"
+        s = Settings(model="nvidia_nim/fallback-model")
         router = ModelRouter(s)
-        assert (
-            router.resolve("claude-fable-5").provider_model_ref
-            == "nvidia_nim/fallback-model"
-        )
-        assert (
-            router.resolve("claude-opus-4-20250514").provider_model_ref
-            == "nvidia_nim/fallback-model"
-        )
-        assert (
-            router.resolve("claude-sonnet-4-20250514").provider_model_ref
-            == "nvidia_nim/fallback-model"
-        )
-        assert (
-            router.resolve("claude-3-haiku-20240307").provider_model_ref
-            == "nvidia_nim/fallback-model"
-        )
+        for name in (
+            "claude-fable-5",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-3-haiku-20240307",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "nvidia_nim/fallback-model"
+            )
 
     def test_resolve_model_unknown_model_falls_back(self):
         """ModelRouter falls back to MODEL for unrecognized model names."""
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model = "nvidia_nim/fallback-model"
-        s.model_opus = "open_router/opus-model"
+        s = Settings(
+            model="nvidia_nim/fallback-model",
+            model_opus="open_router/opus-model",
+        )
         router = ModelRouter(s)
-        assert router.resolve("claude-2.1").provider_model_ref == (
+        assert router.resolve("claude-2.1").primary.provider_model_ref == (
             "nvidia_nim/fallback-model"
         )
-        assert router.resolve("some-unknown-model").provider_model_ref == (
+        assert router.resolve("some-unknown-model").primary.provider_model_ref == (
             "nvidia_nim/fallback-model"
         )
 
@@ -1167,11 +827,9 @@ class TestPerModelMapping:
         from free_claude_code.application.routing import ModelRouter
         from free_claude_code.config.settings import Settings
 
-        s = Settings()
-        s.model_opus = "open_router/opus-model"
-        assert (
-            ModelRouter(s).resolve("Claude-OPUS-4").provider_model_ref
-            == "open_router/opus-model"
+        s = Settings(model_opus="open_router/opus-model")
+        assert ModelRouter(s).resolve("Claude-OPUS-4").primary.provider_model_ref == (
+            "open_router/opus-model"
         )
 
     def test_parse_provider_type(self):
@@ -1252,12 +910,10 @@ class TestPerModelMapping:
         )
         assert parse_model_name("cerebras/llama3.1-8b") == "llama3.1-8b"
 
-    def test_configured_chat_model_refs_collects_unique_models(self, monkeypatch):
+    def test_configured_chat_model_refs_collects_unique_models(self):
         """Model discovery is limited to configured chat references."""
         from free_claude_code.config.settings import Settings
 
-        monkeypatch.setenv("FCC_SMOKE_MODEL_NVIDIA_NIM", "nvidia_nim/smoke")
-        monkeypatch.setenv("WHISPER_MODEL", "openai/whisper-large-v3")
         s = Settings()
         s.model = "nvidia_nim/fallback"
         s.model_fable = "open_router/anthropic/claude-fable-5"
@@ -1278,3 +934,9 @@ class TestPerModelMapping:
         assert refs[1].model_id == "anthropic/claude-fable-5"
         assert refs[2].provider_id == "open_router"
         assert refs[2].model_id == "anthropic/claude-opus"
+
+
+def test_settings_defaults_do_not_contain_empty_enum_strings() -> None:
+    for _name, value in Settings():
+        if isinstance(value, Enum):
+            assert value.value

@@ -7,10 +7,10 @@ import pytest
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.config.provider_catalog import COHERE_DEFAULT_BASE
-from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     immediate_admission,
+    make_provider_config,
     profiled_provider,
     reasoning_for,
 )
@@ -22,7 +22,7 @@ def make_request(**overrides):
 
 @pytest.fixture
 def cohere_config():
-    return ProviderConfig(
+    return make_provider_config(
         api_key="test_cohere_key",
         base_url=COHERE_DEFAULT_BASE,
         rate_limit=10,
@@ -143,7 +143,7 @@ def test_build_request_body_preserves_replayed_reasoning_content(cohere_provider
 def test_build_request_body_maps_reasoning_off_to_none():
     provider = profiled_provider(
         "cohere",
-        ProviderConfig(
+        make_provider_config(
             api_key="test_cohere_key",
             base_url=COHERE_DEFAULT_BASE,
             rate_limit=10,
@@ -185,7 +185,7 @@ def test_build_request_body_rejects_unsupported_extra_body(cohere_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_text(cohere_provider):
+async def test_stream_messages_text(cohere_provider):
     mock_chunk = MagicMock()
     mock_chunk.choices = [
         MagicMock(
@@ -208,7 +208,7 @@ async def test_stream_response_text(cohere_provider):
         mock_create.return_value = mock_stream()
 
         events = [
-            event async for event in cohere_provider.stream_response(make_request())
+            event async for event in cohere_provider.stream_messages(make_request())
         ]
 
     assert any(
@@ -217,7 +217,7 @@ async def test_stream_response_text(cohere_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_tool_call(cohere_provider):
+async def test_stream_messages_tool_call(cohere_provider):
     mock_tc = MagicMock()
     mock_tc.index = 0
     mock_tc.id = "call_1"
@@ -243,7 +243,7 @@ async def test_stream_response_tool_call(cohere_provider):
         mock_create.return_value = mock_stream()
 
         events = [
-            event async for event in cohere_provider.stream_response(make_request())
+            event async for event in cohere_provider.stream_messages(make_request())
         ]
 
     assert any(
@@ -255,7 +255,7 @@ async def test_stream_response_tool_call(cohere_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning_content(cohere_provider):
+async def test_stream_messages_reasoning_content(cohere_provider):
     mock_chunk = MagicMock()
     mock_chunk.choices = [
         MagicMock(
@@ -278,7 +278,7 @@ async def test_stream_response_reasoning_content(cohere_provider):
         mock_create.return_value = mock_stream()
 
         events = [
-            event async for event in cohere_provider.stream_response(make_request())
+            event async for event in cohere_provider.stream_messages(make_request())
         ]
 
     assert any(

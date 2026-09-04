@@ -38,13 +38,16 @@ BEDROCK_DEFAULT_BASE = "https://bedrock-mantle.us-east-1.api.aws/v1"
 HUGGINGFACE_DEFAULT_BASE = "https://router.huggingface.co/v1"
 COHERE_DEFAULT_BASE = "https://api.cohere.ai/compatibility/v1"
 GITHUB_MODELS_DEFAULT_BASE = "https://models.github.ai/inference"
-# Z.ai GLM Coding Plan OpenAI-compatible Chat Completions API.
-ZAI_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4"
+# Z.ai OpenAI-compatible Chat Completions APIs. The endpoint selects billing.
+ZAI_CODING_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4"
+ZAI_API_DEFAULT_BASE = "https://api.z.ai/api/paas/v4"
 # Google AI Studio Gemini API OpenAI-compat layer (not Vertex AI).
 GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 # Vertex AI API root. The provider owns project/location endpoint composition.
 VERTEX_AI_API_ROOT = "https://aiplatform.googleapis.com"
 GROQ_DEFAULT_BASE = "https://api.groq.com/openai/v1"
+# ClinePass subscription models through Cline's OpenAI-compatible API.
+CLINE_DEFAULT_BASE = "https://api.cline.bot/api/v1"
 CEREBRAS_DEFAULT_BASE = "https://api.cerebras.ai/v1"
 SAMBANOVA_DEFAULT_BASE = "https://api.sambanova.ai/v1"
 # Kilo.ai gateway OpenAI-compatible Chat Completions API.
@@ -56,6 +59,8 @@ XAI_DEFAULT_BASE = "https://api.x.ai/v1"
 QWENCLOUD_DEFAULT_BASE = (
     "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 )
+# QwenCloud Coding Plan OpenAI-compatible Chat Completions API.
+QWENCLOUD_CODING_DEFAULT_BASE = "https://coding-intl.dashscope.aliyuncs.com/v1"
 # Together AI OpenAI-compatible Chat Completions API.
 TOGETHER_DEFAULT_BASE = "https://api.together.ai/v1"
 # DeepInfra OpenAI-compatible Chat Completions API.
@@ -72,10 +77,16 @@ FEATHERLESS_DEFAULT_BASE = "https://api.featherless.ai/v1"
 TOKENROUTER_DEFAULT_BASE = "https://api.tokenrouter.com/v1"
 # NaraRoute OpenAI-compatible Chat Completions gateway.
 NARAROUTE_DEFAULT_BASE = "https://router.bynara.id/v1"
+# Poolside AI OpenAI-compatible Chat Completions API.
+POOLSIDE_DEFAULT_BASE = "https://inference.poolside.ai/v1"
+# LLM7.io OpenAI-compatible Chat Completions API.
+LLM7_DEFAULT_BASE = "https://api.llm7.io/v1"
 # Agnes AI OpenAI-compatible Chat Completions API.
 AGNES_DEFAULT_BASE = "https://apihub.agnes-ai.com/v1"
 # ZenMux OpenAI-compatible Chat Completions gateway.
 ZENMUX_DEFAULT_BASE = "https://zenmux.ai/api/v1"
+# W&B Serverless Inference OpenAI-compatible API.
+WANDB_INFERENCE_DEFAULT_BASE = "https://api.inference.wandb.ai/v1"
 
 
 class ProviderAuthKind(StrEnum):
@@ -141,6 +152,15 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         default_base_url=GROQ_DEFAULT_BASE,
         proxy_attr="groq_proxy",
     ),
+    "cline_pass": ProviderDescriptor(
+        provider_id="cline_pass",
+        display_name="ClinePass",
+        credential_env="CLINE_API_KEY",
+        credential_url="https://app.cline.bot",
+        credential_attr="cline_api_key",
+        default_base_url=CLINE_DEFAULT_BASE,
+        proxy_attr="cline_pass_proxy",
+    ),
     "openai": ProviderDescriptor(
         provider_id="openai",
         display_name="OpenAI / ChatGPT",
@@ -165,6 +185,15 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         credential_attr="qwencloud_api_key",
         default_base_url=QWENCLOUD_DEFAULT_BASE,
         proxy_attr="qwencloud_proxy",
+    ),
+    "qwencloud_coding": ProviderDescriptor(
+        provider_id="qwencloud_coding",
+        display_name="QwenCloud Coding Plan",
+        credential_env="QWENCLOUD_CODING_API_KEY",
+        credential_url="https://home.qwencloud.com/api-keys",
+        credential_attr="qwencloud_coding_api_key",
+        default_base_url=QWENCLOUD_CODING_DEFAULT_BASE,
+        proxy_attr="qwencloud_coding_proxy",
     ),
     "together": ProviderDescriptor(
         provider_id="together",
@@ -237,6 +266,15 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         credential_attr="zenmux_api_key",
         default_base_url=ZENMUX_DEFAULT_BASE,
         proxy_attr="zenmux_proxy",
+    ),
+    "wandb": ProviderDescriptor(
+        provider_id="wandb",
+        display_name="W&B Inference",
+        credential_env="WANDB_API_KEY",
+        credential_url="https://wandb.ai/settings",
+        credential_attr="wandb_api_key",
+        default_base_url=WANDB_INFERENCE_DEFAULT_BASE,
+        proxy_attr="wandb_proxy",
     ),
     "azure_openai": ProviderDescriptor(
         provider_id="azure_openai",
@@ -457,11 +495,21 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
     ),
     "zai": ProviderDescriptor(
         provider_id="zai",
-        display_name="Z.ai",
+        display_name="Z.ai Coding Plan",
         credential_env="ZAI_API_KEY",
+        credential_url="https://z.ai/manage-apikey/apikey-list",
         credential_attr="zai_api_key",
-        default_base_url=ZAI_DEFAULT_BASE,
+        default_base_url=ZAI_CODING_DEFAULT_BASE,
         proxy_attr="zai_proxy",
+    ),
+    "zai_api": ProviderDescriptor(
+        provider_id="zai_api",
+        display_name="Z.ai API",
+        credential_env="ZAI_API_KEY",
+        credential_url="https://z.ai/manage-apikey/apikey-list",
+        credential_attr="zai_api_key",
+        default_base_url=ZAI_API_DEFAULT_BASE,
+        proxy_attr="zai_api_proxy",
     ),
     "tokenrouter": ProviderDescriptor(
         provider_id="tokenrouter",
@@ -482,6 +530,24 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         default_base_url=NARAROUTE_DEFAULT_BASE,
         base_url_attr="nararoute_base_url",
         proxy_attr="nararoute_proxy",
+    ),
+    "poolside": ProviderDescriptor(
+        provider_id="poolside",
+        display_name="Poolside AI",
+        credential_env="POOLSIDE_API_KEY",
+        credential_url="https://platform.poolside.ai/",
+        credential_attr="poolside_api_key",
+        default_base_url=POOLSIDE_DEFAULT_BASE,
+        proxy_attr="poolside_proxy",
+    ),
+    "llm7": ProviderDescriptor(
+        provider_id="llm7",
+        display_name="LLM7.io",
+        credential_env="LLM7_API_KEY",
+        credential_url="https://dash.llm7.io/",
+        credential_attr="llm7_api_key",
+        default_base_url=LLM7_DEFAULT_BASE,
+        proxy_attr="llm7_proxy",
     ),
     "ollama_cloud": ProviderDescriptor(
         provider_id="ollama_cloud",
