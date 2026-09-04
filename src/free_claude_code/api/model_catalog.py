@@ -13,6 +13,7 @@ from free_claude_code.config.model_refs import configured_chat_model_refs
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
     claude_desktop_model_id,
+    claude_desktop_no_thinking_model_id,
     gateway_model_id,
     no_thinking_gateway_model_id,
 )
@@ -40,7 +41,6 @@ class ModelResponse(BaseModel):
     id: str
     type: Literal["model"] = "model"
     provider_model_ref: str | None = None
-    anthropic_family_tier: str | None = None
     api_backend: Literal["responses"] | None = Field(
         default=None, serialization_alias="apiBackend"
     )
@@ -151,9 +151,8 @@ def _build_claude_models_response(
 
     ``desktop_mode`` is the per-request Claude Desktop 3P flag (the request
     was accepted on the dedicated desktop listener); it rewrites provider
-    variant ids to claude-<provider>-<model> and tags them with an
-    ``anthropic_family_tier`` so Desktop's discovery filter keeps every
-    model, including names its vendor-token blacklist would reject.
+    variant ids to the obfuscated claude-<provider>-<model> form so
+    Desktop's vendor-token discovery filter keeps every model.
     """
     models: list[ModelResponse] = []
     seen: set[str] = set()
@@ -168,9 +167,6 @@ def _build_claude_models_response(
                 model_info.supports_thinking if model_info is not None else None
             ),
             desktop_mode=desktop_mode,
-            desktop_family_tier=(
-                _desktop_family_tier(settings, ref.model_ref) if desktop_mode else None
-            ),
         )
 
     for model_info in runtime.cached_prefixed_model_infos():
@@ -180,11 +176,6 @@ def _build_claude_models_response(
             model_info.model_id,
             supports_thinking=model_info.supports_thinking,
             desktop_mode=desktop_mode,
-            desktop_family_tier=(
-                _desktop_family_tier(settings, model_info.model_id)
-                if desktop_mode
-                else None
-            ),
         )
 
     one_m_refs = settings.one_m_model_refs()
@@ -200,11 +191,6 @@ def _build_claude_models_response(
                     one_m_ref,
                     supports_thinking=supports_thinking,
                     desktop_mode=desktop_mode,
-                    desktop_family_tier=(
-                        _desktop_family_tier(settings, one_m_ref)
-                        if desktop_mode
-                        else None
-                    ),
                 )
         for model_info in runtime.cached_prefixed_model_infos():
             if model_info.model_id in one_m_refs:
@@ -215,11 +201,6 @@ def _build_claude_models_response(
                     one_m_ref,
                     supports_thinking=model_info.supports_thinking,
                     desktop_mode=desktop_mode,
-                    desktop_family_tier=(
-                        _desktop_family_tier(settings, one_m_ref)
-                        if desktop_mode
-                        else None
-                    ),
                 )
 
     for model in SUPPORTED_CLAUDE_MODELS:
@@ -352,17 +333,11 @@ def _responses_inference_idle_timeout_seconds(provider_progress_timeout: float) 
     return math.ceil(provider_progress_timeout) + _INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS
 
 
-def _discovered_model_response(
-    model_id: str,
-    *,
-    display_name: str,
-    anthropic_family_tier: str | None = None,
-) -> ModelResponse:
+def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResponse:
     return ModelResponse(
         id=model_id,
         display_name=display_name,
         created_at=DISCOVERED_MODEL_CREATED_AT,
-        anthropic_family_tier=anthropic_family_tier,
     )
 
 
@@ -375,36 +350,6 @@ def _append_unique_model(
     models.append(model)
 
 
-def _desktop_family_tier(settings: Settings, provider_model_ref: str) -> str:
-    """Map a provider/model ref to a Claude Desktop family tier.
-
-    Claude Desktop's gateway model discovery rejects any id whose lowercase
-    form contains a third-party model-vendor token (``deepseek``, ``qwen``,
-    ``glm``, …) no matter what prefix it carries. Its documented escape hatch
-    is the ``anthropic_family_tier`` field: an entry whose tier matches one of
-    Desktop's recognized tiers bypasses the vendor-name filter entirely.
-
-    Refs configured as FCC tier aliases resolve to the matching desktop
-    tier (compact maps to haiku); everything else gets ``sonnet``,
-    Desktop's neutral everyday-work tier.
-    """
-
-    ref = provider_model_ref.removesuffix(ONE_M_CONTEXT_SUFFIX)
-    for model_ref, tier in (
-        (settings.model_opus, "opus"),
-        (settings.model_sonnet, "sonnet"),
-        (settings.model_haiku, "haiku"),
-        (settings.model_compact, "haiku"),
-        (settings.model_fable, "fable"),
-    ):
-        if (
-            model_ref is not None
-            and model_ref.removesuffix(ONE_M_CONTEXT_SUFFIX) == ref
-        ):
-            return tier
-    return "sonnet"
-
-
 def _append_provider_model_variants(
     models: list[ModelResponse],
     seen: set[str],
@@ -412,7 +357,6 @@ def _append_provider_model_variants(
     *,
     supports_thinking: bool | None = None,
     desktop_mode: bool = False,
-    desktop_family_tier: str | None = None,
 ) -> None:
     if supports_thinking is not False:
         _append_unique_model(
@@ -423,18 +367,19 @@ def _append_provider_model_variants(
                 if desktop_mode
                 else gateway_model_id(provider_model_ref),
                 display_name=provider_model_ref,
-                anthropic_family_tier=desktop_family_tier,
             ),
         )
     # The no-thinking id already starts with "claude-", but vendor tokens in
-    # the model name can still trip the Claude Desktop 3P name filter, so it
-    # carries the same tier as its thinking sibling in desktop mode.
+    # the provider/model segments can still trip the Claude Desktop 3P name
+    # filter, so desktop mode obfuscates them the same way as its thinking
+    # sibling; the main port keeps the raw gateway id.
     _append_unique_model(
         models,
         seen,
         _discovered_model_response(
-            no_thinking_gateway_model_id(provider_model_ref),
+            claude_desktop_no_thinking_model_id(provider_model_ref)
+            if desktop_mode
+            else no_thinking_gateway_model_id(provider_model_ref),
             display_name=f"{provider_model_ref} (no thinking)",
-            anthropic_family_tier=desktop_family_tier,
         ),
     )
