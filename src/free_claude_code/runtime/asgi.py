@@ -1,7 +1,5 @@
 """ASGI lifespan adapter for the application runtime owner."""
 
-from typing import Any
-
 from loguru import logger
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -15,7 +13,8 @@ class RuntimeASGIApp:
         self.app = app
         self.runtime = runtime
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
+        """Expose the wrapped application's public interface transparently."""
         return getattr(self.app, name)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

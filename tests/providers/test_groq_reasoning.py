@@ -4,21 +4,25 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import openai
 import pytest
 
 from free_claude_code.config.provider_catalog import GROQ_DEFAULT_BASE
 from free_claude_code.core.anthropic.stream_contracts import parse_sse_text
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
-from free_claude_code.providers.base import ProviderConfig
+from free_claude_code.providers.admission import ProviderOperationKind
 from free_claude_code.providers.groq import GroqProvider
 from free_claude_code.providers.groq.client import (
     _parse_reasoning_vocabulary,
     _rewrite_reasoning_effort,
 )
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import capture_openai_chat_wire_body, immediate_admission
+from tests.providers.support import (
+    capture_openai_chat_wire_body,
+    immediate_admission,
+    make_provider_config,
+)
 
 _MODEL = "opaque-model-a"
 _ISSUE_MESSAGE = "`reasoning_effort` must be one of `none` or `default`"
@@ -41,7 +45,7 @@ class _BadRequest(Exception):
 
 def _provider(*, max_attempts: int = 5) -> GroqProvider:
     return GroqProvider(
-        ProviderConfig(
+        make_provider_config(
             api_key="test_groq_key",
             base_url=GROQ_DEFAULT_BASE,
             rate_limit=10,
@@ -134,8 +138,8 @@ def test_parse_does_not_inherit_reasoning_param_into_unrelated_descendant() -> N
 
 
 def test_parse_actual_openai_bad_request() -> None:
-    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
-    response = httpx.Response(400, request=request)
+    request = httpx2.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx2.Response(400, request=request)
     error = openai.BadRequestError(
         _ISSUE_MESSAGE,
         response=response,
@@ -344,7 +348,8 @@ async def test_exact_issue_retries_with_default_and_learns_model() -> None:
     with patch.object(provider._client.chat.completions, "create", create):
         _stream, used_body, attempt = await provider._create_stream(
             body,
-            provider._admission.new_retry_session(),
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
         )
         await attempt.aclose()
 
@@ -362,7 +367,8 @@ async def test_exact_issue_retries_with_default_and_learns_model() -> None:
     with patch.object(provider._client.chat.completions, "create", next_create):
         _stream, next_used_body, next_attempt = await provider._create_stream(
             next_body,
-            provider._admission.new_retry_session(),
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
         )
         await next_attempt.aclose()
     assert next_create.await_count == 1
@@ -431,7 +437,8 @@ async def test_unknown_vocabulary_retries_without_effort_and_negative_caches() -
     with patch.object(provider._client.chat.completions, "create", create):
         _stream, used_body, attempt = await provider._create_stream(
             body,
-            provider._admission.new_retry_session(),
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
         )
         await attempt.aclose()
 
@@ -485,7 +492,8 @@ async def test_concurrent_first_requests_can_learn_without_state_corruption() ->
     async def execute(body: dict):
         _stream, used_body, attempt = await provider._create_stream(
             body,
-            provider._admission.new_retry_session(),
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
         )
         await attempt.aclose()
         return used_body
@@ -520,7 +528,8 @@ async def test_stale_cache_self_heals_without_guessing_original_effort() -> None
     with patch.object(provider._client.chat.completions, "create", create):
         _stream, corrected_body, attempt = await provider._create_stream(
             cached_body,
-            provider._admission.new_retry_session(),
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
         )
         await attempt.aclose()
 
@@ -545,7 +554,11 @@ async def test_unrelated_400_propagates_without_cache_poisoning() -> None:
         patch.object(provider._client.chat.completions, "create", create),
         pytest.raises(_BadRequest, match="wizard"),
     ):
-        await provider._create_stream(body, provider._admission.new_retry_session())
+        await provider._create_stream(
+            body,
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
+        )
 
     assert create.await_count == 1
     assert provider._model_reasoning_vocabularies == {}
@@ -571,7 +584,11 @@ async def test_nested_unrelated_allow_list_cannot_retry_or_poison_cache() -> Non
         patch.object(provider._client.chat.completions, "create", create),
         pytest.raises(_BadRequest),
     ):
-        await provider._create_stream(body, provider._admission.new_retry_session())
+        await provider._create_stream(
+            body,
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
+        )
 
     assert create.await_count == 1
     assert create.await_args_list[0].kwargs["reasoning_effort"] == "none"
@@ -591,7 +608,11 @@ async def test_advertised_current_value_does_not_retry_or_cache() -> None:
         patch.object(provider._client.chat.completions, "create", create),
         pytest.raises(_BadRequest),
     ):
-        await provider._create_stream(body, provider._admission.new_retry_session())
+        await provider._create_stream(
+            body,
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
+        )
 
     assert create.await_count == 1
     assert provider._model_reasoning_vocabularies == {}
@@ -608,7 +629,11 @@ async def test_last_attempt_learns_but_does_not_exceed_budget() -> None:
         patch.object(provider._client.chat.completions, "create", create),
         pytest.raises(_BadRequest),
     ):
-        await provider._create_stream(body, provider._admission.new_retry_session())
+        await provider._create_stream(
+            body,
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
+        )
 
     assert create.await_count == 1
     assert provider._model_reasoning_vocabularies[_MODEL] == frozenset(
@@ -629,14 +654,18 @@ async def test_output_cap_and_reasoning_corrections_share_one_session() -> None:
     )
     cap_error = _BadRequest("max_completion_tokens must be less than or equal to 40960")
     create = AsyncMock(side_effect=[cap_error, _vocabulary_error(), object()])
-    session = provider._admission.new_retry_session()
+    execution = provider._admission.start_execution()
 
     with patch.object(provider._client.chat.completions, "create", create):
-        _stream, used_body, attempt = await provider._create_stream(body, session)
+        _stream, used_body, attempt = await provider._create_stream(
+            body,
+            execution,
+            ProviderOperationKind.GENERATION,
+        )
         await attempt.aclose()
 
     assert create.await_count == 3
-    assert session.attempts_started == 3
+    assert execution.attempts_started == 3
     assert create.await_args_list[1].kwargs["max_completion_tokens"] == 40_960
     assert create.await_args_list[1].kwargs["reasoning_effort"] == "high"
     assert create.await_args_list[2].kwargs["max_completion_tokens"] == 40_960
@@ -658,7 +687,11 @@ async def test_corrected_request_cannot_enter_vocabulary_retry_loop() -> None:
         patch.object(provider._client.chat.completions, "create", create),
         pytest.raises(_BadRequest),
     ):
-        await provider._create_stream(body, provider._admission.new_retry_session())
+        await provider._create_stream(
+            body,
+            provider._admission.start_execution(),
+            ProviderOperationKind.GENERATION,
+        )
 
     assert create.await_count == 2
 
@@ -674,7 +707,7 @@ async def test_reasoning_correction_emits_one_downstream_lifecycle() -> None:
         raw = "".join(
             [
                 event
-                async for event in provider.stream_response(
+                async for event in provider.stream_messages(
                     request,
                     reasoning=policy,
                 )

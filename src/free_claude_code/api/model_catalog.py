@@ -1,8 +1,11 @@
-"""Model-list response construction for Claude-compatible clients."""
+"""Model-list response construction for FCC clients."""
 
+import math
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from free_claude_code.application.ports import RequestRuntimePort
 from free_claude_code.application.routing import ONE_M_CONTEXT_SUFFIX
@@ -12,8 +15,19 @@ from free_claude_code.core.gateway_model_ids import (
     gateway_model_id,
     no_thinking_gateway_model_id,
 )
+from free_claude_code.core.model_capabilities import ModelInputModality
 
 DISCOVERED_MODEL_CREATED_AT = "1970-01-01T00:00:00Z"
+_INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS = 60
+_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+class ModelCatalogView(StrEnum):
+    """Client-specific projections of the application model inventory."""
+
+    CLAUDE = "claude"
+    MESSAGES = "messages"
+    RESPONSES = "responses"
 
 
 class ModelResponse(BaseModel):
@@ -24,6 +38,34 @@ class ModelResponse(BaseModel):
     display_name: str
     id: str
     type: Literal["model"] = "model"
+    provider_model_ref: str | None = None
+    api_backend: Literal["responses"] | None = Field(
+        default=None, serialization_alias="apiBackend"
+    )
+    max_retries: Literal[0] | None = Field(
+        default=None, serialization_alias="maxRetries"
+    )
+    supports_reasoning_effort: bool | None = Field(
+        default=None, serialization_alias="supportsReasoningEffort"
+    )
+    supports_reasoning: bool | None = Field(
+        default=None, serialization_alias="supportsReasoning"
+    )
+    input_modalities: tuple[ModelInputModality, ...] | None = Field(
+        default=None, serialization_alias="inputModalities"
+    )
+    context_window_tokens: int | None = Field(
+        default=None, serialization_alias="contextWindow"
+    )
+    max_output_tokens: int | None = Field(
+        default=None, serialization_alias="maxCompletionTokens"
+    )
+    reasoning_efforts: tuple[str, ...] | None = Field(
+        default=None, serialization_alias="reasoningEfforts"
+    )
+    inference_idle_timeout_seconds: int | None = Field(
+        default=None, serialization_alias="inferenceIdleTimeoutSecs"
+    )
 
 
 class ModelsListResponse(BaseModel):
@@ -78,22 +120,43 @@ SUPPORTED_CLAUDE_MODELS = [
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class _InventoryModel:
+    provider_model_ref: str
+    supports_thinking: bool | None
+    input_modalities: frozenset[ModelInputModality] | None
+    context_window_tokens: int | None
+    max_output_tokens: int | None
+
+
 def build_models_list_response(
+    settings: Settings,
+    runtime: RequestRuntimePort,
+    *,
+    view: ModelCatalogView = ModelCatalogView.CLAUDE,
+) -> ModelsListResponse:
+    """Return the application model inventory in the requested client view."""
+    if view is ModelCatalogView.CLAUDE:
+        return _build_claude_models_response(settings, runtime)
+    return _build_direct_models_response(settings, runtime, view=view)
+
+
+def _build_claude_models_response(
     settings: Settings, runtime: RequestRuntimePort
 ) -> ModelsListResponse:
-    """Return configured, cached, and compatibility model ids."""
+    """Preserve the established Claude-compatible catalog exactly."""
     models: list[ModelResponse] = []
     seen: set[str] = set()
 
     for ref in configured_chat_model_refs(settings):
-        supports_thinking = runtime.cached_model_supports_thinking(
-            ref.provider_id, ref.model_id
-        )
+        model_info = runtime.cached_model_info(ref.provider_id, ref.model_id)
         _append_provider_model_variants(
             models,
             seen,
             ref.model_ref,
-            supports_thinking=supports_thinking,
+            supports_thinking=(
+                model_info.supports_thinking if model_info is not None else None
+            ),
         )
 
     for model_info in runtime.cached_prefixed_model_infos():
@@ -108,9 +171,8 @@ def build_models_list_response(
     if one_m_refs:
         for ref in configured_chat_model_refs(settings):
             if ref.model_ref in one_m_refs:
-                supports_thinking = runtime.cached_model_supports_thinking(
-                    ref.provider_id, ref.model_id
-                )
+                cached = runtime.cached_model_info(ref.provider_id, ref.model_id)
+                supports_thinking = cached.supports_thinking if cached else None
                 _append_provider_model_variants(
                     models,
                     seen,
@@ -135,6 +197,125 @@ def build_models_list_response(
         has_more=False,
         last_id=models[-1].id if models else None,
     )
+
+
+def _build_direct_models_response(
+    settings: Settings,
+    runtime: RequestRuntimePort,
+    *,
+    view: ModelCatalogView,
+) -> ModelsListResponse:
+    models: list[ModelResponse] = []
+    timeout_seconds = (
+        _responses_inference_idle_timeout_seconds(settings.provider_progress_timeout)
+        if view is ModelCatalogView.RESPONSES
+        else None
+    )
+
+    for inventory_model in _collect_inventory(settings, runtime):
+        provider_model_ref = inventory_model.provider_model_ref
+        allows_reasoning = inventory_model.supports_thinking is not False
+        model_id = (
+            provider_model_ref
+            if allows_reasoning
+            else no_thinking_gateway_model_id(provider_model_ref)
+        )
+        models.append(
+            ModelResponse(
+                id=model_id,
+                display_name=(
+                    provider_model_ref
+                    if allows_reasoning
+                    else f"{provider_model_ref} (no thinking)"
+                ),
+                created_at=DISCOVERED_MODEL_CREATED_AT,
+                provider_model_ref=provider_model_ref,
+                api_backend=(
+                    "responses" if view is ModelCatalogView.RESPONSES else None
+                ),
+                max_retries=0 if view is ModelCatalogView.RESPONSES else None,
+                supports_reasoning=inventory_model.supports_thinking,
+                input_modalities=_serialize_input_modalities(
+                    inventory_model.input_modalities
+                ),
+                context_window_tokens=inventory_model.context_window_tokens,
+                max_output_tokens=inventory_model.max_output_tokens,
+                supports_reasoning_effort=(
+                    allows_reasoning if view is ModelCatalogView.RESPONSES else None
+                ),
+                reasoning_efforts=(
+                    _REASONING_EFFORTS
+                    if view is ModelCatalogView.RESPONSES and allows_reasoning
+                    else None
+                ),
+                inference_idle_timeout_seconds=timeout_seconds,
+            )
+        )
+
+    return ModelsListResponse(
+        data=models,
+        first_id=models[0].id if models else None,
+        has_more=False,
+        last_id=models[-1].id if models else None,
+    )
+
+
+def _collect_inventory(
+    settings: Settings, runtime: RequestRuntimePort
+) -> tuple[_InventoryModel, ...]:
+    inventory: list[_InventoryModel] = []
+    seen: set[str] = set()
+
+    for ref in configured_chat_model_refs(settings):
+        if ref.model_ref in seen:
+            continue
+        seen.add(ref.model_ref)
+        model_info = runtime.cached_model_info(ref.provider_id, ref.model_id)
+        inventory.append(
+            _InventoryModel(
+                provider_model_ref=ref.model_ref,
+                supports_thinking=(
+                    model_info.supports_thinking if model_info is not None else None
+                ),
+                input_modalities=(
+                    model_info.input_modalities if model_info is not None else None
+                ),
+                context_window_tokens=(
+                    model_info.context_window_tokens if model_info is not None else None
+                ),
+                max_output_tokens=(
+                    model_info.max_output_tokens if model_info is not None else None
+                ),
+            )
+        )
+
+    for model_info in runtime.cached_prefixed_model_infos():
+        if model_info.model_id in seen:
+            continue
+        seen.add(model_info.model_id)
+        inventory.append(
+            _InventoryModel(
+                provider_model_ref=model_info.model_id,
+                supports_thinking=model_info.supports_thinking,
+                input_modalities=model_info.input_modalities,
+                context_window_tokens=model_info.context_window_tokens,
+                max_output_tokens=model_info.max_output_tokens,
+            )
+        )
+
+    return tuple(inventory)
+
+
+def _serialize_input_modalities(
+    modalities: frozenset[ModelInputModality] | None,
+) -> tuple[ModelInputModality, ...] | None:
+    if modalities is None:
+        return None
+    return tuple(modality for modality in ModelInputModality if modality in modalities)
+
+
+def _responses_inference_idle_timeout_seconds(provider_progress_timeout: float) -> int:
+    return math.ceil(provider_progress_timeout) + _INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS
 
 
 def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResponse:

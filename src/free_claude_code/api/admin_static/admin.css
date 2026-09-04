@@ -64,6 +64,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -104,7 +108,6 @@ textarea {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   min-height: 100vh;
-  padding-bottom: 96px; /* Space for action bar */
 }
 
 /* Sidebar Navigation */
@@ -127,16 +130,16 @@ textarea {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
+  flex: 0 0 auto;
   width: 40px;
   height: 40px;
-  place-items: center;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
-  color: #ffffff;
-  font-weight: 800;
-  font-size: 15px;
-  box-shadow: var(--glow-accent);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand h1 {
@@ -192,6 +195,7 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
+.brand-mark:focus-visible,
 .nav-link:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -201,6 +205,7 @@ textarea:focus-visible,
 .main {
   min-width: 0;
   padding: 40px 48px;
+  padding-bottom: calc(40px + 96px); /* Fixed action bar clearance */
 }
 
 .topbar {
@@ -335,6 +340,25 @@ textarea:focus-visible,
   line-height: 1.4;
   word-break: break-all;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.provider-check-result {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.provider-check-result.ok {
+  color: var(--ok);
+}
+
+.provider-check-result.error {
+  color: var(--error);
+}
+
+.provider-check-result.checking {
+  color: var(--info);
 }
 
 .provider-actions {
@@ -564,10 +588,6 @@ textarea:focus-visible,
   padding: 6px;
 }
 
-.model-combobox-list[hidden] {
-  display: none;
-}
-
 .model-combobox-option {
   border-radius: var(--radius-sm);
   padding: 9px 10px;
@@ -590,6 +610,59 @@ textarea:focus-visible,
   color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
+}
+
+.field[data-key="MODEL_FALLBACKS"] {
+  grid-column: 1 / -1;
+}
+
+.model-list-editor,
+.model-list-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.model-list-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.model-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 4px;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+}
+
+.model-list-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.model-list-action {
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.model-list-editor button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.model-list-empty {
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .field input:focus,
@@ -730,7 +803,6 @@ textarea:focus-visible,
   .app-shell {
     display: flex;
     flex-direction: column;
-    padding-bottom: 180px; /* More room for stacked action bar */
   }
 
   .sidebar {
@@ -748,6 +820,7 @@ textarea:focus-visible,
 
   .main {
     padding: 24px 20px;
+    padding-bottom: calc(24px + 180px); /* Stacked action bar clearance */
   }
 
   .action-bar {
@@ -810,6 +883,14 @@ textarea:focus-visible,
   
   .field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .model-list-add {
+    grid-template-columns: 1fr;
+  }
+
+  .model-list-row {
+    grid-template-columns: 1fr repeat(3, auto);
   }
 
   .action-meta {

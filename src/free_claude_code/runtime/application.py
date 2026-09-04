@@ -7,13 +7,13 @@ import os
 import traceback
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import Any
 
 from loguru import logger
 
 import free_claude_code.cli.managed as cli_managed
 import free_claude_code.messaging.session as messaging_session
 import free_claude_code.messaging.workflow as messaging_workflow_module
+from free_claude_code.application.chat import ChatService
 from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
     ConnectedAccountPort,
@@ -27,16 +27,15 @@ from free_claude_code.config.admin.persistence import (
     commit_prepared_admin_update,
     prepare_admin_update,
 )
+from free_claude_code.config.admin.state import ConfigInputValue
 from free_claude_code.config.admin.status import provider_config_status
 from free_claude_code.config.admin.values import load_value_state
-from free_claude_code.config.env_files import (
-    ANTHROPIC_AUTH_TOKEN_ENV,
-    process_env_key_is_effective,
-)
+from free_claude_code.config.loader import clear_settings_cache
 from free_claude_code.config.model_refs import parse_provider_type
 from free_claude_code.config.paths import messaging_state_dir_path
 from free_claude_code.config.server_urls import local_admin_url, local_proxy_root_url
-from free_claude_code.config.settings import Settings, get_settings
+from free_claude_code.config.settings import Settings
+from free_claude_code.core.json_types import JsonObject
 from free_claude_code.messaging.platforms import factory as messaging_platform_factory
 from free_claude_code.messaging.platforms.factory import MessagingPlatformOptions
 from free_claude_code.messaging.platforms.ports import (
@@ -49,10 +48,14 @@ from .provider_manager import ProviderRuntimeManager
 
 RestartCallback = Callable[[], Awaitable[None] | None]
 
+_PROVIDER_CHECK_FAILURE_MESSAGE = (
+    "Could not refresh this provider's models. Verify its configuration and access."
+)
+
 
 async def best_effort(
     name: str,
-    awaitable: Awaitable[Any],
+    awaitable: Awaitable[object],
     *,
     log_verbose_errors: bool = False,
 ) -> bool:
@@ -83,18 +86,6 @@ async def best_effort(
     return True
 
 
-def warn_if_process_auth_token(settings: Settings) -> None:
-    """Warn when server auth was implicitly inherited from the shell."""
-    model_config = getattr(settings, "model_config", Settings.model_config)
-    if process_env_key_is_effective(model_config, ANTHROPIC_AUTH_TOKEN_ENV):
-        logger.warning(
-            "ANTHROPIC_AUTH_TOKEN is set in the process environment but not in "
-            "a configured .env file. The proxy will require that token. Add "
-            "ANTHROPIC_AUTH_TOKEN= to .env to disable proxy auth, or set the "
-            "same token in .env to make server auth explicit."
-        )
-
-
 def startup_failure_message(settings: Settings, exc: Exception) -> str:
     """Return the existing concise ASGI startup failure message."""
     if isinstance(exc, ApplicationUnavailableError):
@@ -112,10 +103,12 @@ class ApplicationRuntime:
         provider_manager: ProviderRuntimeManager,
         *,
         transcriber: Transcriber | None,
+        chat_service: ChatService | None = None,
         restart_callback: RestartCallback | None = None,
         connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
     ) -> None:
         self.provider_manager = provider_manager
+        self._chat_service = chat_service
         self._transcriber = transcriber
         self._restart_callback = restart_callback
         self._connected_accounts = dict(connected_accounts or {})
@@ -150,9 +143,10 @@ class ApplicationRuntime:
             return
         logger.info("Starting Claude Code Proxy...")
         try:
-            warn_if_process_auth_token(self.settings)
             await self.provider_manager.warm_referenced_model_cache()
             self.provider_manager.start_model_list_refresh()
+            if self._chat_service is not None:
+                await self._chat_service.start()
             await self._start_messaging_if_configured()
             logging.getLogger("uvicorn.error").info(
                 "Admin UI: %s (local-only)",
@@ -187,8 +181,8 @@ class ApplicationRuntime:
 
     async def apply_admin_config(
         self,
-        updates: Mapping[str, Any],
-    ) -> dict[str, Any]:
+        updates: Mapping[str, ConfigInputValue],
+    ) -> JsonObject:
         """Apply one validated config update without splitting runtime ownership."""
         async with self._config_lock:
             prepared = prepare_admin_update(updates)
@@ -208,7 +202,7 @@ class ApplicationRuntime:
                 )
                 return result
 
-            result: dict[str, Any] = {}
+            result: JsonObject = {}
 
             def commit() -> None:
                 result.update(self._commit_admin_update(prepared))
@@ -222,7 +216,7 @@ class ApplicationRuntime:
             result["restart"] = self._restart_metadata((), prepared.settings)
             return result
 
-    def admin_status(self) -> dict[str, Any]:
+    def admin_status(self) -> JsonObject:
         settings = self.settings
         return {
             "status": "running",
@@ -238,16 +232,21 @@ class ApplicationRuntime:
             },
         }
 
-    async def test_provider(self, provider_id: str) -> dict[str, Any]:
+    async def test_provider(self, provider_id: str) -> JsonObject:
         lease = await self.provider_manager.acquire()
         try:
             provider = lease.resolve_provider(provider_id)
             infos = await provider.list_model_infos()
         except Exception as exc:
+            logger.warning(
+                "Admin provider check failed: provider={} exc_type={}",
+                provider_id,
+                type(exc).__name__,
+            )
             return {
                 "provider_id": provider_id,
                 "ok": False,
-                "error_type": type(exc).__name__,
+                "message": _PROVIDER_CHECK_FAILURE_MESSAGE,
             }
         finally:
             await lease.release()
@@ -325,16 +324,16 @@ class ApplicationRuntime:
     def _commit_admin_update(
         self,
         prepared: PreparedAdminUpdate,
-    ) -> dict[str, Any]:
+    ) -> JsonObject:
         result = commit_prepared_admin_update(prepared)
-        get_settings.cache_clear()
+        clear_settings_cache()
         return result
 
     def _restart_metadata(
         self,
         fields: tuple[str, ...],
         settings: Settings,
-    ) -> dict[str, Any]:
+    ) -> JsonObject:
         automatic = bool(fields and self._restart_callback is not None)
         return {
             "required": bool(fields),
@@ -411,7 +410,7 @@ class ApplicationRuntime:
             workspace_path=workspace,
             proxy_root_url=local_proxy_root_url(settings),
             allowed_dirs=allowed_dirs,
-            auth_token=settings.anthropic_auth_token,
+            auth_token=settings.proxy_auth_token,
             log_raw_cli_diagnostics=settings.log_raw_cli_diagnostics,
             log_messaging_error_details=settings.log_messaging_error_details,
         )
@@ -442,9 +441,15 @@ class ApplicationRuntime:
     async def _close_owned_resources(self) -> bool:
         if not await self._cleanup_messaging():
             return False
+        verbose = self.settings.log_api_error_tracebacks
+        if self._chat_service is not None and not await best_effort(
+            "chat_service.close",
+            self._chat_service.close(),
+            log_verbose_errors=verbose,
+        ):
+            return False
         if not await self._cleanup_transcriber():
             return False
-        verbose = self.settings.log_api_error_tracebacks
         if not self._provider_manager_closed:
             self._provider_manager_closed = await best_effort(
                 "provider_manager.close",

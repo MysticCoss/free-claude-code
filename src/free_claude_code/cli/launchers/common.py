@@ -18,6 +18,13 @@ PROXY_PREFLIGHT_PATH = "/health"
 PROXY_PREFLIGHT_TIMEOUT_SECONDS = 1.5
 
 
+def proxy_v1_url(proxy_root_url: str) -> str:
+    """Return the canonical local proxy API root for client launchers."""
+
+    stripped = proxy_root_url.rstrip("/")
+    return stripped if stripped.endswith("/v1") else f"{stripped}/v1"
+
+
 def preflight_proxy(proxy_root_url: str) -> str | None:
     """Return an error message when the local proxy health check is unreachable."""
 
@@ -27,7 +34,7 @@ def preflight_proxy(proxy_root_url: str) -> str | None:
         with open_local_request(
             request, timeout=PROXY_PREFLIGHT_TIMEOUT_SECONDS
         ) as response:
-            status_code = response.getcode()
+            status_code = response.status
     except HTTPError as exc:
         return f"returned HTTP {exc.code}"
     except URLError as exc:

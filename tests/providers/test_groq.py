@@ -4,11 +4,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.provider_catalog import GROQ_DEFAULT_BASE
-from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.groq import GroqProvider
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import immediate_admission
+from tests.providers.support import (
+    immediate_admission,
+    make_provider_config,
+)
 
 
 def make_request(**overrides):
@@ -17,7 +20,7 @@ def make_request(**overrides):
 
 @pytest.fixture
 def groq_config():
-    return ProviderConfig(
+    return make_provider_config(
         api_key="test_groq_key",
         base_url=GROQ_DEFAULT_BASE,
         rate_limit=10,
@@ -43,6 +46,36 @@ def test_init(groq_config):
 
 def test_default_base_url_constant():
     assert GROQ_DEFAULT_BASE == "https://api.groq.com/openai/v1"
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_extracts_documented_token_limits(groq_provider) -> None:
+    with patch.object(
+        groq_provider,
+        "_list_models_payload",
+        new=AsyncMock(
+            return_value={
+                "data": [
+                    {
+                        "id": "model",
+                        "context_window": 131072,
+                        "max_completion_tokens": 8192,
+                    }
+                ]
+            }
+        ),
+    ):
+        infos = await groq_provider.list_model_infos()
+
+    assert infos == frozenset(
+        {
+            ProviderModelInfo(
+                "model",
+                context_window_tokens=131072,
+                max_output_tokens=8192,
+            )
+        }
+    )
 
 
 def test_build_request_body_basic(groq_provider):
@@ -107,7 +140,7 @@ def test_build_request_body_replays_reasoning_as_tagged_content(groq_provider):
 
 def test_build_request_body_global_disable_blocks_reasoning_mapping():
     provider = GroqProvider(
-        ProviderConfig(
+        make_provider_config(
             api_key="test_groq_key",
             base_url=GROQ_DEFAULT_BASE,
             rate_limit=10,
@@ -182,7 +215,7 @@ def test_build_request_body_preserves_caller_extra_body(groq_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_text(groq_provider):
+async def test_stream_messages_text(groq_provider):
     """Text content deltas are emitted as text blocks."""
     req = make_request()
 
@@ -207,7 +240,7 @@ async def test_stream_response_text(groq_provider):
     ) as mock_create:
         mock_create.return_value = mock_stream()
 
-        events = [event async for event in groq_provider.stream_response(req)]
+        events = [event async for event in groq_provider.stream_messages(req)]
 
         assert any(
             '"text_delta"' in event and "Hello back!" in event for event in events
@@ -215,7 +248,7 @@ async def test_stream_response_text(groq_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning_content(groq_provider):
+async def test_stream_messages_reasoning_content(groq_provider):
     """reasoning_content deltas are emitted as thinking blocks."""
     req = make_request()
 
@@ -240,7 +273,7 @@ async def test_stream_response_reasoning_content(groq_provider):
     ) as mock_create:
         mock_create.return_value = mock_stream()
 
-        events = [event async for event in groq_provider.stream_response(req)]
+        events = [event async for event in groq_provider.stream_messages(req)]
 
         assert any(
             '"thinking_delta"' in event and "Thinking..." in event for event in events

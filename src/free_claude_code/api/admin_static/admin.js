@@ -1,14 +1,14 @@
 const state = {
   config: null,
   fields: new Map(),
-  localStatus: new Map(),
   modelOptions: [],
   modelComboboxes: new Set(),
   authPollers: new Map(),
-  activeView: "providers",
+  activeView: window.location.pathname.startsWith("/admin/chat") ? "chat" : "providers",
 };
 
 const MASKED_SECRET = "********";
+const NULL_VALUE = "__FCC_NULL__";
 const VIEW_GROUPS = [
   {
     id: "providers",
@@ -31,6 +31,13 @@ const VIEW_GROUPS = [
     sections: ["messaging", "voice"],
     containerId: "messagingSections",
   },
+  {
+    id: "chat",
+    label: "Chat Sessions",
+    title: "Chat Sessions",
+    sections: [],
+    containerId: "chatRoot",
+  },
 ];
 
 const byId = (id) => document.getElementById(id);
@@ -38,10 +45,7 @@ const byId = (id) => document.getElementById(id);
 function sourceLabel(source) {
   const labels = {
     default: "default",
-    template: "template",
-    repo_env: "repo .env",
     managed_env: "",
-    explicit_env_file: "FCC_ENV_FILE",
     process: "process env",
   };
   return Object.prototype.hasOwnProperty.call(labels, source) ? labels[source] : source;
@@ -80,7 +84,9 @@ async function api(path, options = {}) {
     } catch {
       // The status remains useful when an upstream proxy returns a non-JSON page.
     }
-    throw new Error(detail || `${response.status} ${response.statusText}`);
+    const error = new Error(detail || `${response.status} ${response.statusText}`);
+    error.status = response.status;
+    throw error;
   }
   return response.json();
 }
@@ -94,10 +100,12 @@ async function load() {
   renderProviders(config.provider_status);
   renderSections(config.sections, config.fields);
   byId("configPath").textContent = config.paths.managed;
-  await refreshConnectedAccounts();
-  await hydrateModelOptions();
-  await validate(false);
-  await refreshLocalStatus();
+  await Promise.all([
+    refreshConnectedAccounts(),
+    hydrateModelOptions(),
+    refreshLocalStatus(),
+    window.ChatSessions ? window.ChatSessions.initialize(api) : Promise.resolve(),
+  ]);
   updateDirtyState();
   showMessage("");
 }
@@ -115,7 +123,7 @@ function renderNav() {
       button.setAttribute("aria-current", "page");
     }
     button.addEventListener("click", () => {
-      setActiveView(view.id, { scroll: true });
+      navigateToView(view.id);
     });
     nav.appendChild(button);
   });
@@ -127,6 +135,11 @@ function setActiveView(viewId, { scroll = false } = {}) {
     VIEW_GROUPS.find((view) => view.id === viewId) || VIEW_GROUPS[0];
   state.activeView = activeView.id;
   byId("pageTitle").textContent = activeView.title;
+  const chatActive = activeView.id === "chat";
+  document.querySelector(".app-shell").classList.toggle("chat-active", chatActive);
+  document.querySelector(".main").classList.toggle("chat-main", chatActive);
+  document.querySelector(".topbar").hidden = chatActive;
+  document.querySelector(".action-bar").hidden = chatActive;
 
   document.querySelectorAll(".nav-link").forEach((link) => {
     const selected = link.dataset.view === activeView.id;
@@ -147,6 +160,20 @@ function setActiveView(viewId, { scroll = false } = {}) {
   if (scroll) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  if (chatActive && window.ChatSessions) {
+    window.ChatSessions.activate(window.location.pathname);
+  }
+}
+
+function navigateToView(viewId) {
+  if (viewId === "chat") {
+    if (window.location.pathname !== "/admin/chat") {
+      window.history.pushState({}, "", "/admin/chat");
+    }
+  } else if (window.location.pathname.startsWith("/admin/chat")) {
+    window.history.pushState({}, "", "/admin");
+  }
+  setActiveView(viewId, { scroll: true });
 }
 
 function renderProviders(providerStatus) {
@@ -169,12 +196,13 @@ function renderProviders(providerStatus) {
 
     const title = document.createElement("div");
     title.className = "provider-title";
-    title.innerHTML = `<strong>${provider.display_name || provider.provider_id}</strong>`;
+    const name = document.createElement("strong");
+    name.textContent = provider.display_name || provider.provider_id;
 
     const pill = document.createElement("span");
     pill.className = `status-pill ${statusClass(provider.status)}`;
     pill.textContent = provider.label;
-    title.appendChild(pill);
+    title.append(name, pill);
 
     const prefix = document.createElement("div");
     prefix.className = "provider-prefix";
@@ -182,20 +210,74 @@ function renderProviders(providerStatus) {
 
     const meta = document.createElement("div");
     meta.className = "provider-meta";
-    meta.textContent =
-      provider.kind === "local"
-        ? provider.base_url || "No local URL configured"
-        : provider.configuration;
+    const configurationKeys = Array.isArray(provider.configuration_keys)
+      ? provider.configuration_keys
+      : [];
+    const missingConfigurationKeys = Array.isArray(
+      provider.missing_configuration_keys,
+    )
+      ? provider.missing_configuration_keys
+      : [];
+    meta.textContent = configurationKeys.join(" + ");
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "test-button";
-    button.textContent = provider.kind === "local" ? "Test" : "Refresh models";
-    button.addEventListener("click", () => testProvider(provider.provider_id, button));
+    const result = document.createElement("div");
+    result.className = "provider-check-result";
+    result.dataset.providerCheckResult = provider.provider_id;
+    result.setAttribute("aria-live", "polite");
+    result.hidden = true;
 
-    card.append(title, prefix, meta, button);
+    const actions = document.createElement("div");
+    actions.className = "provider-actions";
+    if (configurationKeys.length) {
+      const configuring = missingConfigurationKeys.length > 0;
+      actions.appendChild(
+        providerActionButton(configuring ? "Configure" : "Edit", () =>
+          navigateToProviderConfiguration(provider, configuring),
+        ),
+      );
+    }
+
+    if (missingConfigurationKeys.length === 0) {
+      const button = providerActionButton(
+        provider.kind === "local" ? "Test" : "Refresh models",
+        () => testProvider(provider.provider_id, button),
+        "secondary-button",
+      );
+      actions.appendChild(button);
+    }
+
+    card.append(title, prefix, meta, result, actions);
     grid.appendChild(card);
   });
+}
+
+function providerActionButton(label, action, className = "test-button") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener("click", action);
+  return button;
+}
+
+function navigateToProviderConfiguration(provider, configuring) {
+  const keys = configuring
+    ? provider.missing_configuration_keys
+    : provider.configuration_keys;
+  const fieldKey = Array.isArray(keys) ? keys[0] : null;
+  const input = fieldKey ? byId(`field-${fieldKey}`) : null;
+  if (!input) {
+    showMessage("Provider configuration field is unavailable.", "error");
+    return;
+  }
+  const reducedMotion = window.matchMedia(
+    "(prefers-reduced-motion: reduce)",
+  ).matches;
+  input.scrollIntoView({
+    behavior: reducedMotion ? "instant" : "smooth",
+    block: "center",
+  });
+  input.focus({ preventScroll: true });
 }
 
 function renderConnectedAccountCard(provider, status = provider) {
@@ -422,15 +504,13 @@ async function copyDeviceCode(code) {
   }
 }
 
-function updateProviderCard(providerId, status, label, metaText) {
+function updateProviderCheckResult(providerId, status, message) {
   const card = document.querySelector(`[data-provider="${providerId}"]`);
   if (!card) return;
-  const pill = card.querySelector(".status-pill");
-  pill.className = `status-pill ${statusClass(status)}`;
-  pill.textContent = label;
-  if (metaText) {
-    card.querySelector(".provider-meta").textContent = metaText;
-  }
+  const result = card.querySelector(".provider-check-result");
+  result.className = `provider-check-result ${status}`;
+  result.textContent = message;
+  result.hidden = !message;
 }
 
 function renderSections(sections, fields) {
@@ -517,13 +597,18 @@ function renderField(field) {
   const input = inputForField(field);
   input.id = `field-${field.key}`;
   input.dataset.key = field.key;
-  input.dataset.original = field.value || "";
+  input.dataset.original = comparableValue(field.value);
   input.dataset.secret = field.secret ? "true" : "false";
   input.dataset.configured = field.configured ? "true" : "false";
+  input.dataset.nullable = field.nullable ? "true" : "false";
+  input.dataset.remove = "false";
   input.dataset.fieldType = field.type;
   input.disabled = field.locked;
   input.addEventListener("input", updateDirtyState);
   input.addEventListener("change", updateDirtyState);
+  input.addEventListener("input", () => {
+    input.dataset.remove = "false";
+  });
   if (field.type === "optional_model") {
     input.addEventListener("blur", () => {
       if (!input.value.trim() || input.value.trim().toLowerCase() === "none") {
@@ -533,11 +618,29 @@ function renderField(field) {
     });
   }
 
-  const control =
-    field.type === "model" || field.type === "optional_model"
-      ? new ModelCombobox(input, field).element
-      : input;
+  let control = input;
+  if (field.type === "model" || field.type === "optional_model") {
+    control = createModelCombobox(input, field).element;
+  } else if (field.type === "model_list") {
+    const editor = new ModelListEditor(input, field);
+    label.htmlFor = editor.inputId;
+    control = editor.element;
+  }
   wrapper.append(label, control);
+  if (field.secret && field.nullable && field.configured && !field.locked) {
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "ghost-button secret-remove";
+    removeButton.textContent = "Remove";
+    removeButton.addEventListener("click", () => {
+      const removing = input.dataset.remove !== "true";
+      input.dataset.remove = removing ? "true" : "false";
+      input.readOnly = removing;
+      removeButton.textContent = removing ? "Undo removal" : "Remove";
+      updateDirtyState();
+    });
+    wrapper.appendChild(removeButton);
+  }
   if (field.description) {
     const description = document.createElement("div");
     description.className = "field-description";
@@ -579,6 +682,13 @@ function inputForField(field) {
     return input;
   }
 
+  if (field.type === "model_list") {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.value = field.value || "";
+    return input;
+  }
+
   const input = document.createElement("input");
   input.type = field.type === "number" ? "number" : "text";
   if (field.type === "secret") {
@@ -594,183 +704,145 @@ function inputForField(field) {
   return input;
 }
 
-class ModelCombobox {
+function createModelCombobox(input, field) {
+  return new window.FccModelCombobox(input, {
+    listboxId: `model-options-${field.key}`,
+    label: field.label,
+    values: () =>
+      field.type === "optional_model"
+        ? ["None", ...state.modelOptions]
+        : state.modelOptions,
+    emptyMessage: () =>
+      state.modelOptions.length
+        ? "No matching models. You can still enter a custom slug."
+        : "No discovered models. Refresh models or enter a custom slug.",
+    registry: state.modelComboboxes,
+  });
+}
+
+class ModelListEditor {
   constructor(input, field) {
     this.input = input;
-    this.fieldType = field.type;
-    this.activeIndex = -1;
-    this.query = "";
+    this.field = field;
+    this.values = input.value
+      ? input.value.split(",").map((value) => value.trim()).filter(Boolean)
+      : [];
+    this.inputId = `field-${field.key}-add`;
 
     this.element = document.createElement("div");
-    this.element.className = "model-combobox";
-    this.listbox = document.createElement("div");
-    this.listbox.className = "model-combobox-list";
-    this.listbox.id = `model-options-${field.key}`;
-    this.listbox.setAttribute("role", "listbox");
-    this.listbox.hidden = true;
-    this.toggle = document.createElement("button");
-    this.toggle.type = "button";
-    this.toggle.className = "model-combobox-toggle";
-    this.toggle.disabled = input.disabled;
-    this.toggle.setAttribute("aria-label", `Show ${field.label} options`);
+    this.element.className = "model-list-editor";
 
-    input.setAttribute("role", "combobox");
-    input.setAttribute("aria-autocomplete", "list");
-    input.setAttribute("aria-haspopup", "listbox");
-    for (const control of [input, this.toggle]) {
-      control.setAttribute("aria-controls", this.listbox.id);
-      control.setAttribute("aria-expanded", "false");
+    const addRow = document.createElement("div");
+    addRow.className = "model-list-add";
+    this.addInput = document.createElement("input");
+    this.addInput.id = this.inputId;
+    this.addInput.type = "text";
+    this.addInput.autocomplete = "off";
+    this.addInput.placeholder = "provider/model";
+    this.addInput.disabled = field.locked;
+    const addCombobox = createModelCombobox(this.addInput, {
+      ...field,
+      key: `${field.key}-add`,
+      label: "fallback model",
+      type: "model",
+    });
+
+    this.addButton = document.createElement("button");
+    this.addButton.type = "button";
+    this.addButton.className = "secondary-button";
+    this.addButton.textContent = "Add";
+    this.addButton.disabled = field.locked;
+    this.addButton.addEventListener("click", () => this.add());
+    addRow.append(addCombobox.element, this.addButton);
+
+    this.rows = document.createElement("div");
+    this.rows.className = "model-list-rows";
+    this.element.append(input, addRow, this.rows);
+    this.renderRows();
+  }
+
+  add() {
+    const value = this.addInput.value.trim();
+    if (!value) {
+      showMessage("Enter a full provider/model fallback.", "error");
+      return;
     }
-
-    input.addEventListener("click", () => this.open());
-    input.addEventListener("input", () => this.open(input.value));
-    input.addEventListener("keydown", (event) => this.handleKeydown(event));
-    this.toggle.addEventListener("mousedown", (event) => event.preventDefault());
-    this.toggle.addEventListener("click", () => {
-      if (this.isOpen) this.close();
-      else this.open();
-      input.focus();
-    });
-    this.listbox.addEventListener("mousedown", (event) => event.preventDefault());
-    this.listbox.addEventListener("mousemove", (event) => {
-      const optionEl = event.target.closest('[role="option"]');
-      if (optionEl) this.setActive(this.visibleOptions.indexOf(optionEl));
-    });
-    this.listbox.addEventListener("click", (event) => {
-      const optionEl = event.target.closest('[role="option"]');
-      if (optionEl) this.select(optionEl.dataset.value);
-    });
-
-    this.element.append(input, this.toggle, this.listbox);
-    state.modelComboboxes.add(this);
-  }
-
-  get isOpen() {
-    return this.element.classList.contains("open");
-  }
-
-  get values() {
-    return this.fieldType === "optional_model"
-      ? ["None", ...state.modelOptions]
-      : state.modelOptions;
-  }
-
-  get visibleOptions() {
-    return Array.from(this.listbox.querySelectorAll('[role="option"]'));
-  }
-
-  open(query = "") {
-    if (this.input.disabled) return;
-    state.modelComboboxes.forEach((combobox) => {
-      if (combobox !== this) combobox.close();
-    });
-    this.render(query);
-    this.element.classList.add("open");
-    this.listbox.hidden = false;
-    this.setExpanded(true);
-  }
-
-  close() {
-    this.element.classList.remove("open");
-    this.listbox.hidden = true;
-    this.activeIndex = -1;
-    this.input.removeAttribute("aria-activedescendant");
-    this.setExpanded(false);
-  }
-
-  setExpanded(expanded) {
-    for (const control of [this.input, this.toggle]) {
-      control.setAttribute("aria-expanded", String(expanded));
+    if (this.values.includes(value)) {
+      showMessage("That fallback model is already in the list.", "error");
+      return;
     }
+    this.values.push(value);
+    this.addInput.value = "";
+    showMessage("");
+    this.sync();
   }
 
-  render(query) {
-    this.query = query;
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    const values = normalizedQuery
-      ? this.values.filter((value) =>
-          value.toLocaleLowerCase().includes(normalizedQuery),
-        )
-      : this.values;
-    this.listbox.innerHTML = "";
+  move(index, offset) {
+    const destination = index + offset;
+    if (destination < 0 || destination >= this.values.length) return;
+    [this.values[index], this.values[destination]] = [
+      this.values[destination],
+      this.values[index],
+    ];
+    this.sync();
+  }
 
-    if (values.length === 0) {
+  remove(index) {
+    this.values.splice(index, 1);
+    this.sync();
+  }
+
+  sync() {
+    this.input.value = this.values.join(",");
+    this.input.dataset.remove = "false";
+    this.input.dispatchEvent(new Event("input", { bubbles: true }));
+    this.renderRows();
+  }
+
+  renderRows() {
+    this.rows.innerHTML = "";
+    if (this.values.length === 0) {
       const empty = document.createElement("div");
-      empty.className = "model-combobox-empty";
-      empty.textContent = state.modelOptions.length
-        ? "No matching models. You can still enter a custom slug."
-        : "No discovered models. Refresh models or enter a custom slug.";
-      this.listbox.appendChild(empty);
-      this.activeIndex = -1;
-      this.input.removeAttribute("aria-activedescendant");
+      empty.className = "model-list-empty";
+      empty.textContent = "No fallback models configured.";
+      this.rows.appendChild(empty);
       return;
     }
 
-    values.forEach((value, index) => {
-      const optionEl = document.createElement("div");
-      optionEl.className = "model-combobox-option";
-      optionEl.id = `${this.listbox.id}-option-${index}`;
-      optionEl.dataset.value = value;
-      optionEl.setAttribute("role", "option");
-      optionEl.textContent = value;
-      this.listbox.appendChild(optionEl);
+    this.values.forEach((value, index) => {
+      const row = document.createElement("div");
+      row.className = "model-list-row";
+
+      const model = document.createElement("span");
+      model.className = "model-list-value";
+      model.textContent = value;
+
+      const up = this.actionButton("Move up", `Move ${value} up`, () =>
+        this.move(index, -1),
+      );
+      up.disabled = this.field.locked || index === 0;
+      const down = this.actionButton("Move down", `Move ${value} down`, () =>
+        this.move(index, 1),
+      );
+      down.disabled = this.field.locked || index === this.values.length - 1;
+      const remove = this.actionButton("Remove", `Remove ${value}`, () =>
+        this.remove(index),
+      );
+      remove.disabled = this.field.locked;
+
+      row.append(model, up, down, remove);
+      this.rows.appendChild(row);
     });
-    const selectedIndex = values.indexOf(this.input.value);
-    this.setActive(selectedIndex >= 0 ? selectedIndex : 0, false);
   }
 
-  setActive(index, scroll = true) {
-    const options = this.visibleOptions;
-    if (options.length === 0) return;
-    this.activeIndex = Math.max(0, Math.min(index, options.length - 1));
-    options.forEach((optionEl, optionIndex) => {
-      const active = optionIndex === this.activeIndex;
-      optionEl.classList.toggle("active", active);
-      optionEl.setAttribute("aria-selected", String(active));
-    });
-    const activeOption = options[this.activeIndex];
-    this.input.setAttribute("aria-activedescendant", activeOption.id);
-    if (scroll) activeOption.scrollIntoView({ block: "nearest" });
-  }
-
-  move(offset) {
-    const count = this.visibleOptions.length;
-    if (count) this.setActive((this.activeIndex + offset + count) % count);
-  }
-
-  select(value) {
-    this.input.value = value;
-    this.input.dispatchEvent(new Event("change", { bubbles: true }));
-    this.close();
-    this.input.focus();
-  }
-
-  handleKeydown(event) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      if (this.isOpen) {
-        this.move(event.key === "ArrowDown" ? 1 : -1);
-      } else {
-        this.open();
-        if (event.key === "ArrowUp") {
-          this.setActive(this.visibleOptions.length - 1);
-        }
-      }
-    } else if (this.isOpen && (event.key === "Home" || event.key === "End")) {
-      event.preventDefault();
-      this.setActive(event.key === "Home" ? 0 : this.visibleOptions.length - 1);
-    } else if (this.isOpen && event.key === "Enter") {
-      const active = this.visibleOptions[this.activeIndex];
-      if (active) {
-        event.preventDefault();
-        this.select(active.dataset.value);
-      }
-    } else if (this.isOpen && event.key === "Escape") {
-      event.preventDefault();
-      this.close();
-    } else if (this.isOpen && event.key === "Tab") {
-      this.close();
-    }
+  actionButton(text, label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button model-list-action";
+    button.textContent = text;
+    button.setAttribute("aria-label", label);
+    button.addEventListener("click", action);
+    return button;
   }
 }
 
@@ -783,16 +855,22 @@ function option(value, label) {
 
 function readFieldValue(input) {
   if (input.type === "checkbox") return input.checked ? "true" : "false";
+  if (input.dataset.remove === "true") return null;
   if (
     input.dataset.fieldType === "optional_model" &&
     input.value.trim().toLowerCase() === "none"
   ) {
-    return "";
+    return null;
   }
   if (input.dataset.secret === "true" && input.dataset.configured === "true") {
     return input.value ? input.value : MASKED_SECRET;
   }
+  if (input.dataset.nullable === "true" && !input.value.trim()) return null;
   return input.value;
+}
+
+function comparableValue(value) {
+  return value === null ? NULL_VALUE : String(value);
 }
 
 function changedValues() {
@@ -800,7 +878,7 @@ function changedValues() {
   document.querySelectorAll("[data-key]").forEach((input) => {
     if (input.disabled || !input.matches("input, select, textarea")) return;
     const value = readFieldValue(input);
-    if (value !== input.dataset.original) {
+    if (comparableValue(value) !== input.dataset.original) {
       values[input.dataset.key] = value;
     }
   });
@@ -814,32 +892,13 @@ function updateDirtyState() {
   byId("applyButton").disabled = count === 0;
 }
 
-async function validate(showResult = true) {
-  const result = await api("/admin/api/config/validate", {
-    method: "POST",
-    body: JSON.stringify({ values: changedValues() }),
-  });
-  if (showResult) {
-    showValidationResult(result);
-  }
-  return result;
-}
-
-function showValidationResult(result) {
-  if (result.valid) {
-    showMessage("Config shape is valid", "ok");
-  } else {
-    showMessage(result.errors.join("; "), "error");
-  }
-}
-
 async function apply() {
   const result = await api("/admin/api/config/apply", {
     method: "POST",
     body: JSON.stringify({ values: changedValues() }),
   });
   if (!result.applied) {
-    showValidationResult(result);
+    showMessage(result.errors.join("; "), "error");
     return;
   }
   const restart = result.restart || {};
@@ -864,37 +923,61 @@ async function apply() {
 async function refreshLocalStatus() {
   const result = await api("/admin/api/providers/local-status");
   result.providers.forEach((provider) => {
-    state.localStatus.set(provider.provider_id, provider);
-    const meta = provider.status_code
-      ? `${provider.base_url} returned HTTP ${provider.status_code}`
-      : provider.base_url;
-    updateProviderCard(provider.provider_id, provider.status, provider.label, meta);
+    if (provider.status === "missing_url") return;
+    if (provider.status === "reachable") {
+      updateProviderCheckResult(
+        provider.provider_id,
+        "ok",
+        `Reachable: ${provider.base_url}`,
+      );
+      return;
+    }
+    const detail = provider.message
+      ? provider.message
+      : provider.status_code
+        ? `${provider.base_url} returned HTTP ${provider.status_code}`
+        : "The local provider did not respond.";
+    updateProviderCheckResult(
+      provider.provider_id,
+      "error",
+      `Unavailable: ${detail}`,
+    );
   });
 }
 
 async function testProvider(providerId, button) {
   const original = button.textContent;
   button.disabled = true;
-  button.textContent = "Testing";
+  button.textContent = "Checking...";
+  updateProviderCheckResult(providerId, "checking", "Checking...");
   try {
     const result = await api(`/admin/api/providers/${providerId}/test`, {
       method: "POST",
       body: "{}",
     });
     if (result.ok) {
-      updateProviderCard(
+      updateProviderCheckResult(
         providerId,
-        "reachable",
-        `${result.models.length} models`,
-        result.models.slice(0, 3).join(", ") || "No models returned",
+        "ok",
+        `${result.models.length} models available`,
       );
       setModelOptions([
         ...state.modelOptions,
         ...result.models.map((model) => `${providerId}/${model}`),
       ]);
     } else {
-      updateProviderCard(providerId, "offline", result.error_type, result.error_type);
+      updateProviderCheckResult(
+        providerId,
+        "error",
+        `Unavailable: ${result.message || "Provider check failed."}`,
+      );
     }
+  } catch {
+    updateProviderCheckResult(
+      providerId,
+      "error",
+      "Provider check could not be completed.",
+    );
   } finally {
     button.disabled = false;
     button.textContent = original;
@@ -914,6 +997,7 @@ async function loadModelOptions(refresh = false) {
     method: refresh ? "POST" : "GET",
   });
   setModelOptions(result.models);
+  if (refresh && window.ChatSessions) await window.ChatSessions.refresh();
   return result;
 }
 
@@ -963,12 +1047,18 @@ function showMessage(message, kind = "") {
   area.className = `message-area ${kind}`.trim();
 }
 
-byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);
 document.addEventListener("pointerdown", (event) => {
   state.modelComboboxes.forEach((combobox) => {
     if (combobox.isOpen && !combobox.element.contains(event.target)) combobox.close();
   });
+});
+
+window.addEventListener("popstate", () => {
+  const viewId = window.location.pathname.startsWith("/admin/chat")
+    ? "chat"
+    : "providers";
+  setActiveView(viewId, { scroll: false });
 });
 
 load().catch((error) => {

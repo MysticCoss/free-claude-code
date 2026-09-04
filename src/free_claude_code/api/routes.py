@@ -21,11 +21,16 @@ from free_claude_code.core.trace import (
 from .dependencies import (
     get_services,
     get_settings,
+    require_anthropic_proxy_auth,
     require_proxy_auth,
     resolve_provider,
 )
 from .handlers import MessagesHandler, ResponsesHandler, TokenCountHandler
-from .model_catalog import ModelsListResponse, build_models_list_response
+from .model_catalog import (
+    ModelCatalogView,
+    ModelsListResponse,
+    build_models_list_response,
+)
 from .ports import ApiServices
 from .request_errors import ordinary_application_error_response
 from .request_ids import get_request_id
@@ -110,7 +115,7 @@ async def create_message(
     request: Request,
     request_data: MessagesRequest,
     services: ApiServices = Depends(get_services),
-    _auth=Depends(require_proxy_auth),
+    _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Create a message (JSON by default; stream=true returns Anthropic SSE)."""
     session_id = extract_claude_session_id_from_headers(request.headers)
@@ -124,7 +129,7 @@ async def create_message(
 
 
 @router.api_route("/v1/messages", methods=["HEAD", "OPTIONS"])
-async def probe_messages(_auth=Depends(require_proxy_auth)):
+async def probe_messages(_auth=Depends(require_anthropic_proxy_auth)):
     return _probe_response("POST, HEAD, OPTIONS")
 
 
@@ -153,7 +158,7 @@ async def count_tokens(
     request: Request,
     request_data: TokenCountRequest,
     settings: Settings = Depends(get_settings),
-    _auth=Depends(require_proxy_auth),
+    _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Count tokens for a request."""
     handler = TokenCountHandler(settings, token_counter=get_token_count)
@@ -161,7 +166,7 @@ async def count_tokens(
 
 
 @router.api_route("/v1/messages/count_tokens", methods=["HEAD", "OPTIONS"])
-async def probe_count_tokens(_auth=Depends(require_proxy_auth)):
+async def probe_count_tokens(_auth=Depends(require_anthropic_proxy_auth)):
     return _probe_response("POST, HEAD, OPTIONS")
 
 
@@ -192,15 +197,39 @@ async def probe_health():
     return _probe_response("GET, HEAD, OPTIONS")
 
 
-@router.get("/v1/models", response_model=ModelsListResponse)
+@router.get(
+    "/v1/models",
+    response_model=ModelsListResponse,
+    response_model_exclude_none=True,
+)
 async def list_models(
+    view: ModelCatalogView = ModelCatalogView.CLAUDE,
     services: ApiServices = Depends(get_services),
     settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
-    return build_models_list_response(settings, services.requests)
+    return build_models_list_response(settings, services.requests, view=view)
+
+
+@router.get(
+    "/muse-code/models",
+    response_model=ModelsListResponse,
+    response_model_exclude_none=True,
+)
+async def list_muse_models(
+    services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
+    _auth=Depends(require_proxy_auth),
+):
+    """List the direct Responses models expected by Muse Code."""
+    trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
+    return build_models_list_response(
+        settings,
+        services.requests,
+        view=ModelCatalogView.RESPONSES,
+    )
 
 
 @router.post("/stop")

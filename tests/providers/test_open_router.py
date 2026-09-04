@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from free_claude_code.application.errors import InvalidRequestError
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.anthropic.stream_contracts import (
@@ -14,13 +15,14 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
-from free_claude_code.providers.base import ProviderConfig
+from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.providers.open_router import OpenRouterProvider
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     REASONING_OFF,
     immediate_admission,
+    make_provider_config,
     reasoning_for,
 )
 
@@ -48,7 +50,7 @@ def make_request(**overrides):
 @pytest.fixture
 def open_router_provider():
     return OpenRouterProvider(
-        ProviderConfig(
+        make_provider_config(
             api_key="test_openrouter_key",
             base_url="https://openrouter.ai/api/v1",
             rate_limit=10,
@@ -319,7 +321,7 @@ async def test_stream_maps_reasoning_content_and_details(open_router_provider):
     ):
         events = [
             event
-            async for event in open_router_provider.stream_response(make_request())
+            async for event in open_router_provider.stream_messages(make_request())
         ]
 
     event_text = "".join(events)
@@ -341,6 +343,17 @@ async def test_model_infos_filter_tool_models_and_thinking_metadata(
                 SimpleNamespace(
                     id="tool-model",
                     supported_parameters=["tools", "reasoning"],
+                    architecture=SimpleNamespace(input_modalities=["text", "image"]),
+                    context_length=262144,
+                    top_provider=SimpleNamespace(
+                        context_length=999999,
+                        max_completion_tokens=32768,
+                    ),
+                ),
+                SimpleNamespace(
+                    id="tool-model-with-malformed-capabilities",
+                    supported_parameters=["tools", 7],
+                    architecture=SimpleNamespace(input_modalities=["text"]),
                 ),
                 SimpleNamespace(id="plain-model", supported_parameters=[]),
             ]
@@ -349,9 +362,23 @@ async def test_model_infos_filter_tool_models_and_thinking_metadata(
 
     infos = await open_router_provider.list_model_infos()
 
-    assert {(info.model_id, info.supports_thinking) for info in infos} == {
-        ("tool-model", True)
-    }
+    assert infos == frozenset(
+        {
+            ProviderModelInfo(
+                "tool-model",
+                supports_thinking=True,
+                input_modalities=frozenset(
+                    {ModelInputModality.TEXT, ModelInputModality.IMAGE}
+                ),
+                context_window_tokens=262144,
+                max_output_tokens=32768,
+            ),
+            ProviderModelInfo(
+                "tool-model-with-malformed-capabilities",
+                input_modalities=frozenset({ModelInputModality.TEXT}),
+            ),
+        }
+    )
 
 
 @pytest.mark.asyncio

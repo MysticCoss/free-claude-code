@@ -14,13 +14,13 @@ from free_claude_code.config.constants import ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKEN
 from free_claude_code.config.provider_catalog import DEEPINFRA_DEFAULT_BASE
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
-from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.model_listing import ModelListResponseError
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.support import (
     REASONING_OFF,
     REASONING_ON,
     immediate_admission,
+    make_provider_config,
     profiled_provider,
     reasoning_for,
 )
@@ -64,7 +64,7 @@ def _catalog_model(
 def deepinfra_provider() -> OpenAIChatProvider:
     return profiled_provider(
         "deepinfra",
-        ProviderConfig(
+        make_provider_config(
             api_key="test-deepinfra-key",
             base_url=DEEPINFRA_DEFAULT_BASE,
             rate_limit=10,
@@ -279,7 +279,7 @@ async def test_model_catalog_uses_absolute_public_url() -> None:
     ):
         provider = profiled_provider(
             "deepinfra",
-            ProviderConfig(
+            make_provider_config(
                 api_key="wire-deepinfra-key",
                 base_url=DEEPINFRA_DEFAULT_BASE,
                 rate_limit=10,
@@ -313,8 +313,6 @@ async def test_model_catalog_uses_absolute_public_url() -> None:
         ([_catalog_model(reported_type=_MISSING)], "include reported_type as str"),
         ([_catalog_model(reported_type=7)], "include reported_type as str"),
         ([_catalog_model(deprecated=_MISSING)], "include deprecated"),
-        ([_catalog_model(tags=_MISSING)], "include tags string array"),
-        ([_catalog_model(tags=[7])], "include tags string array"),
         ([], "did not include any model ids"),
         (
             [_catalog_model("image", reported_type="text-to-image")],
@@ -336,6 +334,19 @@ async def test_rejects_malformed_or_unusable_catalog_atomically(
 
     with pytest.raises(ModelListResponseError, match=message):
         await deepinfra_provider.list_model_infos()
+
+
+@pytest.mark.parametrize("tags", [_MISSING, None, [7], "reasoning"])
+@pytest.mark.asyncio
+async def test_malformed_optional_tags_leave_reasoning_unknown(
+    deepinfra_provider: OpenAIChatProvider,
+    tags: object,
+) -> None:
+    deepinfra_provider._client.get = AsyncMock(return_value=[_catalog_model(tags=tags)])
+
+    assert await deepinfra_provider.list_model_infos() == frozenset(
+        {ProviderModelInfo("model")}
+    )
 
 
 @pytest.mark.asyncio

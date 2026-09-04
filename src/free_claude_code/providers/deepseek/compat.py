@@ -39,10 +39,23 @@ _UNSUPPORTED_MESSAGE_BLOCK_TYPES = frozenset(
     }
 )
 _STRIPPABLE_MESSAGE_BLOCK_TYPES = frozenset({"image", "document"})
+_FORWARDABLE_ATTACHMENT_BLOCK_TYPES = frozenset({"image"})
 _OMITTED_ATTACHMENT_TEXT = (
     "[attachment omitted: DeepSeek does not support image or document inputs]"
 )
 _OMITTED_ATTACHMENT_BLOCK = {"type": "text", "text": _OMITTED_ATTACHMENT_TEXT}
+
+
+def _is_vision_capable_model(model: str | None) -> bool:
+    """True when the DeepSeek model accepts OpenAI image parts.
+
+    DeepSeek's vision models (e.g. ``deepseek-v4-flash-vision-exp``) support
+    image inputs natively. Document blocks are still stripped because the
+    shared OpenAI conversion path has no document parts.
+    """
+    if not model:
+        return False
+    return "vision" in str(model).rsplit("/", 1)[-1].lower()
 
 
 def build_deepseek_request_body(
@@ -55,12 +68,13 @@ def build_deepseek_request_body(
         len(request_data.messages),
     )
 
+    vision_capable = _is_vision_capable_model(request_data.model)
     data = dump_messages_request(request_data)
     if "messages" in data:
-        data["messages"] = _strip_unsupported_attachment_blocks(data["messages"])
-    _validate_deepseek_request_dict(data)
-    _downgrade_forced_tool_choice(data)
-
+        data["messages"] = _strip_unsupported_attachment_blocks(
+            data["messages"], allow_attachments=vision_capable
+        )
+    _validate_deepseek_request_dict(data, allow_attachments=vision_capable)
     has_tool_history = _has_tool_history(data)
     has_replayable_tool_thinking = _all_tool_calls_have_replayable_thinking(data)
     unsafe_tool_followup = has_tool_history and not has_replayable_tool_thinking
@@ -103,10 +117,12 @@ def build_deepseek_request_body(
         sanitized_request,
         reasoning=effective_reasoning,
         policy=DEEPSEEK_REQUEST_POLICY,
-        postprocessors=(_apply_deepseek_chat_extras,),
+        postprocessors=(
+            lambda body, _request, _policy: finalize_deepseek_chat_body(
+                body, effective_reasoning
+            ),
+        ),
     )
-    if "max_tokens" not in body or body.get("max_tokens") is None:
-        body["max_tokens"] = ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 
     logger.debug(
         "DEEPSEEK_REQUEST: build done model={} msgs={} tools={}",
@@ -115,6 +131,76 @@ def build_deepseek_request_body(
         len(body.get("tools", [])),
     )
     return body
+
+
+def finalize_deepseek_chat_body(
+    body: dict[str, Any], reasoning: ReasoningPolicy
+) -> None:
+    """Apply source-independent DeepSeek policy to one Chat body."""
+    effective_reasoning = reasoning
+    if reasoning.control is not ReasoningControl.OFF:
+        has_tool_history = _has_chat_tool_history(body)
+        has_replayable_tool_thinking = _all_chat_tool_calls_have_reasoning(body)
+        if has_tool_history and not has_replayable_tool_thinking:
+            _remove_deepseek_thinking_hints(body)
+            effective_reasoning = ReasoningPolicy.off()
+
+    _downgrade_chat_forced_tool_choice(body)
+    _apply_deepseek_chat_extras(body, effective_reasoning)
+    if body.get("max_tokens") is None:
+        body["max_tokens"] = ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def _has_chat_tool_history(body: Mapping[str, Any]) -> bool:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(
+        isinstance(message, Mapping)
+        and (
+            message.get("role") == "tool"
+            or (
+                message.get("role") == "assistant"
+                and isinstance(message.get("tool_calls"), list)
+                and bool(message["tool_calls"])
+            )
+        )
+        for message in messages
+    )
+
+
+def _all_chat_tool_calls_have_reasoning(body: Mapping[str, Any]) -> bool:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    found_tool_call = False
+    for message in messages:
+        if (
+            not isinstance(message, Mapping)
+            or message.get("role") != "assistant"
+            or not isinstance(message.get("tool_calls"), list)
+            or not message["tool_calls"]
+        ):
+            continue
+        found_tool_call = True
+        if "reasoning_content" not in message and "reasoning" not in message:
+            return False
+    return found_tool_call
+
+
+def _downgrade_chat_forced_tool_choice(body: dict[str, Any]) -> None:
+    tool_choice = body.get("tool_choice")
+    if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        return
+    function = tool_choice.get("function")
+    if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+        return
+    logger.debug(
+        "DEEPSEEK_REQUEST: downgrading forced tool_choice to auto for unsupported "
+        "native request shape tool={}",
+        function["name"],
+    )
+    body["tool_choice"] = "auto"
 
 
 def sanitize_deepseek_messages_for_openai(messages: Any) -> Any:
@@ -155,7 +241,9 @@ def sanitize_deepseek_messages_for_openai(messages: Any) -> Any:
     return sanitized
 
 
-def _strip_unsupported_attachment_blocks(messages: Any) -> Any:
+def _strip_unsupported_attachment_blocks(
+    messages: Any, *, allow_attachments: bool = False
+) -> Any:
     if not isinstance(messages, list):
         return messages
 
@@ -179,6 +267,12 @@ def _strip_unsupported_attachment_blocks(messages: Any) -> Any:
             if isinstance(block, dict):
                 btype = block.get("type")
                 if btype in _STRIPPABLE_MESSAGE_BLOCK_TYPES:
+                    if (
+                        allow_attachments
+                        and btype in _FORWARDABLE_ATTACHMENT_BLOCK_TYPES
+                    ):
+                        new_content.append(block)
+                        continue
                     top_level_dropped[btype] = top_level_dropped.get(btype, 0) + 1
                     message_dropped_attachment = True
                     continue
@@ -192,6 +286,12 @@ def _strip_unsupported_attachment_blocks(messages: Any) -> Any:
                                 and sub.get("type") in _STRIPPABLE_MESSAGE_BLOCK_TYPES
                             ):
                                 sub_type = sub["type"]
+                                if (
+                                    allow_attachments
+                                    and sub_type in _FORWARDABLE_ATTACHMENT_BLOCK_TYPES
+                                ):
+                                    filtered_inner.append(sub)
+                                    continue
                                 nested_dropped[sub_type] = (
                                     nested_dropped.get(sub_type, 0) + 1
                                 )
@@ -234,7 +334,9 @@ def _is_server_listed_tool(tool: Mapping[str, Any]) -> bool:
     return False
 
 
-def _walk_block_list_for_unsupported(blocks: Any, *, where: str) -> None:
+def _walk_block_list_for_unsupported(
+    blocks: Any, *, where: str, allow_attachments: bool = False
+) -> None:
     if not isinstance(blocks, list):
         return
     for block in blocks:
@@ -242,16 +344,22 @@ def _walk_block_list_for_unsupported(blocks: Any, *, where: str) -> None:
             continue
         btype = block.get("type")
         if btype in _UNSUPPORTED_MESSAGE_BLOCK_TYPES:
+            if allow_attachments and btype in _FORWARDABLE_ATTACHMENT_BLOCK_TYPES:
+                continue
             raise InvalidRequestError(
                 f"DeepSeek native does not support {btype!r} blocks ({where})."
             )
         if btype == "tool_result" and "content" in block:
             _walk_block_list_for_unsupported(
-                block["content"], where=f"{where} (tool_result content)"
+                block["content"],
+                where=f"{where} (tool_result content)",
+                allow_attachments=allow_attachments,
             )
 
 
-def _validate_deepseek_request_dict(data: dict[str, Any]) -> None:
+def _validate_deepseek_request_dict(
+    data: dict[str, Any], *, allow_attachments: bool = False
+) -> None:
     mcp = data.get("mcp_servers")
     if mcp:
         raise InvalidRequestError("DeepSeek does not support mcp_servers on requests.")
@@ -270,11 +378,17 @@ def _validate_deepseek_request_dict(data: dict[str, Any]) -> None:
             continue
         content = message.get("content")
         if isinstance(content, list):
-            _walk_block_list_for_unsupported(content, where=f"messages[{i}].content")
+            _walk_block_list_for_unsupported(
+                content,
+                where=f"messages[{i}].content",
+                allow_attachments=allow_attachments,
+            )
 
     system = data.get("system")
     if isinstance(system, list):
-        _walk_block_list_for_unsupported(system, where="system")
+        _walk_block_list_for_unsupported(
+            system, where="system", allow_attachments=allow_attachments
+        )
 
 
 def _has_tool_history_blocks(message: Mapping[str, Any]) -> bool:
@@ -417,25 +531,7 @@ def _normalize_tool_result_content(messages: Any) -> Any:
     return normalized
 
 
-def _downgrade_forced_tool_choice(data: dict[str, Any]) -> None:
-    tool_choice = data.get("tool_choice")
-    if not isinstance(tool_choice, dict):
-        return
-    if tool_choice.get("type") != "tool" or not isinstance(
-        tool_choice.get("name"), str
-    ):
-        return
-    logger.debug(
-        "DEEPSEEK_REQUEST: downgrading forced tool_choice to auto for unsupported "
-        "native request shape tool={}",
-        tool_choice["name"],
-    )
-    data["tool_choice"] = {"type": "auto"}
-
-
-def _apply_deepseek_chat_extras(
-    body: dict[str, Any], _request_data: MessagesRequest, policy: ReasoningPolicy
-) -> None:
+def _apply_deepseek_chat_extras(body: dict[str, Any], policy: ReasoningPolicy) -> None:
     extra_body = body.setdefault("extra_body", {})
     if not isinstance(extra_body, dict):
         return

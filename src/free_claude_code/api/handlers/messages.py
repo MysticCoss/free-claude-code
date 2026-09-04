@@ -7,11 +7,12 @@ from dataclasses import dataclass, replace
 from fastapi.responses import JSONResponse, Response
 from loguru import logger
 
-from free_claude_code.api.detection import is_safety_classifier_request
+from free_claude_code.api.detection import detect_safety_classifier_stop_sequence
 from free_claude_code.api.optimization_handlers import try_optimizations
 from free_claude_code.api.request_errors import (
     http_status_for_unexpected_api_exception,
     log_unexpected_api_exception,
+    ordinary_application_error_response,
     require_non_empty_messages,
     unexpected_http_exception,
 )
@@ -22,12 +23,16 @@ from free_claude_code.api.response_streams import (
     terminal_execution_error_response,
     trace_terminal_execution_error,
 )
+from free_claude_code.api.web_tools.automatic_search import (
+    stream_automatic_web_search_response,
+)
 from free_claude_code.api.web_tools.egress import (
     WebFetchEgressPolicy,
     web_fetch_allowed_scheme_set,
 )
 from free_claude_code.api.web_tools.request import (
     is_web_server_tool_request,
+    plan_automatic_web_search,
     unsupported_server_tool_error,
 )
 from free_claude_code.api.web_tools.streaming import stream_web_server_tool_response
@@ -83,6 +88,7 @@ class MessagesHandler:
         self._token_counter = token_counter
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,
+            progress_timeout_seconds=settings.provider_progress_timeout,
             token_counter=token_counter,
             generation_id=generation_id,
             log_raw_payloads=settings.log_raw_api_payloads,
@@ -101,16 +107,34 @@ class MessagesHandler:
             require_non_empty_messages(request_data.messages)
             routed = self._model_router.resolve_messages_request(request_data)
             routed = self._apply_message_routing_policies(routed)
-            self._reject_unsupported_server_tools(routed)
-
-            result = self._run_message_intercepts(routed)
+            automatic_search = plan_automatic_web_search(
+                routed.request,
+                web_tools_enabled=self._settings.enable_web_server_tools,
+            )
+            if automatic_search is None:
+                self._reject_unsupported_server_tools(routed)
+                result = self._run_message_intercepts(routed)
+            else:
+                input_tokens = self._token_counter(
+                    routed.request.messages,
+                    routed.request.system,
+                    routed.request.tools,
+                )
+                result = _MessagesStreamResult(
+                    stream_automatic_web_search_response(
+                        self._provider_executor,
+                        routed,
+                        automatic_search,
+                        request_id=request_id,
+                        fallback_input_tokens=input_tokens,
+                        verbose_client_errors=self._settings.log_api_error_tracebacks,
+                    )
+                )
             if result is None:
                 logger.debug("No optimization matched, routing to provider")
                 result = _MessagesStreamResult(
-                    self._provider_executor.stream(
+                    self._provider_executor.stream_messages(
                         routed,
-                        wire_api="messages",
-                        raw_log_label="FULL_PAYLOAD",
                         raw_log_payload=routed.request.model_dump(),
                         request_id=request_id,
                     )
@@ -146,10 +170,14 @@ class MessagesHandler:
             # complete JSON Message; the internal pipeline is always SSE, so
             # serving that raw here breaks the client SDK's response parse.
             try:
-                message, error = await aggregate_anthropic_sse_to_message(result.body)
+                message, error, _complete = await aggregate_anthropic_sse_to_message(
+                    result.body
+                )
             except GeneratorExit:
                 raise
             except asyncio.CancelledError:
+                raise
+            except ApplicationError:
                 raise
             except ExecutionFailure as exc:
                 return self._execution_failure_response(exc, request_id=request_id)
@@ -199,6 +227,12 @@ class MessagesHandler:
     def _pre_start_error_response(
         self, exc: BaseException, *, request_id: str
     ) -> Response:
+        if isinstance(exc, ApplicationError):
+            return ordinary_application_error_response(
+                exc,
+                wire_api="messages",
+                request_id=request_id,
+            )
         failure = find_execution_failure(exc)
         if failure is not None:
             return self._execution_failure_response(failure, request_id=request_id)
@@ -270,19 +304,48 @@ class MessagesHandler:
     def _apply_message_routing_policies(
         self, routed: RoutedMessagesRequest
     ) -> RoutedMessagesRequest:
-        if not is_safety_classifier_request(routed.request):
+        classifier_stop_sequence = detect_safety_classifier_stop_sequence(
+            routed.request
+        )
+        if classifier_stop_sequence is None:
             return routed
-        changed = routed.reasoning.control is not ReasoningControl.OFF
+
+        reasoning_changed = routed.reasoning.control is not ReasoningControl.OFF
+        stop_sequences = routed.request.stop_sequences
+        remaining_stop_sequences = (
+            [
+                stop_sequence
+                for stop_sequence in stop_sequences
+                if stop_sequence != classifier_stop_sequence
+            ]
+            if stop_sequences is not None
+            else None
+        )
+        stop_sequence_removed = remaining_stop_sequences != stop_sequences
         trace_event(
             stage="routing",
-            event="free_claude_code.api.optimization.safety_classifier_no_thinking",
+            event="free_claude_code.api.route.safety_classifier_policy",
             source="api",
             model=routed.resolved.original_model,
-            changed=changed,
+            classifier_stop_sequence=classifier_stop_sequence,
+            reasoning_changed=reasoning_changed,
+            stop_sequence_removed=stop_sequence_removed,
         )
-        if not changed:
+        if not reasoning_changed and not stop_sequence_removed:
             return routed
-        return replace(routed, reasoning=ReasoningPolicy.off())
+
+        request = routed.request
+        if stop_sequence_removed:
+            request = request.model_copy(
+                update={"stop_sequences": remaining_stop_sequences or None}
+            )
+        return replace(
+            routed,
+            request=request,
+            reasoning=(
+                ReasoningPolicy.off() if reasoning_changed else routed.reasoning
+            ),
+        )
 
     def _run_message_intercepts(
         self, routed: RoutedMessagesRequest

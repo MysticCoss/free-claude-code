@@ -1,16 +1,22 @@
 """Tests for Hugging Face Inference Providers."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.provider_catalog import HUGGINGFACE_DEFAULT_BASE
 from free_claude_code.core.anthropic import ReasoningReplayMode
+from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
-from free_claude_code.providers.base import ProviderConfig
 from tests.providers.request_factory import make_messages_request
-from tests.providers.support import immediate_admission, profiled_provider
+from tests.providers.support import (
+    immediate_admission,
+    make_provider_config,
+    profiled_provider,
+)
 
 
 def make_request(**overrides):
@@ -19,7 +25,7 @@ def make_request(**overrides):
 
 @pytest.fixture
 def huggingface_config():
-    return ProviderConfig(
+    return make_provider_config(
         api_key="test_hf_key",
         base_url=HUGGINGFACE_DEFAULT_BASE,
         rate_limit=10,
@@ -60,6 +66,71 @@ def test_init_strips_trailing_slash(huggingface_config):
         )
 
     assert provider._base_url == HUGGINGFACE_DEFAULT_BASE
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_extracts_exact_input_modalities(
+    huggingface_provider,
+) -> None:
+    huggingface_provider._client.models.list = AsyncMock(
+        return_value=SimpleNamespace(
+            data=[
+                {
+                    "id": "vision-model",
+                    "architecture": {"input_modalities": ["text", "image", "audio"]},
+                    "providers": [
+                        {"status": "live", "context_length": 131072},
+                        {"status": "live", "context_length": 131072},
+                        {"status": "staging", "context_length": 999999},
+                    ],
+                },
+                {
+                    "id": "unknown-model",
+                    "architecture": {"input_modalities": ["image"]},
+                },
+            ]
+        )
+    )
+
+    assert await huggingface_provider.list_model_infos() == frozenset(
+        {
+            ProviderModelInfo(
+                "vision-model",
+                input_modalities=frozenset(
+                    {ModelInputModality.TEXT, ModelInputModality.IMAGE}
+                ),
+                context_window_tokens=131072,
+            ),
+            ProviderModelInfo("unknown-model"),
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "providers",
+    [
+        [],
+        [{"status": "staging", "context_length": 131072}],
+        [{"status": "live"}],
+        [{"status": "live", "context_length": "131072"}],
+        [
+            {"status": "live", "context_length": 131072},
+            {"status": "live", "context_length": 65536},
+        ],
+    ],
+)
+async def test_model_catalog_requires_consensus_across_live_huggingface_routes(
+    huggingface_provider,
+    providers: list[dict[str, object]],
+) -> None:
+    huggingface_provider._client.models.list = AsyncMock(
+        return_value=SimpleNamespace(data=[{"id": "model", "providers": providers}])
+    )
+
+    assert await huggingface_provider.list_model_infos() == frozenset(
+        {ProviderModelInfo("model")}
+    )
 
 
 def test_build_request_body_keeps_max_tokens(huggingface_provider):
@@ -161,7 +232,7 @@ def test_build_request_body_does_not_replay_top_level_reasoning_content(
 
 
 @pytest.mark.asyncio
-async def test_stream_response_text(huggingface_provider):
+async def test_stream_messages_text(huggingface_provider):
     mock_chunk = MagicMock()
     mock_chunk.choices = [
         MagicMock(
@@ -185,7 +256,7 @@ async def test_stream_response_text(huggingface_provider):
 
         events = [
             event
-            async for event in huggingface_provider.stream_response(make_request())
+            async for event in huggingface_provider.stream_messages(make_request())
         ]
 
     assert any(
@@ -195,7 +266,7 @@ async def test_stream_response_text(huggingface_provider):
 
 
 @pytest.mark.asyncio
-async def test_stream_response_reasoning_content(huggingface_provider):
+async def test_stream_messages_reasoning_content(huggingface_provider):
     mock_chunk = MagicMock()
     mock_chunk.choices = [
         MagicMock(
@@ -219,7 +290,7 @@ async def test_stream_response_reasoning_content(huggingface_provider):
 
         events = [
             event
-            async for event in huggingface_provider.stream_response(make_request())
+            async for event in huggingface_provider.stream_messages(make_request())
         ]
 
     assert any(

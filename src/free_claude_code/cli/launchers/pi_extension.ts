@@ -5,8 +5,6 @@ const BASE_URL_ENV = "FCC_PI_BASE_URL";
 const CATALOG_TIMEOUT_MS = 3000;
 const DEFAULT_CONTEXT_WINDOW = 128000;
 const DEFAULT_MAX_TOKENS = 16384;
-const NORMAL_MODEL_PREFIX = "anthropic/";
-const NO_THINKING_MODEL_PREFIX = "claude-3-freecc-no-thinking/";
 
 function requireEnvironment(name: string): string {
 	const value = process.env[name]?.trim();
@@ -35,63 +33,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function catalogModelIds(payload: unknown): string[] {
-	if (!isRecord(payload) || payload.object !== "list" || !Array.isArray(payload.data)) {
-		throw new Error("FCC model catalog returned an invalid response shape.");
-	}
-
-	const ids: string[] = [];
-	for (const entry of payload.data) {
-		if (!isRecord(entry) || typeof entry.id !== "string") continue;
-		const id = entry.id.trim();
-		if (id) ids.push(id);
-	}
-	return ids;
+function optionalBoolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
 }
 
-function providerModelRef(id: string, prefix: string): string | undefined {
-	if (!id.startsWith(prefix)) return undefined;
-	const parts = id.slice(prefix.length).split("/");
-	if (parts.length < 2 || parts.some((part) => !part)) return undefined;
-	return parts.join("/");
+function optionalPositiveInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function modelDefinition(providerModel: string, reasoning: boolean): ProviderModelConfig {
+function inputModalities(value: unknown): ("text" | "image")[] | undefined {
+	if (!Array.isArray(value) || value.length === 0) return undefined;
+	if (value.some((item) => item !== "text" && item !== "image")) return undefined;
+	const modalities = (["text", "image"] as const).filter((item) => value.includes(item));
+	return modalities.includes("text") ? modalities : undefined;
+}
+
+function modelDefinition(
+	id: string,
+	providerModel: string,
+	supportsReasoning: boolean | undefined,
+	input: ("text" | "image")[] | undefined,
+	contextWindow: number | undefined,
+	maxTokens: number | undefined,
+): ProviderModelConfig {
 	return {
-		id: providerModel,
+		id,
 		name: providerModel,
-		reasoning,
-		input: ["text"],
+		reasoning: supportsReasoning ?? true,
+		input: input ?? ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		maxTokens: DEFAULT_MAX_TOKENS,
+		contextWindow: contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+		maxTokens: maxTokens ?? DEFAULT_MAX_TOKENS,
 	};
 }
 
 export function projectFccModels(payload: unknown): ProviderModelConfig[] {
-	const ids = catalogModelIds(payload);
-	const normalModels = new Set<string>();
-	for (const id of ids) {
-		const providerModel = providerModelRef(id, NORMAL_MODEL_PREFIX);
-		if (providerModel) normalModels.add(providerModel);
+	if (!isRecord(payload) || payload.object !== "list" || !Array.isArray(payload.data)) {
+		throw new Error("FCC model catalog returned an invalid response shape.");
 	}
-
 	const models: ProviderModelConfig[] = [];
 	const seen = new Set<string>();
-	for (const id of ids) {
-		const normalModel = providerModelRef(id, NORMAL_MODEL_PREFIX);
-		if (normalModel) {
-			if (!seen.has(normalModel)) {
-				seen.add(normalModel);
-				models.push(modelDefinition(normalModel, true));
-			}
-			continue;
-		}
-
-		const noThinkingModel = providerModelRef(id, NO_THINKING_MODEL_PREFIX);
-		if (!noThinkingModel || normalModels.has(noThinkingModel) || seen.has(noThinkingModel)) continue;
-		seen.add(noThinkingModel);
-		models.push(modelDefinition(noThinkingModel, false));
+	for (const entry of payload.data) {
+		if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.provider_model_ref !== "string") continue;
+		const id = entry.id.trim();
+		const providerModel = entry.provider_model_ref.trim();
+		if (!id || !providerModel.includes("/") || seen.has(id)) continue;
+		seen.add(id);
+		models.push(
+			modelDefinition(
+				id,
+				providerModel,
+				optionalBoolean(entry.supportsReasoning),
+				inputModalities(entry.inputModalities),
+				optionalPositiveInteger(entry.contextWindow),
+				optionalPositiveInteger(entry.maxCompletionTokens),
+			),
+		);
 	}
 
 	if (models.length === 0) {
@@ -111,7 +108,7 @@ async function fetchFccModels(baseUrl: string, apiKey: string): Promise<Provider
 	try {
 		let response: Response;
 		try {
-			response = await fetch(`${baseUrl}/v1/models`, {
+			response = await fetch(`${baseUrl}/v1/models?view=messages`, {
 				headers: { Authorization: `Bearer ${apiKey}` },
 				signal: controller.signal,
 			});

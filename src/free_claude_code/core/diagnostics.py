@@ -76,7 +76,7 @@ def safe_exception_message(
 
 
 def format_user_error_preview(exc: BaseException, *, max_len: int = 200) -> str:
-    """Return a short redacted exception preview for chat surfaces."""
+    """Return a short redacted exception preview for user-facing surfaces."""
     return safe_exception_message(exc)[:max_len]
 
 
@@ -91,6 +91,12 @@ def attach_upstream_error_body(
     setattr(exc, _UPSTREAM_BODY_TRUNCATED_ATTR, truncated)
 
 
+def attached_upstream_error_body(exc: BaseException) -> bytes | str | None:
+    """Return a bounded streamed body previously attached by the transport."""
+    body = getattr(exc, _UPSTREAM_BODY_ATTR, None)
+    return body if isinstance(body, bytes | str) else None
+
+
 def exception_cause_types(exc: BaseException) -> tuple[str, ...]:
     """Return exception cause type names without logging their contents."""
     return tuple(type(cause).__name__ for cause in _exception_causes(exc))
@@ -103,7 +109,7 @@ def redacted_exception_traceback(exc: BaseException) -> str:
 
 def extract_upstream_error_detail(exc: Exception) -> UpstreamErrorDetail:
     """Extract bounded, redacted body, exception, and cause-chain details."""
-    raw_body = getattr(exc, _UPSTREAM_BODY_ATTR, None)
+    raw_body = attached_upstream_error_body(exc)
     body_truncated = bool(getattr(exc, _UPSTREAM_BODY_TRUNCATED_ATTR, False))
     if raw_body is None:
         raw_body = getattr(exc, "body", None)
