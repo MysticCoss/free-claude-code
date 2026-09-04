@@ -15,6 +15,7 @@ from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
 from free_claude_code.core.gateway_model_ids import (
     decode_claude_desktop_model_id,
+    decode_claude_desktop_no_thinking_model_id,
     decode_gateway_model_id,
 )
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
@@ -112,23 +113,28 @@ class ModelRouter:
         self._desktop_mode = desktop_mode
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
-        (
-            direct_provider_id,
-            direct_provider_model,
-            force_reasoning_off,
-        ) = self._direct_provider_model(claude_model_name)
-        if (
-            direct_provider_id is None or direct_provider_model is None
-        ) and self._desktop_mode:
-            # Claude Desktop 3P mode advertises claude-<provider>-<model> ids;
-            # decode them back to the exact provider/model they were built from.
-            decoded = decode_claude_desktop_model_id(
+        # Claude Desktop 3P mode advertises obfuscated
+        # claude-<provider>-<model> ids; decode them before the generic
+        # gateway parser, whose raw split would leave vendor-token
+        # obfuscation inside the provider/model segments.
+        decoded = (
+            decode_claude_desktop_model_id(claude_model_name, SUPPORTED_PROVIDER_IDS)
+            or decode_claude_desktop_no_thinking_model_id(
                 claude_model_name, SUPPORTED_PROVIDER_IDS
             )
-            if decoded is not None:
-                direct_provider_id = decoded.provider_id
-                direct_provider_model = decoded.provider_model
-                force_reasoning_off = decoded.force_reasoning_off
+            if self._desktop_mode
+            else None
+        )
+        if decoded is not None:
+            direct_provider_id = decoded.provider_id
+            direct_provider_model = decoded.provider_model
+            force_reasoning_off = decoded.force_reasoning_off
+        else:
+            (
+                direct_provider_id,
+                direct_provider_model,
+                force_reasoning_off,
+            ) = self._direct_provider_model(claude_model_name)
         if direct_provider_id is not None and direct_provider_model is not None:
             stripped_provider_model = _strip_1m_suffix(direct_provider_model)
             reasoning_preference = (
