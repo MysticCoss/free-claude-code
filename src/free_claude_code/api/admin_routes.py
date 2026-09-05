@@ -5,7 +5,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -62,7 +69,7 @@ class AdminConfigPayload(BaseModel):
 class ConnectedAccountLoginPayload(BaseModel):
     """Interactive connected-account login selection."""
 
-    mode: ConnectedAccountLoginMode = ConnectedAccountLoginMode.BROWSER
+    mode: ConnectedAccountLoginMode | None = None
 
 
 def _asset_path(filename: str) -> Path:
@@ -122,9 +129,15 @@ async def apply_admin_config(
 @router.get("/admin/api/status")
 async def admin_status(
     request: Request,
+    response: Response,
     services: ApiServices = Depends(get_services),
 ):
     require_loopback_admin(request)
+    # A local Admin page may reconnect after Apply changes the listening port.
+    # The existing security check admits only loopback callers and origins.
+    if origin := request.headers.get("origin"):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
     return services.admin.admin_status()
 
 
@@ -176,10 +189,15 @@ async def start_connected_account_login(
 ):
     require_loopback_admin(request)
     _require_connected_account_provider(provider_id)
-    try:
-        status = await services.admin.start_connected_account_login(
-            provider_id, payload.mode
+    account = await services.admin.connected_account_status(provider_id)
+    mode = payload.mode or account.default_login_mode
+    if mode not in account.supported_login_modes:
+        raise HTTPException(
+            status_code=422,
+            detail="Login mode is not supported by this provider.",
         )
+    try:
+        status = await services.admin.start_connected_account_login(provider_id, mode)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
