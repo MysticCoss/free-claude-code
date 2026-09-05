@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import traceback
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 
@@ -43,6 +44,10 @@ from free_claude_code.messaging.platforms.ports import (
     MessagingRuntime,
 )
 from free_claude_code.messaging.voice import Transcriber
+from free_claude_code.providers.credential_validation import (
+    CredentialStatus,
+    check_credentials,
+)
 
 from .provider_manager import ProviderRuntimeManager
 
@@ -124,6 +129,8 @@ class ApplicationRuntime:
         )
         self._cli_manager: cli_managed.ManagedClaudeSessionManager | None = None
         self._started = False
+        self._instance_id = uuid.uuid4().hex
+        self._draining = False
         self._closed = False
         self._provider_manager_closed = False
         self._connected_accounts_closed = False
@@ -164,6 +171,12 @@ class ApplicationRuntime:
             await self.close()
             raise
 
+    def begin_shutdown(self) -> None:
+        """Finish indefinite observer responses before the server drains HTTP."""
+        self._draining = True
+        if self._chat_service is not None:
+            self._chat_service.begin_shutdown()
+
     async def close(self) -> bool:
         async with self._close_lock:
             if self._closed:
@@ -187,11 +200,33 @@ class ApplicationRuntime:
         async with self._config_lock:
             prepared = prepare_admin_update(updates)
             if not prepared.valid:
-                return prepared.applied_response()
+                return prepared.applied_response() | {"credential_checks": []}
             assert prepared.settings is not None
+
+            checks = await check_credentials(prepared.settings, prepared.changed_keys)
+            check_response: list[JsonObject] = [
+                {
+                    "key": check.key,
+                    "status": check.status.value,
+                    "message": check.message,
+                }
+                for check in checks
+            ]
+            rejected = [
+                check for check in checks if check.status == CredentialStatus.REJECTED
+            ]
+            if rejected:
+                return prepared.validation_response() | {
+                    "applied": False,
+                    "valid": False,
+                    "errors": [f"{check.key}: {check.message}" for check in rejected],
+                    "pending_fields": [],
+                    "credential_checks": check_response,
+                }
 
             if prepared.pending_fields:
                 result = self._commit_admin_update(prepared)
+                result["credential_checks"] = check_response
                 restart = self._restart_metadata(
                     prepared.pending_fields,
                     prepared.settings,
@@ -214,12 +249,14 @@ class ApplicationRuntime:
             )
             self._pending_fields = []
             result["restart"] = self._restart_metadata((), prepared.settings)
+            result["credential_checks"] = check_response
             return result
 
     def admin_status(self) -> JsonObject:
         settings = self.settings
         return {
-            "status": "running",
+            "status": "stopping" if self._draining else "running",
+            "instance_id": self._instance_id,
             "host": settings.host,
             "port": settings.port,
             "model": settings.model,
@@ -335,12 +372,15 @@ class ApplicationRuntime:
         settings: Settings,
     ) -> JsonObject:
         automatic = bool(fields and self._restart_callback is not None)
-        return {
+        result: JsonObject = {
             "required": bool(fields),
             "automatic": automatic,
             "admin_url": local_admin_url(settings) if automatic else None,
             "fields": list(fields),
         }
+        if automatic:
+            result["instance_id"] = self._instance_id
+        return result
 
     async def _start_messaging_if_configured(self) -> None:
         try:

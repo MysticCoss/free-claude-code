@@ -14,6 +14,7 @@ from free_claude_code.config.env_migrations import (
     recognized_env_keys,
     render_managed_config,
 )
+from free_claude_code.config.model_refs import normalize_retired_model_settings
 from free_claude_code.config.paths import managed_env_path
 from free_claude_code.config.provider_proxies import invalid_provider_proxy_keys
 from free_claude_code.config.settings import Settings
@@ -39,6 +40,7 @@ class PreparedAdminUpdate:
     errors: tuple[str, ...]
     pending_fields: tuple[str, ...]
     path: Path
+    changed_keys: tuple[str, ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -102,7 +104,7 @@ def target_values_with_updates(
             values[key] = value
 
     values[FCC_CONFIG_SCHEMA_ENV] = CONFIG_SCHEMA_VERSION
-    return values
+    return normalize_retired_model_settings(values, preserve_empty_overrides=False)
 
 
 def changed_pending_fields(
@@ -152,12 +154,25 @@ def prepare_admin_update(
         if settings is not None and not errors
         else ()
     )
+    state = load_value_state()
+    changed_keys = tuple(
+        key
+        for key, submitted in updates.items()
+        if key in FIELD_BY_KEY
+        and not is_locked_source(state[key].source)
+        and (value := normalize_for_env(submitted))
+        and value != MASKED_SECRET
+        and value != state[key].value
+        and key in target_values
+        and target_values[key] == value
+    )
     return PreparedAdminUpdate(
         target_values=target_values,
         settings=settings,
         errors=errors,
         pending_fields=pending_fields,
         path=managed_env_path(),
+        changed_keys=changed_keys,
     )
 
 
