@@ -1,6 +1,7 @@
 """Single owner for application startup, shutdown, and runtime operations."""
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
@@ -23,6 +24,10 @@ from free_claude_code.application.connected_accounts import (
 from free_claude_code.application.errors import ApplicationUnavailableError
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.ports import StopResult
+from free_claude_code.application.updater import (
+    UpdateDisabledError,
+    UpdateService,
+)
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
     commit_prepared_admin_update,
@@ -37,6 +42,8 @@ from free_claude_code.config.paths import messaging_state_dir_path
 from free_claude_code.config.server_urls import local_admin_url, local_proxy_root_url
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.json_types import JsonObject
+from free_claude_code.core.updates import update_capable
+from free_claude_code.core.version import package_version
 from free_claude_code.messaging.platforms import factory as messaging_platform_factory
 from free_claude_code.messaging.platforms.factory import MessagingPlatformOptions
 from free_claude_code.messaging.platforms.ports import (
@@ -100,6 +107,11 @@ def startup_failure_message(settings: Settings, exc: Exception) -> str:
     return f"Server startup failed: exc_type={type(exc).__name__}"
 
 
+# Floor for the automatic update polling loop so a tiny configured interval
+# cannot busy-loop GitHub.
+AUTO_UPDATE_MIN_INTERVAL_SECONDS = 60.0
+
+
 class ApplicationRuntime:
     """Own every process-lifetime resource used by one server instance."""
 
@@ -111,11 +123,16 @@ class ApplicationRuntime:
         chat_service: ChatService | None = None,
         restart_callback: RestartCallback | None = None,
         connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
+        process_stop_callback: RestartCallback | None = None,
+        updates: UpdateService | None = None,
     ) -> None:
         self.provider_manager = provider_manager
         self._chat_service = chat_service
         self._transcriber = transcriber
         self._restart_callback = restart_callback
+        self._process_stop_callback = process_stop_callback
+        self._updates = updates or UpdateService()
+        self._update_task: asyncio.Task[None] | None = None
         self._connected_accounts = dict(connected_accounts or {})
         self._connected_account_revisions = {
             provider_id: manager.status().revision
@@ -155,6 +172,11 @@ class ApplicationRuntime:
             if self._chat_service is not None:
                 await self._chat_service.start()
             await self._start_messaging_if_configured()
+            if self.settings.fcc_update_auto and update_capable(package_version()):
+                self._update_task = asyncio.create_task(
+                    self._run_update_auto_loop(),
+                    name="fcc-auto-update",
+                )
             logging.getLogger("uvicorn.error").info(
                 "Admin UI: %s (local-only)",
                 local_admin_url(self.settings),
@@ -349,6 +371,51 @@ class ApplicationRuntime:
         if inspect.isawaitable(result):
             await result
 
+    def update_status(self) -> JsonObject:
+        return self._updates.snapshot(self.settings)
+
+    async def update_check(self) -> JsonObject:
+        return await self._updates.check(self.settings, force=True)
+
+    async def update_apply(self) -> JsonObject:
+        if self._process_stop_callback is None:
+            raise UpdateDisabledError(
+                "This server was not started by a process owner that can "
+                "exit for an update; use scripts/install.ps1 or install.sh."
+            )
+        return await self._updates.apply(self.settings)
+
+    async def request_full_stop(self) -> None:
+        callback = self._process_stop_callback
+        if callback is None:
+            return
+        result = callback()
+        if inspect.isawaitable(result):
+            await result
+
+    async def _run_update_auto_loop(self) -> None:
+        while True:
+            interval = max(
+                self.settings.fcc_update_poll_hours * 3600.0,
+                AUTO_UPDATE_MIN_INTERVAL_SECONDS,
+            )
+            try:
+                await asyncio.sleep(interval)
+                if await self._updates.run_auto_tick(self.settings):
+                    logger.info(
+                        "Automatic update scheduled; stopping the process "
+                        "so the guardian can install and relaunch"
+                    )
+                    await self.request_full_stop()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Automatic update iteration failed: exc_type={}",
+                    type(exc).__name__,
+                )
+
     async def stop_all(self) -> StopResult | None:
         if self._messaging_workflow is not None:
             outcome = await self._messaging_workflow.stop_all_tasks()
@@ -479,6 +546,12 @@ class ApplicationRuntime:
         logger.info("{} platform started with messaging workflow", components.name)
 
     async def _close_owned_resources(self) -> bool:
+        update_task = self._update_task
+        self._update_task = None
+        if update_task is not None:
+            update_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await update_task
         if not await self._cleanup_messaging():
             return False
         verbose = self.settings.log_api_error_tracebacks

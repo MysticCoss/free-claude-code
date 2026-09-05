@@ -134,6 +134,8 @@ def launch_desktop(tray_factory: DesktopTrayFactory) -> None:
         def open_current_admin() -> None:
             schedule_open_admin_browser(get_settings())
 
-        DesktopController(supervisor, tray_factory, open_current_admin).run()
+        controller = DesktopController(supervisor, tray_factory, open_current_admin)
+        supervisor.process_stop_callback = controller.quit
+        controller.run()
     finally:
         instance_lock.release()

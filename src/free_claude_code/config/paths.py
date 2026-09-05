@@ -19,6 +19,10 @@ AIDER_TEMP_DIRNAME = "aider"
 CHAT_STATE_DIRNAME = "chat"
 CHAT_DATABASE_FILENAME = "chat.db"
 CHAT_LOCK_FILENAME = "chat.lock"
+UPDATE_DIRNAME = "update"
+UPDATE_STATE_FILENAME = "state.json"
+UPDATE_PROGRESS_FILENAME = "progress.json"
+UPDATE_TEMP_DIRNAME = "update"
 
 
 def config_dir_path() -> Path:
@@ -106,3 +110,27 @@ def openai_auth_lock_path() -> Path:
 def github_copilot_auth_path() -> Path:
     """Return FCC connection state; native Copilot retains credentials."""
     return config_dir_path() / AUTH_DIRNAME / "github_copilot.json"
+
+
+def update_dir_path() -> Path:
+    """Return the directory holding update progress state."""
+
+    return config_dir_path() / UPDATE_DIRNAME
+
+
+def update_state_path() -> Path:
+    """Return the server-owned JSON file for update check/apply state."""
+
+    return update_dir_path() / UPDATE_STATE_FILENAME
+
+
+def update_progress_path() -> Path:
+    """Return the guardian-owned JSON file for update progress."""
+
+    return update_dir_path() / UPDATE_PROGRESS_FILENAME
+
+
+def update_work_dir_path() -> Path:
+    """Return the scratch directory for downloads, extractions, and guardian."""
+
+    return config_dir_path() / FCC_TEMP_DIRNAME / UPDATE_TEMP_DIRNAME

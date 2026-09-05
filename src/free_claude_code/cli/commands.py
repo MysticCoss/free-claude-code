@@ -84,6 +84,7 @@ class ServerSupervisor:
         self._running = False
         self._stop_requested = False
         self._restart_generation = 0
+        self.process_stop_callback: Callable[[], None] | None = None
 
     @property
     def status(self) -> ServerStatus:
@@ -187,6 +188,7 @@ class ServerSupervisor:
         asgi_app = build_asgi_app(
             settings,
             restart_callback=self._request_runtime_restart,
+            process_stop_callback=self.process_stop_callback or self.request_stop,
         )
         config = uvicorn.Config(
             asgi_app,

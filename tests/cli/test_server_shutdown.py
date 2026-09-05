@@ -39,8 +39,17 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
     )
     apps: list[RuntimeASGIApp] = []
 
-    def create_app(settings: Settings, *, restart_callback: RestartCallback):
-        app = build_asgi_app(settings, restart_callback=restart_callback)
+    def create_app(
+        settings: Settings,
+        *,
+        restart_callback: RestartCallback,
+        process_stop_callback: RestartCallback | None = None,
+    ):
+        app = build_asgi_app(
+            settings,
+            restart_callback=restart_callback,
+            process_stop_callback=process_stop_callback,
+        )
         # Only provider discovery is external; retain the real Chat, HTTP,
         # runtime cleanup, and supervisor lifecycle under investigation.
         monkeypatch.setattr(
