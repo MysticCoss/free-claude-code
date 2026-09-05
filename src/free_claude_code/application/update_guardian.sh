@@ -146,6 +146,10 @@ if [ "$install_exit" -ne 0 ]; then
     fail "uv tool install failed (exit $install_exit); the previous version is still installed. See $WORK_DIR/install.err"
 fi
 
+# Success: drop the big artifacts (extracted tree + archive) but keep the
+# small pytest/install logs for post-mortem until the next apply wipes them.
+rm -rf "$WORK_DIR/source" "$WORK_DIR/source.zip"
+
 DONE_TS="$(epoch)"
 write_state "done" "Installed version ${TARGET_VERSION}. Relaunching..." ""
 relaunch

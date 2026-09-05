@@ -202,6 +202,14 @@ try {
         exit 1
     }
 
+    # Success: drop the big artifacts (extracted tree + archive) but keep the
+    # small pytest/install logs for post-mortem until the next apply wipes them.
+    foreach ($leftover in @($extractRoot, $zipPath)) {
+        if (Test-Path -LiteralPath $leftover) {
+            Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Update-ProgressFile -Stage "done" -Message "Installed version $TargetVersion. Relaunching..." -Done
     Start-Relaunch
     exit 0

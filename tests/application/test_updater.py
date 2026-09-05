@@ -406,3 +406,7 @@ def test_guardian_scripts_ship_beside_the_updater_module() -> None:
     # the gate from inside the extracted source tree, never the server's CWD.
     assert 'cd "$src_dir"' in sh
     assert "-WorkingDirectory $srcDir.FullName" in ps1
+    # A successful update must clean the extracted tree and archive behind it
+    # (once before downloading, once after a successful install).
+    assert sh.count('rm -rf "$WORK_DIR/source" "$WORK_DIR/source.zip"') == 2
+    assert "Remove-Item -LiteralPath $leftover -Recurse -Force" in ps1
