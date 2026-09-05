@@ -12,6 +12,13 @@ from pydantic import (
     model_validator,
 )
 
+from free_claude_code.core.updates import (
+    validate_update_branch as _validate_update_branch,
+)
+from free_claude_code.core.updates import (
+    validate_update_repo as _validate_update_repo,
+)
+
 from .constants import DEFAULT_MODEL, HTTP_CONNECT_TIMEOUT_DEFAULT
 from .model_refs import parse_model_fallbacks
 from .nim import NimSettings
@@ -393,6 +400,27 @@ class Settings(BaseModel):
         default=8083, validation_alias="CLAUDE_DESKTOP_PORT"
     )
 
+    # ==================== In-App Updates ====================
+    # One GitHub branch is the update source (default: this fork). The Admin
+    # UI exposes editable repo/branch plus an opt-in automatic update loop.
+    fcc_update_repo: NonEmptyString = Field(
+        default="MysticCoss/free-claude-code",
+        validation_alias="FCC_UPDATE_REPO",
+    )
+    fcc_update_branch: NonEmptyString = Field(
+        default="main",
+        validation_alias="FCC_UPDATE_BRANCH",
+    )
+    fcc_update_auto: bool = Field(
+        default=False,
+        validation_alias="FCC_UPDATE_AUTO",
+    )
+    fcc_update_poll_hours: float = Field(
+        default=6.0,
+        gt=0,
+        validation_alias="FCC_UPDATE_POLL_HOURS",
+    )
+
     # ==================== Per-Provider Proxy ====================
     openai_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="OPENAI_PROXY"
@@ -770,6 +798,16 @@ class Settings(BaseModel):
         if v <= 0:
             raise ValueError("messaging_rate_window must be > 0")
         return float(v)
+
+    @field_validator("fcc_update_repo")
+    @classmethod
+    def validate_update_repo(cls, v: str) -> str:
+        return _validate_update_repo(v)
+
+    @field_validator("fcc_update_branch")
+    @classmethod
+    def validate_update_branch(cls, v: str) -> str:
+        return _validate_update_branch(v)
 
     @field_validator("web_fetch_allowed_schemes")
     @classmethod

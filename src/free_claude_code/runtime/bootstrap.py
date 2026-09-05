@@ -38,6 +38,7 @@ from .provider_manager import ProviderRuntimeManager
 def build_asgi_app(
     settings: Settings,
     restart_callback: RestartCallback | None = None,
+    process_stop_callback: RestartCallback | None = None,
 ) -> RuntimeASGIApp:
     """Construct the complete server application and its resource owner."""
     log_path = Path(os.getenv("LOG_FILE", server_log_path()))
@@ -79,6 +80,7 @@ def build_asgi_app(
         chat_service=chat_service,
         transcriber=_create_transcriber(settings),
         restart_callback=restart_callback,
+        process_stop_callback=process_stop_callback,
         connected_accounts={"openai": openai_auth, "github_copilot": copilot_auth},
     )
     services = ApiServices(

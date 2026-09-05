@@ -259,6 +259,35 @@ textarea:focus-visible,
   margin: 4px 0 0 0;
 }
 
+/* Update view */
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.update-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 24px;
+  margin: 0;
+}
+
+.update-details dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.update-details dd {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  word-break: break-word;
+}
+
 /* Provider Status Cards */
 .provider-grid {
   display: grid;

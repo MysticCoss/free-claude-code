@@ -81,6 +81,11 @@ SECTIONS: tuple[ConfigSectionSpec, ...] = (
         "Optional live smoke-test model overrides.",
         advanced=True,
     ),
+    ConfigSectionSpec(
+        "updates",
+        "Update",
+        "Fetch new FCC versions from a GitHub branch, test them, and install.",
+    ),
 )
 
 
@@ -177,6 +182,47 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         description="Dedicated port for the Claude Desktop 3P listener "
         "(must differ from PORT). Point Claude Desktop's gateway base URL here.",
         restart_required=True,
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_REPO",
+        "Update Repository",
+        "updates",
+        "text",
+        settings_attr="fcc_update_repo",
+        restart_required=True,
+        description="GitHub 'owner/repo' that Update checks and installs download "
+        "from (default: this fork).",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_BRANCH",
+        "Update Branch",
+        "updates",
+        "text",
+        settings_attr="fcc_update_branch",
+        restart_required=True,
+        description="Branch of the Update Repository to install.",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_AUTO",
+        "Automatic Updates",
+        "updates",
+        "boolean",
+        settings_attr="fcc_update_auto",
+        restart_required=True,
+        description="When on, FCC periodically checks the Update Repository and "
+        "installs a newer tested version automatically (the server restarts "
+        "itself during the install).",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_POLL_HOURS",
+        "Update Poll Interval",
+        "updates",
+        "number",
+        settings_attr="fcc_update_poll_hours",
+        restart_required=True,
+        description="Hours between automatic update checks (used only when "
+        "Automatic Updates is on).",
+        advanced=True,
     ),
     ConfigFieldSpec(
         "REASONING_POLICY",

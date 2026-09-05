@@ -81,6 +81,39 @@
             ></div>
           </section>
 
+          <section id="view-updates" class="admin-view" data-view="updates" hidden>
+            <section class="settings-section" id="updatePanel" aria-label="Update status">
+              <div class="section-heading">
+                <div>
+                  <h3>In-app update</h3>
+                  <p id="updateHint">
+                    Check the configured GitHub source and install a newer
+                    FCC version automatically.
+                  </p>
+                </div>
+                <div class="update-actions">
+                  <button id="updateCheckButton" class="secondary-button" type="button">
+                    Check
+                  </button>
+                  <button id="updateApplyButton" class="primary-button" type="button" disabled>
+                    Update
+                  </button>
+                </div>
+              </div>
+              <dl class="update-details">
+                <div><dt>Current</dt><dd id="updateCurrent">—</dd></div>
+                <div><dt>Latest</dt><dd id="updateLatest">—</dd></div>
+                <div><dt>Source</dt><dd id="updateSource">—</dd></div>
+                <div><dt>Status</dt><dd id="updateStage">idle</dd></div>
+              </dl>
+            </section>
+            <div
+              id="updateSections"
+              class="form-sections"
+              aria-label="Update configuration"
+            ></div>
+          </section>
+
           <section id="view-chat" class="admin-view" data-view="chat" hidden>
             <div id="chatRoot" class="chat-root" aria-live="off"></div>
           </section>
