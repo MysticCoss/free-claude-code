@@ -17,3 +17,7 @@ llama_cache
 Microsoft/
 /test-results/
 .vscode
+
+# Fork-local agentic directives — local machine only, never pushed.
+CLAUDE.md
+AGENTS.md
