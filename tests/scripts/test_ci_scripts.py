@@ -180,6 +180,15 @@ def test_ci_sh_suppression_only_does_not_require_uv() -> None:
 
 
 def test_ci_sh_is_tracked_executable() -> None:
+    inside_worktree = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=_repo_root(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if inside_worktree.returncode != 0:
+        pytest.skip("no git metadata (e.g. GitHub source archive)")
     result = subprocess.run(
         ["git", "ls-files", "--stage", "scripts/ci.sh"],
         cwd=_repo_root(),
