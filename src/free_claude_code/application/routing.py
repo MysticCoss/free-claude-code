@@ -16,7 +16,7 @@ from free_claude_code.config.provider_catalog import (
 )
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
-from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
+from free_claude_code.core.anthropic import Message, MessagesRequest, TokenCountRequest
 from free_claude_code.core.gateway_model_ids import (
     decode_claude_desktop_model_id,
     decode_claude_desktop_no_thinking_model_id,
@@ -51,6 +51,25 @@ def _strip_1m_suffix(model: str) -> str:
     return model.removesuffix(ONE_M_CONTEXT_SUFFIX)
 
 
+def _block_text(block: object) -> str | None:
+    text = getattr(block, "text", None)
+    if text is None and isinstance(block, dict):
+        text = block.get("text")
+    return text
+
+
+def _carries_compaction_prompt(message: Message) -> bool:
+    """True when the message contains Claude Code's compaction prompt."""
+    content = message.content
+    if isinstance(content, str):
+        return content.startswith(COMPACT_USER_MARKER)
+    return any(
+        (text := _block_text(block)) is not None
+        and text.startswith(COMPACT_USER_MARKER)
+        for block in content
+    )
+
+
 def _is_compaction_request(request: MessagesRequest) -> bool:
     """True when the request looks like a Claude Code compaction/summarization call."""
     system = request.system
@@ -58,15 +77,16 @@ def _is_compaction_request(request: MessagesRequest) -> bool:
         return True
     if isinstance(system, list):
         for block in system:
-            text = getattr(block, "text", None)
-            if text is None and isinstance(block, dict):
-                text = block.get("text")
+            text = _block_text(block)
             if text and COMPACT_SYSTEM_MARKER in text:
                 return True
-    if request.messages:
-        last = request.messages[-1]
-        if last.role == "user" and isinstance(last.content, str):
-            return last.content.startswith(COMPACT_USER_MARKER)
+    # Claude Code appends system-reminder messages *after* the compaction
+    # prompt and sends the prompt inside a block list (following tool_result
+    # or filler blocks), so the prompt is neither the last message nor a bare
+    # string. Scan back to the last user message and every text block.
+    for message in reversed(request.messages):
+        if message.role == "user":
+            return _carries_compaction_prompt(message)
     return False
 
 

@@ -8,6 +8,8 @@ from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic.models import (
+    ContentBlockText,
+    ContentBlockToolResult,
     Message,
     MessagesRequest,
     TokenCountRequest,
@@ -534,6 +536,102 @@ def test_resolve_messages_request_detects_compact_user_marker(settings):
 
     assert routed.resolved.original_model == "<compact>"
     assert routed.resolved.primary.provider_model == "deepseek-v4-flash"
+
+
+# Regression: Claude Code 2.1.260 desktop-3p sends the compaction prompt as a
+# block list (often after tool_result/filler blocks) and appends system-role
+# reminder messages *after* it, so neither "last message" nor "str content"
+# matched. See ~/.fcc/logs/server - Copy.log req_1e228842 / req_995bad87.
+
+
+def test_compact_detected_when_prompt_is_text_block_after_tool_results(settings):
+    """CRITICAL prompt as the last text block of the last user message."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-opencode_go-d-epseek-v4-flash",
+            max_tokens=100,
+            messages=[
+                Message(role="user", content="hello"),
+                Message(role="assistant", content="hi"),
+                Message(
+                    role="user",
+                    content=[
+                        ContentBlockToolResult(
+                            type="tool_result", tool_use_id="tu_1", content="ok"
+                        ),
+                        ContentBlockToolResult(
+                            type="tool_result", tool_use_id="tu_2", content="ok"
+                        ),
+                        ContentBlockText(
+                            type="text",
+                            text="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                        ),
+                    ],
+                ),
+                # Claude Code appends a system reminder after the prompt.
+                Message(
+                    role="system",
+                    content="The task tools haven't been used recently.",
+                ),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_model == "hy3"
+
+
+def test_compact_detected_when_prompt_block_follows_filler_text(settings):
+    """CRITICAL prompt may sit behind an unrelated leading text block."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        ContentBlockText(type="text", text="lO\n"),
+                        ContentBlockText(
+                            type="text",
+                            text="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                        ),
+                    ],
+                ),
+                Message(role="system", content="The date has changed."),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_model == "hy3"
+
+
+def test_compact_not_detected_when_last_user_message_is_plain(settings):
+    """A CRITICAL prompt earlier in history must not reroute the current turn."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[
+                Message(
+                    role="user",
+                    content="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                ),
+                Message(role="assistant", content="the summary"),
+                Message(role="user", content="thanks, continue the task"),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "claude-sonnet-4-20250514"
+    assert routed.resolved.primary.provider_model == "fallback-model"
 
 
 def test_resolve_messages_request_preserves_request_body_for_compaction(settings):
