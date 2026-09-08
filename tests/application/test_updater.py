@@ -410,3 +410,61 @@ def test_guardian_scripts_ship_beside_the_updater_module() -> None:
     # (once before downloading, once after a successful install).
     assert sh.count('rm -rf "$WORK_DIR/source" "$WORK_DIR/source.zip"') == 2
     assert "Remove-Item -LiteralPath $leftover -Recurse -Force" in ps1
+
+
+def test_win32_spawn_flags_hide_window_without_detaching() -> None:
+    # DETACHED_PROCESS makes a spawned powershell.exe die silently (no log,
+    # no progress.json), so the guardian must hide its window with
+    # CREATE_NO_WINDOW instead while staying in its own process group.
+    detached_process = 0x00000008
+    create_new_process_group = 0x00000200
+    create_no_window = 0x08000000
+    flags = updater_module._WIN32_SPAWN_FLAGS
+    assert flags & create_new_process_group
+    assert flags & create_no_window
+    assert not flags & detached_process
+
+
+def test_default_spawn_uses_hidden_window_flags_on_win32(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(updater_module, "update_work_dir_path", lambda: tmp_path)
+    monkeypatch.setattr(updater_module.subprocess, "Popen", FakePopen)
+
+    updater_module.default_spawn(["powershell", "-NoProfile"])
+
+    assert (tmp_path / "guardian.log").exists()
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs.get("creationflags") == updater_module._WIN32_SPAWN_FLAGS
+    assert kwargs.get("stdin") is updater_module.subprocess.DEVNULL
+
+
+def test_default_spawn_starts_new_session_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(updater_module, "update_work_dir_path", lambda: tmp_path)
+    monkeypatch.setattr(updater_module.subprocess, "Popen", FakePopen)
+
+    updater_module.default_spawn(["/bin/sh"])
+
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs.get("start_new_session") is True
+    assert "creationflags" not in kwargs

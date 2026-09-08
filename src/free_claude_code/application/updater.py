@@ -56,9 +56,13 @@ PYTEST_GATE_EXCLUDE = (
     "not test_admin_versioned_assets_serve_packaged_files "
     "and not test_launcher_config_composes_with_persistent_codex_config"
 )
-# DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP (win32 only, by value so the
-# module imports cleanly on every platform).
-_WIN32_DETACHED_FLAGS = 0x00000008 | 0x00000200
+# CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW (win32 only, by value so the
+# module imports cleanly on every platform). DETACHED_PROCESS must NOT be
+# used here: a console-detached powershell.exe starts with no usable stdio,
+# so the guardian dies silently — empty guardian.log, no progress.json —
+# and the Admin UI waits forever. CREATE_NO_WINDOW still hides the window
+# while leaving the redirected log/progress handles working.
+_WIN32_SPAWN_FLAGS = 0x00000200 | 0x08000000
 _GUARDIAN_TIMEOUT_SECONDS = 20.0
 
 
@@ -123,7 +127,7 @@ def default_spawn(cmd: list[str]) -> None:
                 stdout=log_file,
                 stderr=log_file,
                 close_fds=True,
-                creationflags=_WIN32_DETACHED_FLAGS,
+                creationflags=_WIN32_SPAWN_FLAGS,
             )
         else:
             subprocess.Popen(
