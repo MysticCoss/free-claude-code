@@ -1,22 +1,26 @@
 """Tests for the pure-ASGI ingress correlation owner."""
 
 import asyncio
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
 import pytest
 from fastapi import Request
+from loguru import logger
 from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp, Message, Scope
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from free_claude_code.api.request_ids import (
     RequestCorrelationMiddleware,
     get_request_id,
 )
 from free_claude_code.api.request_lifetime import InferenceRequestLifetimeMiddleware
+from free_claude_code.config.logging_config import configure_logging
 from tests.api.support import create_test_app
 
 
@@ -123,6 +127,82 @@ async def test_correlation_context_and_headers_span_the_complete_stream() -> Non
         await request
 
     assert context_exits == context_entries
+
+
+async def _run_middleware(scope: Scope) -> None:
+    async def app(_scope: Scope, _receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    async def receive() -> Message:
+        raise AssertionError("Test application has no request body")
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await RequestCorrelationMiddleware(cast(ASGIApp, app))(scope, receive, send)
+
+
+@pytest.mark.asyncio
+async def test_ingress_headers_trace_reports_matched_session() -> None:
+    with patch(
+        "free_claude_code.api.request_ids.trace_event",
+    ) as trace_mock:
+        await _run_middleware(_http_scope("/v1/messages"))
+
+    assert trace_mock.call_count == 1
+    kwargs = trace_mock.call_args.kwargs
+    assert kwargs["stage"] == "ingress"
+    assert kwargs["event"] == "ingress.headers"
+    assert kwargs["source"] == "api"
+    assert kwargs["method"] == "POST"
+    assert kwargs["path"] == "/v1/messages"
+    assert kwargs["session_header_matched"] is True
+    assert kwargs["headers"] == {"anthropic-session-id": "session_test"}
+    assert isinstance(kwargs["request_id"], str)
+
+
+@pytest.mark.asyncio
+async def test_ingress_headers_trace_flags_headerless_client() -> None:
+    scope = _http_scope("/v1/messages")
+    scope["headers"] = [(b"x-custom-client", b"desktop-probe")]
+    with patch(
+        "free_claude_code.api.request_ids.trace_event",
+    ) as trace_mock:
+        await _run_middleware(scope)
+
+    kwargs = trace_mock.call_args.kwargs
+    assert kwargs["session_header_matched"] is False
+    assert kwargs["headers"] == {"x-custom-client": "desktop-probe"}
+
+
+@pytest.mark.asyncio
+async def test_ingress_headers_trace_redacts_credentials_in_sink(
+    tmp_path: Path,
+) -> None:
+    log_file = str(tmp_path / "ingress.log")
+    configure_logging(log_file, force=True, level="DEBUG")
+    scope = _http_scope("/v1/messages")
+    scope["headers"] = [
+        (b"anthropic-session-id", b"session_test"),
+        (b"authorization", b"Bearer SECRET"),
+        (b"cookie", b"token=SECRET"),
+        (b"x-custom-client", b"desktop-probe"),
+    ]
+    await _run_middleware(scope)
+
+    logger.complete()
+    rows = [
+        json.loads(line)
+        for line in Path(log_file).read_text(encoding="utf-8").strip().split("\n")
+    ]
+    row = next(row for row in rows if row.get("event") == "ingress.headers")
+    assert row["headers"]["authorization"] == "<redacted>"
+    assert row["headers"]["cookie"] == "<redacted>"
+    assert row["headers"]["x-custom-client"] == "desktop-probe"
+    assert row["session_header_matched"] is True
 
 
 @pytest.mark.asyncio
