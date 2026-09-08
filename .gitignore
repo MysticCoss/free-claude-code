@@ -18,6 +18,6 @@ Microsoft/
 /test-results/
 .vscode
 
-# Fork-local agentic directives — local machine only, never pushed.
-CLAUDE.md
-AGENTS.md
+# Agentic directives live in the private 'directives' submodule (fcc-directives).
+# Root CLAUDE.md/AGENTS.md are tracked @import stubs — never put real directive
+# content in them; `git add -f` on a real copy is considered a leak.
