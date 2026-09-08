@@ -8,12 +8,15 @@ of 12 lowercase hex chars followed by 14 base62 chars).
 
 import re
 
+from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.session_id import (
     _BASE62,
     _HEX_LEN,
     _PREFIX,
     _RANDOM_LEN,
     claude_to_opencode_session_id,
+    conversation_seed,
+    opencode_request_headers,
 )
 
 _HEX_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -155,3 +158,101 @@ def test_very_long_input_is_stable():
     assert a.startswith("ses_")
     assert _HEX_RE.match(a[4:16])
     assert _BASE62_RE.match(a[16:30])
+
+
+# ---------------------------------------------------------------------------
+# conversation_seed + opencode_request_headers (added for Console Go, which
+# 400s with MissingSessionID when no x-opencode-session value is present).
+# ---------------------------------------------------------------------------
+
+
+def _request(**overrides: object) -> MessagesRequest:
+    payload: dict[str, object] = {
+        "model": "m",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    payload.update(overrides)
+    return MessagesRequest.model_validate(payload)
+
+
+def test_conversation_seed_joins_system_and_first_message() -> None:
+    request = _request(
+        system="SYS",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "mid"},
+            {"role": "user", "content": "later"},
+        ],
+    )
+    assert conversation_seed(request) == "SYS\nfirst"
+
+
+def test_conversation_seed_skips_non_text_blocks() -> None:
+    request = _request(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "r"},
+                    {"type": "text", "text": "hi"},
+                ],
+            }
+        ]
+    )
+    assert conversation_seed(request) == "hi"
+
+
+def test_conversation_seed_is_stable_as_history_grows() -> None:
+    opener = _request()
+    follow_up = _request(
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "and then?"},
+        ]
+    )
+    assert conversation_seed(opener) == conversation_seed(follow_up) == "hi"
+
+
+def test_conversation_seed_empty_without_text() -> None:
+    assert conversation_seed(_request(messages=[])) == ""
+    image_only = _request(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AAAA",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    assert conversation_seed(image_only) == ""
+
+
+def test_headers_prefer_forwarded_session_over_seed() -> None:
+    headers = opencode_request_headers("sess_a", fallback_seed="seed")
+    assert headers["x-opencode-session"] == claude_to_opencode_session_id("sess_a")
+
+
+def test_headers_use_seed_only_when_session_absent() -> None:
+    headers = opencode_request_headers(None, fallback_seed="seed")
+    assert headers["x-opencode-session"] == claude_to_opencode_session_id("seed")
+
+
+def test_headers_keep_empty_sentinel_without_seed() -> None:
+    headers = opencode_request_headers(None)
+    assert headers["x-opencode-client"] == "fcc"
+    assert headers["x-opencode-session"] == ""
+
+
+def test_headers_include_request_id_only_when_given() -> None:
+    assert "x-opencode-request" not in opencode_request_headers("s")
+    assert opencode_request_headers("s", request_id="r")["x-opencode-request"] == "r"

@@ -30,6 +30,7 @@ from free_claude_code.core.failures import ExecutionFailure
 from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY
+from free_claude_code.core.session_id import claude_to_opencode_session_id
 from free_claude_code.providers.model_listing import ModelListResponseError
 from free_claude_code.providers.opencode import (
     OpenCodeProvider,
@@ -224,6 +225,7 @@ def _provider_with_wire_transports(
     *,
     generation_response: Callable[[httpx2.Request], httpx2.Response] | None = None,
     max_attempts: int = 5,
+    provider_id: str = "opencode_zen",
 ) -> tuple[OpenCodeProvider, list[httpx2.Request], list[httpx.Request]]:
     generation_requests: list[httpx2.Request] = []
     catalog_requests: list[httpx.Request] = []
@@ -261,10 +263,10 @@ def _provider_with_wire_transports(
         return_value=generation_client,
     ):
         provider = create_opencode_provider(
-            "opencode_zen",
+            provider_id,
             _config(),
             immediate_admission(
-                provider_name="opencode_zen",
+                provider_name=provider_id,
                 max_attempts=max_attempts,
             ),
             catalog_client=_catalog_client(catalog_handler),
@@ -1035,3 +1037,55 @@ async def test_tool_only_history_sends_empty_reasoning_content_on_wire(
         "tool_call_id": "call_missing",
         "content": "file contents",
     }
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "catalog_key"),
+    [("opencode_zen", "opencode"), ("opencode_go", "opencode-go")],
+)
+@pytest.mark.asyncio
+async def test_responses_wire_injects_opencode_session_headers(
+    provider_id: str,
+    catalog_key: str,
+) -> None:
+    """Catalog-RESPONSES routes must carry the x-opencode-* trio on the wire.
+
+    Console Go 400s with MissingSessionID when the header is absent, and the
+    generic responses transport never sees the chat-only injection.
+    """
+    provider, generation_requests, _ = _provider_with_wire_transports(
+        _catalog_payload(provider_key=catalog_key),
+        provider_id=provider_id,
+    )
+    await _collect(provider, "responses-selector", fcc_session_id="sess_wire")
+    request = next(r for r in generation_requests if r.url.path.endswith("/responses"))
+    assert request.headers["x-opencode-client"] == "fcc"
+    assert request.headers["x-opencode-session"] == claude_to_opencode_session_id(
+        "sess_wire"
+    )
+
+
+@pytest.mark.asyncio
+async def test_responses_wire_go_seeds_session_without_forwarded_id() -> None:
+    provider, generation_requests, _ = _provider_with_wire_transports(
+        _catalog_payload(provider_key="opencode-go"),
+        provider_id="opencode_go",
+    )
+    await _collect(provider, "responses-selector")
+    request = next(r for r in generation_requests if r.url.path.endswith("/responses"))
+    # _request() sends a single text message "hello" and no system prompt.
+    assert request.headers["x-opencode-session"] == claude_to_opencode_session_id(
+        "hello"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_responses_wire_go_seeds_session_from_input() -> None:
+    provider, generation_requests, _ = _provider_with_wire_transports(
+        _catalog_payload(provider_key="opencode-go"),
+        provider_id="opencode_go",
+    )
+    await _collect_responses(provider, "responses-selector")
+    request = next(r for r in generation_requests if r.url.path.endswith("/responses"))
+    seed = json.dumps("hello", sort_keys=True, default=str) + "\n"
+    assert request.headers["x-opencode-session"] == claude_to_opencode_session_id(seed)

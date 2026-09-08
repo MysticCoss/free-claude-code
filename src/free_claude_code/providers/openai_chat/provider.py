@@ -47,6 +47,10 @@ from free_claude_code.core.openai_tool_names import (
     encode_openai_chat_tool_names,
 )
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.core.session_id import (
+    conversation_seed,
+    opencode_request_headers,
+)
 from free_claude_code.core.trace import provider_chat_body_snapshot, trace_event
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
@@ -673,22 +677,21 @@ class OpenAIChatProvider(BaseProvider):
             policy=self._profile.request_policy,
             postprocessors=self._profile.request_postprocessors,
         )
-        # Inject per-request x-opencode-* headers for OpenCode providers so
-        # the billing dashboard correlates requests from the same Claude session.
+        # Inject per-request x-opencode-* headers for OpenCode providers: Zen
+        # correlates billing by the mapped Claude session, and Console Go
+        # answers 400 MissingSessionID unless a value is present — so Go falls
+        # back to a deterministic conversation seed for header-less clients.
         if self._provider_name in ("OPENCODE_GO", "OPENCODE_ZEN"):
-            from free_claude_code.core.session_id import claude_to_opencode_session_id
-
-            session_id = claude_to_opencode_session_id(
-                getattr(request, "fcc_session_id", None)
+            fallback_seed = (
+                conversation_seed(request)
+                if self._provider_name == "OPENCODE_GO"
+                else None
             )
-            extra_headers: dict[str, str] = {
-                "x-opencode-client": "fcc",
-                "x-opencode-session": session_id,
-            }
-            request_id = getattr(request, "fcc_request_id", None)
-            if request_id:
-                extra_headers["x-opencode-request"] = request_id
-            body["extra_headers"] = extra_headers
+            body["extra_headers"] = opencode_request_headers(
+                getattr(request, "fcc_session_id", None),
+                request_id=getattr(request, "fcc_request_id", None),
+                fallback_seed=fallback_seed,
+            )
         return self._finalize_chat_body(body, reasoning=reasoning)
 
     def _build_responses_request_body(

@@ -1,5 +1,6 @@
 """OpenCode provider with catalog-driven Chat/Responses dispatch."""
 
+import json
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -12,6 +13,10 @@ from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.core.session_id import (
+    conversation_seed,
+    opencode_request_headers,
+)
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.endpoint import EndpointContext
@@ -198,6 +203,7 @@ class OpenCodeProvider(OpenAIChatProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
+                    session_headers=self._session_headers(routed),
                 )
             else:
                 super().preflight_messages(routed, reasoning=reasoning)
@@ -263,6 +269,7 @@ class OpenCodeProvider(OpenAIChatProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
+                    session_headers=self._session_headers(routed),
                 )
             else:
                 super().preflight_responses(routed, reasoning=reasoning)
@@ -296,6 +303,39 @@ class OpenCodeProvider(OpenAIChatProvider):
         raise InvalidRequestError(
             f"{self._opencode_profile.provider_name} does not advertise "
             f"model {selector_id!r} in its active catalog."
+        )
+
+    def _session_headers(
+        self,
+        request: MessagesRequest | OpenAIResponsesRequest,
+    ) -> dict[str, str]:
+        """x-opencode-* headers for the catalog-selected RESPONSES transport.
+
+        The chat transport injects the same trio inside
+        ``OpenAIChatProvider._build_request_body``; the responses transport is
+        provider-agnostic, so OpenCode computes them here. Console Go answers
+        400 MissingSessionID unless the header carries a value, so Go requests
+        whose client sent no session header fall back to a deterministic seed
+        of the conversation's opening; Zen keeps the empty sentinel.
+        """
+        fallback_seed: str | None = None
+        if self._opencode_profile.provider_id == "opencode_go":
+            if isinstance(request, MessagesRequest):
+                fallback_seed = conversation_seed(request)
+            else:
+                fallback_seed = (
+                    json.dumps(
+                        request.input,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    + "\n"
+                    + (request.instructions or "")
+                )
+        return opencode_request_headers(
+            getattr(request, "fcc_session_id", None),
+            request_id=getattr(request, "fcc_request_id", None),
+            fallback_seed=fallback_seed,
         )
 
 

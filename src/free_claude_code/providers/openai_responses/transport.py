@@ -3,11 +3,12 @@
 import asyncio
 import sys
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import cast
 
 import httpx2
 from openai import AsyncOpenAI, AsyncStream
+from openai._types import Omit
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
 
@@ -118,6 +119,7 @@ class OpenAIResponsesTransport:
         response_model: str,
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
+        session_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         body = self._build_messages_body(request, reasoning=reasoning)
         tool_names = OpenAIToolNameCodec.from_request(request)
@@ -127,6 +129,7 @@ class OpenAIResponsesTransport:
             endpoint_context=endpoint_context,
             request_id=request_id,
             response_model=response_model,
+            session_headers=session_headers,
             presenter_factory=lambda: MessagesResponsesPresenter(
                 ResponsesProviderStream(
                     message_id=message_id,
@@ -155,6 +158,7 @@ class OpenAIResponsesTransport:
         response_model: str,
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
+        session_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens
         body = self._build_native_body(request, reasoning=reasoning)
@@ -163,6 +167,7 @@ class OpenAIResponsesTransport:
             endpoint_context=endpoint_context,
             request_id=request_id,
             response_model=response_model,
+            session_headers=session_headers,
             presenter_factory=lambda: NativeResponsesPresenter(
                 public_model=response_model
             ),
@@ -209,6 +214,7 @@ class OpenAIResponsesTransport:
         response_model: str,
         presenter_factory: ResponsesPresenterFactory,
         endpoint_context: EndpointContext | None = None,
+        session_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         execution = self._admission.start_execution(request_id=request_id)
         outcome = ResponsesExecutionOutcome()
@@ -225,6 +231,7 @@ class OpenAIResponsesTransport:
             execution=execution,
             outcome=outcome,
             endpoint=endpoint,
+            session_headers=session_headers,
         )
         try:
             async for event in provider_stream:
@@ -261,6 +268,7 @@ class OpenAIResponsesTransport:
         execution: ProviderExecution,
         outcome: ResponsesExecutionOutcome,
         endpoint: RequestEndpoint | None = None,
+        session_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         recovery = RecoveryController()
         trace_event(
@@ -294,7 +302,11 @@ class OpenAIResponsesTransport:
                     provider_name=self._provider_name,
                     request_id=request_id,
                 )
-                sdk_stream = await self._create_sdk_stream(body, endpoint=endpoint)
+                sdk_stream = await self._create_sdk_stream(
+                    body,
+                    endpoint=endpoint,
+                    session_headers=session_headers,
+                )
                 stream = scope.retain(_ClosableResponsesStream(sdk_stream))
                 stream_opened = True
 
@@ -443,6 +455,7 @@ class OpenAIResponsesTransport:
         body: JsonObject,
         *,
         endpoint: RequestEndpoint | None = None,
+        session_headers: Mapping[str, str] | None = None,
     ) -> AsyncStream[ResponseStreamEvent]:
         model = body.get("model")
         if not isinstance(model, str) or not model:
@@ -458,13 +471,21 @@ class OpenAIResponsesTransport:
             if endpoint is not None
             else self._client
         )
+        # Provider-injected headers (e.g. x-opencode-session) merge over the
+        # endpoint's own; the SDK consumes extra_headers and never puts it
+        # into the JSON body.
+        merged_headers: dict[str, str | Omit] | None = (
+            dict(endpoint.openai_headers()) if endpoint is not None else None
+        )
+        if session_headers:
+            merged_headers = {**(merged_headers or {}), **session_headers}
         return await client.responses.create(
             model=model,
             input=input_value,
             stream=True,
             store=False,
             extra_body=extra_body or None,
-            extra_headers=endpoint.openai_headers() if endpoint is not None else None,
+            extra_headers=merged_headers,
         )
 
 
