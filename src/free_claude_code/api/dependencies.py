@@ -37,12 +37,12 @@ def is_claude_desktop_request(request: Request, settings: Settings) -> bool:
         return False
     try:
         accepted_port = int(server[1])
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return False
     return accepted_port == settings.claude_desktop_port
 
 
-def resolve_provider(
+async def resolve_provider(
     provider_type: str,
     *,
     lease: RequestRuntimeLease,
@@ -50,7 +50,7 @@ def resolve_provider(
     """Resolve a provider through one retained generation."""
     should_log_init = not lease.is_provider_cached(provider_type)
     try:
-        provider = lease.resolve_provider(provider_type)
+        provider = await lease.resolve_provider(provider_type)
     except UnknownProviderError:
         logger.error(
             "Unknown provider_type: '{}'. Supported: {}",

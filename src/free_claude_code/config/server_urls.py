@@ -1,5 +1,7 @@
 """Browser-friendly local server URLs shared by runtime and launchers."""
 
+from urllib.parse import urlsplit
+
 from free_claude_code.config.settings import Settings
 
 
@@ -30,3 +32,30 @@ def local_claude_desktop_url(settings: Settings) -> str:
     """Return the URL for the Claude Desktop 3P listener on this machine."""
 
     return f"http://{_browser_host_for_local_urls(settings)}:{settings.claude_desktop_port}"
+
+
+def same_proxy_url(value: object, expected: str) -> bool:
+    """Compare client endpoints, allowing equivalent loopback names and trailing slashes."""
+    if not isinstance(value, str):
+        return False
+
+    def normalized(url: str) -> tuple[str, str | None, int | None, str]:
+        parsed = urlsplit(url)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Unexpected URL components")
+        host = parsed.hostname
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            host = "localhost"
+        return parsed.scheme, host, parsed.port, parsed.path.rstrip("/")
+
+    try:
+        return normalized(value) == normalized(expected)
+    except ValueError:
+        return False
+
+
+def proxy_v1_url(proxy_root_url: str) -> str:
+    """Return the canonical local proxy API root for client launchers."""
+
+    stripped = proxy_root_url.rstrip("/")
+    return stripped if stripped.endswith("/v1") else f"{stripped}/v1"

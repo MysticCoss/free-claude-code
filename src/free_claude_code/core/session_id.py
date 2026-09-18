@@ -21,15 +21,15 @@ Algorithm:
     return f"ses_{hex_part}{b62_part}"             # 30 chars, opencode-shaped
 
 If the input is ``None`` or empty, the function returns the empty string.
-Callers should pass that through as the ``x-opencode-session`` header value as
-an explicit "no session" sentinel; the previous behavior of falling back to a
-synthesized request id conflated two distinct identifiers.
+Callers must omit the ``x-opencode-session`` header in that case rather than
+invent an identity; falling back to a synthesized request id would conflate
+two distinct identifiers.
 Also provides :func:`conversation_seed`, a deterministic snapshot of a
 conversation's opening (system prompt + first user message) used as a fallback
 session identity for clients that send no session header. OpenCode Go
 ("Console Go") rejects requests that carry no ``x-opencode-session`` value
-with HTTP 400 ``MissingSessionID``, so a fallback is mandatory there; Zen keeps
-the empty-string sentinel documented above.
+with HTTP 400 ``MissingSessionID``, so a fallback is mandatory there; Zen
+sends no session header at all and lets the gateway report the absence.
 
 And :func:`opencode_request_headers`, the single builder for the
 ``x-opencode-*`` header trio so the chat and responses transports cannot drift.
@@ -107,20 +107,28 @@ def opencode_request_headers(
     *,
     request_id: str | None = None,
     fallback_seed: str | None = None,
+    verbatim_session: bool = False,
 ) -> dict[str, str]:
     """Build the ``x-opencode-*`` header trio for one upstream request.
 
     ``fallback_seed`` (e.g. :func:`conversation_seed`) is mapped only when no
-    client-forwarded session id exists; passing ``None`` for it preserves the
-    empty-string "no session" sentinel that Zen expects in its dashboard.
+    client-forwarded session id exists. ``verbatim_session`` forwards an
+    already-opencode-shaped client value (``x-opencode-session`` from Pi, a
+    harness, or a native opencode client) untouched instead of mapping it;
+    mapping stays for Claude-shaped ids extracted into ``fcc_session_id``.
+    When no session identity exists at all the session header is omitted
+    entirely — an empty value is wire-equivalent to absent for gateways but
+    breaks the "no invented identity" contract.
     """
-    session_id = claude_to_opencode_session_id(claude_session_id)
-    if not session_id:
-        session_id = claude_to_opencode_session_id(fallback_seed)
-    headers = {
-        "x-opencode-client": "fcc",
-        "x-opencode-session": session_id,
-    }
+    if verbatim_session and claude_session_id:
+        session_id = claude_session_id
+    else:
+        session_id = claude_to_opencode_session_id(claude_session_id)
+        if not session_id:
+            session_id = claude_to_opencode_session_id(fallback_seed)
+    headers = {"x-opencode-client": "fcc"}
+    if session_id:
+        headers["x-opencode-session"] = session_id
     if request_id:
         headers["x-opencode-request"] = request_id
     return headers

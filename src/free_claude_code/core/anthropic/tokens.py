@@ -94,7 +94,7 @@ def get_token_count(
                     )
                     try:
                         total_tokens += estimate_text_tokens(json.dumps(block))
-                    except TypeError, ValueError:
+                    except (TypeError, ValueError):
                         total_tokens += estimate_text_tokens(str(block))
 
     if tools:

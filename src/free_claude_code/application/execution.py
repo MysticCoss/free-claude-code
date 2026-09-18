@@ -1,10 +1,11 @@
 """Provider execution shared by inbound API adapters."""
 
 import asyncio
-import inspect
 import math
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from time import monotonic
+from types import MappingProxyType
 from typing import Literal
 
 from loguru import logger
@@ -28,7 +29,7 @@ from free_claude_code.core.trace import (
     traced_async_stream,
 )
 
-from .ports import ProviderResolver
+from .ports import ModelInfoLookup, ProviderResolver
 from .routing import (
     ProviderModelTarget,
     ResolvedModelRoute,
@@ -42,9 +43,9 @@ TokenCounter = Callable[
 ]
 ResponsesTokenCounter = Callable[[OpenAIResponsesRequest], int]
 WireApi = Literal["messages", "responses"]
-CandidateStreamOpener = Callable[[int, ProviderModelTarget], AsyncIterator[str]]
-CandidateSelected = Callable[[ProviderModelTarget], Awaitable[None] | None]
-CandidateFailed = Callable[[ExecutionFailure], None]
+CandidateStreamOpener = Callable[
+    [int, ProviderModelTarget], Awaitable[AsyncIterator[str]]
+]
 
 
 class ProviderExecutor:
@@ -59,14 +60,18 @@ class ProviderExecutor:
         responses_token_counter: ResponsesTokenCounter = estimate_responses_input_tokens,
         generation_id: int | None = None,
         log_raw_payloads: bool = False,
+        request_headers: Mapping[str, str] | None = None,
+        model_info_lookup: ModelInfoLookup | None = None,
     ) -> None:
         if not math.isfinite(progress_timeout_seconds) or progress_timeout_seconds <= 0:
             raise ValueError("progress_timeout_seconds must be finite and positive")
         self._provider_resolver = provider_resolver
+        self._model_info_lookup = model_info_lookup or (lambda _provider, _model: None)
         self._token_counter = token_counter
         self._responses_token_counter = responses_token_counter
         self._generation_id = generation_id
         self._log_raw_payloads = log_raw_payloads
+        self._request_headers = MappingProxyType(dict(request_headers or {}))
         self._progress_timeout_seconds = float(progress_timeout_seconds)
 
     def _progress_timeout_failure(
@@ -163,37 +168,21 @@ class ProviderExecutor:
         *,
         raw_log_payload: object,
         request_id: str,
-        candidate_selected: CandidateSelected | None = None,
-        candidate_failed: CandidateFailed | None = None,
     ) -> AsyncIterator[str]:
-        """Preflight and execute one Anthropic Messages request."""
+        """Execute one Anthropic Messages request."""
 
-        primary = routed.resolved.primary
-        primary_provider = self._provider_resolver(primary.provider_id)
         primary_request = routed.request.model_copy(deep=True)
-        primary_failure: ExecutionFailure | None = None
-        try:
-            primary_provider.preflight_messages(
-                primary_request,
-                reasoning=routed.reasoning,
-            )
-        except ExecutionFailure as failure:
-            primary_failure = failure
         input_tokens = self._token_counter(
             routed.request.messages,
             routed.request.system,
             routed.request.tools,
         )
 
-        def open_candidate(
+        async def open_candidate(
             index: int,
             target: ProviderModelTarget,
         ) -> AsyncIterator[str]:
-            provider = (
-                primary_provider
-                if index == 0
-                else self._provider_resolver(target.provider_id)
-            )
+            provider = await self._provider_resolver(target.provider_id)
             request = (
                 primary_request
                 if index == 0
@@ -202,16 +191,16 @@ class ProviderExecutor:
                     deep=True,
                 )
             )
-            if index == 0 and primary_failure is not None:
-                raise primary_failure
-            if index > 0:
-                provider.preflight_messages(request, reasoning=routed.reasoning)
             return provider.stream_messages(
                 request,
                 input_tokens=input_tokens,
                 request_id=request_id,
                 response_model=routed.resolved.original_model,
                 reasoning=routed.reasoning,
+                model_info=self._model_info_lookup(
+                    target.provider_id, target.provider_model
+                ),
+                request_headers=self._request_headers,
             )
 
         return self._stream_candidates(
@@ -225,8 +214,6 @@ class ProviderExecutor:
             ingress_count=len(routed.request.messages),
             request_id=request_id,
             open_candidate=open_candidate,
-            candidate_selected=candidate_selected,
-            candidate_failed=candidate_failed,
         )
 
     def stream_responses(
@@ -236,30 +223,16 @@ class ProviderExecutor:
         raw_log_payload: object,
         request_id: str,
     ) -> AsyncIterator[str]:
-        """Preflight and execute one native OpenAI Responses request."""
+        """Execute one native OpenAI Responses request."""
 
-        primary = routed.resolved.primary
-        primary_provider = self._provider_resolver(primary.provider_id)
         primary_request = routed.request.model_copy(deep=True)
-        primary_failure: ExecutionFailure | None = None
-        try:
-            primary_provider.preflight_responses(
-                primary_request,
-                reasoning=routed.reasoning,
-            )
-        except ExecutionFailure as failure:
-            primary_failure = failure
         input_tokens = self._responses_token_counter(routed.request)
 
-        def open_candidate(
+        async def open_candidate(
             index: int,
             target: ProviderModelTarget,
         ) -> AsyncIterator[str]:
-            provider = (
-                primary_provider
-                if index == 0
-                else self._provider_resolver(target.provider_id)
-            )
+            provider = await self._provider_resolver(target.provider_id)
             request = (
                 primary_request
                 if index == 0
@@ -268,16 +241,13 @@ class ProviderExecutor:
                     deep=True,
                 )
             )
-            if index == 0 and primary_failure is not None:
-                raise primary_failure
-            if index > 0:
-                provider.preflight_responses(request, reasoning=routed.reasoning)
             return provider.stream_responses(
                 request,
                 input_tokens=input_tokens,
                 request_id=request_id,
                 response_model=routed.resolved.original_model,
                 reasoning=routed.reasoning,
+                request_headers=self._request_headers,
             )
 
         raw_input = routed.request.input
@@ -301,8 +271,6 @@ class ProviderExecutor:
             ingress_count=input_item_count,
             request_id=request_id,
             open_candidate=open_candidate,
-            candidate_selected=None,
-            candidate_failed=None,
         )
 
     def _stream_candidates(
@@ -318,10 +286,8 @@ class ProviderExecutor:
         ingress_count: int,
         request_id: str,
         open_candidate: CandidateStreamOpener,
-        candidate_selected: CandidateSelected | None,
-        candidate_failed: CandidateFailed | None,
     ) -> AsyncIterator[str]:
-        """Run one protocol-blind candidate lifecycle after eager preflight."""
+        """Start and consume candidates through one protocol-blind lifecycle."""
 
         primary = resolved.primary
         candidates = (primary, *resolved.fallbacks)
@@ -376,10 +342,15 @@ class ProviderExecutor:
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
                 try:
+                    opening_started = monotonic()
                     try:
-                        provider_stream = open_candidate(index, target)
+                        provider_stream = await open_candidate(index, target)
                     except ExecutionFailure as failure:
                         candidate_failure = failure
+                    finally:
+                        # Initialization has its own request budget. Upstream progress
+                        # time is not spent waiting for a provider's startup task.
+                        progress_deadline += monotonic() - opening_started
 
                     if provider_stream is None and candidate_failure is None:
                         raise TypeError(
@@ -421,10 +392,6 @@ class ProviderExecutor:
                             continue
                         if not candidate_committed:
                             candidate_committed = True
-                            if candidate_selected is not None:
-                                selected_result = candidate_selected(target)
-                                if inspect.isawaitable(selected_result):
-                                    await selected_result
                             if index > 0:
                                 self._trace_fallback_selected(
                                     request_id=request_id,
@@ -459,13 +426,7 @@ class ProviderExecutor:
                             ) from exc
 
                 if candidate_failure is None:
-                    if not candidate_committed and candidate_selected is not None:
-                        selected_result = candidate_selected(target)
-                        if inspect.isawaitable(selected_result):
-                            await selected_result
                     return
-                if candidate_failed is not None:
-                    candidate_failed(candidate_failure)
                 if candidate_committed or index + 1 >= len(candidates):
                     raise candidate_failure
                 next_target = candidates[index + 1]

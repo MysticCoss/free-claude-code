@@ -1,14 +1,12 @@
 """Process-local DeepSeek Harness configuration for FCC model routing."""
 
 import math
-from dataclasses import dataclass, field
 from pathlib import Path
 
+from free_claude_code.application.model_catalog import CatalogModel
+from free_claude_code.config.server_urls import proxy_v1_url
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.model_capabilities import ModelInputModality
-
-from .common import proxy_v1_url
-from .model_catalog import ClientModel
 
 DSH_API_KEY_ENV = "FCC_DSH_API_KEY"
 DSH_ENV_PREFIX = "FCC_DSH_"
@@ -27,30 +25,21 @@ _REASONING_EFFORTS: JsonObject = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class DshLaunchConfig:
-    """Secret-free DSH patch for one attached FCC launch."""
-
-    patch: tuple[JsonObject, ...] = field(repr=False)
-    selected_model: str
-    api_key_env: str = DSH_API_KEY_ENV
-
-
 def build_dsh_launch_config(
-    models: tuple[ClientModel, ...],
+    models: tuple[CatalogModel, ...],
     *,
+    default_model_id: str,
     proxy_root_url: str,
     settings_path: Path,
     credentials_path: Path,
     provider_progress_timeout: float,
-) -> DshLaunchConfig:
+) -> tuple[JsonObject, ...]:
     """Translate FCC's catalog and timeout into an isolated DSH overlay."""
 
     if not models:
         raise ValueError("DeepSeek Harness requires at least one routable FCC model")
 
     stream_idle_timeout_ms = _stream_idle_timeout_ms(provider_progress_timeout)
-    selected_model = models[0].wire_slug
     provider: JsonObject = {
         "displayName": "Free Claude Code",
         "apiKeyEnv": DSH_API_KEY_ENV,
@@ -61,7 +50,7 @@ def build_dsh_launch_config(
         "retryPolicy": {"mode": "normal", "maxRetries": 0},
         "streamIdleTimeoutMs": stream_idle_timeout_ms,
     }
-    patch = (
+    return (
         _configured_row(
             "settings",
             "@deepseek-ai/dsh-settings-file",
@@ -80,7 +69,7 @@ def build_dsh_launch_config(
         _configured_row(
             "agent-default-model",
             "@deepseek-ai/dsh-agent-default-model",
-            {"provider": DSH_PROVIDER_ID, "model": selected_model},
+            {"provider": DSH_PROVIDER_ID, "model": default_model_id},
         ),
         _disabled_row("llm-deepseek", "@deepseek-ai/dsh-llm-deepseek"),
         _disabled_row(
@@ -89,7 +78,6 @@ def build_dsh_launch_config(
         ),
         _disabled_row("tool-web", "@deepseek-ai/dsh-tool-web"),
     )
-    return DshLaunchConfig(patch=patch, selected_model=selected_model)
 
 
 def _stream_idle_timeout_ms(provider_progress_timeout: float) -> int:
@@ -107,7 +95,7 @@ def _stream_idle_timeout_ms(provider_progress_timeout: float) -> int:
     return timeout_ms
 
 
-def _model_profile(model: ClientModel) -> JsonObject:
+def _model_profile(model: CatalogModel) -> JsonObject:
     profile: JsonObject = {
         "id": model.wire_slug,
         "name": model.display_name,

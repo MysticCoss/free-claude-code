@@ -25,12 +25,12 @@
 
 ## What You Get
 
-- **50 ToS-friendly providers. 1.3B+ free tokens every month.** Use free, paid, subscription, and local models from one searchable UI without putting your account at risk. FCC follows provider terms and removes integrations if they stop being allowed.
+- **53 ToS-friendly providers. 1.3B+ free tokens every month.** Use free, paid, subscription, and local models from one searchable UI without putting your account at risk. FCC follows provider terms and removes integrations if they stop being allowed.
 - **10 coding agents. One model catalog.** Run [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://github.com/openai/codex), [Pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Cline](https://github.com/cline/cline), [Hermes](https://github.com/NousResearch/hermes-agent), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), [Grok Build](https://github.com/xai-org/grok-build), [Muse Code](https://research.meta.ai/blog/introducing-muse-code-and-muse-spark-1-2/), or [Aider](https://aider.chat/) with your FCC models.
 - **Keep coding through provider outages.** After retries are exhausted, FCC automatically tries your next configured model without making you restart the turn—across every client.
 - **Up to 90% fewer terminal-output tokens.** Optional [RTK](https://github.com/rtk-ai/rtk) filters common command output, while five FCC optimizations handle quota probes, command-prefix detection, titles, suggestions, and filepaths without calling a provider.
+- **Native Code sessions in your browser.** Choose a folder and run Codex in the browser with real-time and background support. Freely switch providers/models in the same session. Support for switching harnesses in the same session coming soon!
 - **Terminal, desktop, IDE, or phone.** Work through native launchers, [VS Code](https://code.visualstudio.com/), [Codex App](https://learn.chatgpt.com/docs/app), [JetBrains](https://www.jetbrains.com/), [Discord](https://discord.com/), or [Telegram](https://telegram.org/).
-- **Private local chat.** Use Chat Sessions in Admin to talk with any configured FCC model, with persisted history, thinking controls, streaming, fallback, and compaction.
 - **Voice notes in. Code out.** Talk to your agent using local [Whisper](https://github.com/openai/whisper) or [NVIDIA NIM](https://docs.nvidia.com/nim/speech/latest/asr/deploy-asr-models/whisper.html) transcription.
 - **Agent capabilities stay intact.** Stream responses, use tools, preserve native interleaved thinking for maximum performance, send images, and route [Fable](https://www.anthropic.com/claude/fable), [Opus](https://www.anthropic.com/claude/opus), [Sonnet](https://www.anthropic.com/claude/sonnet), and [Haiku](https://www.anthropic.com/claude/haiku) independently with compatible models.
 
@@ -56,6 +56,11 @@ This fork adds several enhancements on top of upstream:
 **Mid-conversation system messages.** The request-level `system` prompt is unaffected (index-zero system message, as upstream). For the remaining mid-conversation `role: system` messages on OpenAI-compatible wires: the native DeepSeek provider receives them under DeepSeek's native `latest_reminder` role; every other provider drops them, since they cannot represent the system role mid-conversation. The choice is provider-capability driven only — gateways that proxy DeepSeek-named models (e.g. `deepseek-v4-flash` on opencode_go) do not accept the tag and drop like everyone else.
 
 **Streaming content-block fix.** OpenAI-compatible relays that keep `reasoning_content` present as an empty string on every content chunk (e.g. the OpenCode qwen gateway) no longer cause a content-block churn in the Anthropic SSE stream, which previously fragmented assistant output into many tiny blocks in Claude Code.
+
+<div align="center">
+  <img src="assets/browser-code-session.png" alt="Native Codex browser session in FCC, showing model controls and a repository exploration" width="700">
+  <p><em>A native Codex session in FCC's browser UI.</em></p>
+</div>
 
 ## Quick Start
 
@@ -201,11 +206,6 @@ from more than one provider before succeeding.
 <details>
 <summary><strong>Provider catalog</strong></summary>
 
-[GitHub Models retired on July 30, 2026](https://github.blog/changelog/2026-07-30-github-models-is-now-retired/). FCC automatically resets retired model
-selections to your configured default, or the built-in default when `MODEL` itself
-is retired. Configure that default provider in Admin if its credentials are missing.
-GitHub Copilot is a separate service; connect it through **Connected accounts** in Admin.
-
 | Provider | Admin UI setting | Example `MODEL` |
 | --- | --- | --- |
 | [NVIDIA NIM](https://build.nvidia.com/settings/api-keys) | `NVIDIA_NIM_API_KEY` | `nvidia_nim/nvidia/nemotron-3-super-120b-a12b` |
@@ -254,6 +254,9 @@ GitHub Copilot is a separate service; connect it through **Connected accounts** 
 | [NaraRoute](https://router.bynara.id/) | `NARAROUTE_API_KEY` | `nararoute/kimi-k3-free` |
 | [Poolside AI](https://platform.poolside.ai/) | `POOLSIDE_API_KEY` | `poolside/poolside/laguna-s-2.1` |
 | [LLM7.io](https://dash.llm7.io/) | `LLM7_API_KEY` | `llm7/default` |
+| [Scaleway](https://console.scaleway.com/iam/api-keys) | `SCW_SECRET_KEY` | `scaleway/deepseek/deepseek-v4-flash` |
+| [Lightning AI](https://lightning.ai/) | `LIGHTNING_API_KEY` | `lightning/lightning-ai/Qwen3.8-27B` |
+| [Experiential Labs](https://platform.experientiallabs.ai/) | `EXPLABS_API_KEY` | `experiential/union-alpha` |
 | [Ollama Cloud](https://ollama.com/settings/keys) | `OLLAMA_API_KEY` | `ollama_cloud/qwen3-coder:480b` |
 | [LM Studio](https://lmstudio.ai/) | `LM_STUDIO_BASE_URL` | `lmstudio/<model-id>` |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | `LLAMACPP_BASE_URL` | `llamacpp/<model-id>` |
@@ -265,11 +268,11 @@ GitHub Copilot is a separate service; connect it through **Connected accounts** 
 <summary><strong>Provider-specific setup</strong></summary>
 
 - OpenAI uses your ChatGPT subscription rather than an API key. Connect from
-  **Providers → Connected accounts** in the Admin UI. Use device code on
-  headless systems. Restart an already-running agent after connecting.
+  **Providers → OAuth providers → OpenAI / ChatGPT → Connect** in the Admin UI
+  and finish signing in through your browser. Restart an already-running agent after connecting.
 - GitHub Copilot uses your signed-in GitHub account and subscription. Install
   [Copilot CLI 1.0.83](https://github.com/github/copilot-cli/releases/tag/v1.0.83)
-  on PATH, then choose **Providers → Connected accounts → GitHub Copilot → Connect**.
+  on PATH, then choose **Providers → OAuth providers → GitHub Copilot → Connect**.
   FCC reuses the native profile or shows a GitHub device code when sign-in is needed.
   You can also sign in first with `copilot login --device-code`. Select a concrete
   `github_copilot/<model-id>` from the discovered list; available models and quotas
@@ -358,6 +361,7 @@ Providers that do not support a selected control retain their own behavior.
 For terminal use, start `fcc-server`, then run `fcc-claude`, `fcc-codex`,
 `fcc-pi`, `fcc-opencode`, `fcc-cline`, `fcc-hermes`, `fcc-dsh`, `fcc-grok`,
 `fcc-muse`, or `fcc-aider`.
+
 Use the guides below for editor integrations.
 
 <details>

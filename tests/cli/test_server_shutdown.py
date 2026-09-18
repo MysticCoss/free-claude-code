@@ -4,7 +4,6 @@ import asyncio
 import socket
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -50,11 +49,8 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
             restart_callback=restart_callback,
             process_stop_callback=process_stop_callback,
         )
-        # Only provider discovery is external; retain the real Chat, HTTP,
+        # Only provider discovery is external; retain the real Code, HTTP,
         # runtime cleanup, and supervisor lifecycle under investigation.
-        monkeypatch.setattr(
-            app.runtime.provider_manager, "warm_referenced_model_cache", AsyncMock()
-        )
         monkeypatch.setattr(
             app.runtime.provider_manager, "start_model_list_refresh", lambda: None
         )
@@ -66,7 +62,7 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
         "free_claude_code.runtime.bootstrap.configure_logging",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr(commands, "build_asgi_app", create_app)
+    monkeypatch.setattr("free_claude_code.runtime.bootstrap.build_asgi_app", create_app)
     monkeypatch.setattr(commands, "kill_all_best_effort", lambda: None)
     monkeypatch.setattr(commands, "SERVER_GRACEFUL_SHUTDOWN_SECONDS", 0.2)
     supervisor = commands.ServerSupervisor(console_logging=False)
@@ -81,7 +77,7 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
         async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
             status_url = f"http://127.0.0.1:{port}/admin/api/status"
             old_instance = (await client.get(status_url)).json()["instance_id"]
-            events_url = f"http://127.0.0.1:{port}/admin/api/chat/events"
+            events_url = f"http://127.0.0.1:{port}/admin/api/code/events"
             async with (
                 client.stream("GET", events_url) as first,
                 client.stream("GET", events_url) as second,

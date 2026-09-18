@@ -247,10 +247,14 @@ def test_headers_use_seed_only_when_session_absent() -> None:
     assert headers["x-opencode-session"] == claude_to_opencode_session_id("seed")
 
 
-def test_headers_keep_empty_sentinel_without_seed() -> None:
+def test_headers_omit_session_without_identity() -> None:
     headers = opencode_request_headers(None)
-    assert headers["x-opencode-client"] == "fcc"
-    assert headers["x-opencode-session"] == ""
+    assert headers == {"x-opencode-client": "fcc"}
+
+
+def test_headers_forward_verbatim_session_untouched() -> None:
+    headers = opencode_request_headers("conversation-a", verbatim_session=True)
+    assert headers["x-opencode-session"] == "conversation-a"
 
 
 def test_headers_include_request_id_only_when_given() -> None:

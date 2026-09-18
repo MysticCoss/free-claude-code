@@ -17,13 +17,20 @@ from free_claude_code.core.anthropic.native import (
     apply_messages_options,
     validate_messages_json,
 )
+from free_claude_code.core.history_replay import (
+    responses_reasoning_blocks,
+    tool_history_context,
+)
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.openai_tool_names import OpenAIToolNameCodec
 
 from .errors import ResponsesConversionError
 from .models import OpenAIResponsesRequest
-from .reasoning_replay import decode_messages_reasoning
-from .tools import ResponsesToolIdentity, responses_tool_name_to_anthropic_name
+from .tools import (
+    ResponsesToolIdentity,
+    custom_tool_input_schema,
+    flatten_responses_tool_name,
+)
 
 _REQUEST_FIELDS = {
     "model",
@@ -167,9 +174,7 @@ class _ToolScope:
             self.tools.append(body)
 
     def _register(self, identity: ResponsesToolIdentity) -> None:
-        name = responses_tool_name_to_anthropic_name(
-            identity.name, namespace=identity.namespace
-        )
+        name = flatten_responses_tool_name(identity.name, namespace=identity.namespace)
         previous = self._flat.get(name)
         if previous is not None and previous != identity:
             raise ResponsesConversionError(
@@ -213,9 +218,7 @@ class _ToolScope:
                     )
                 _fields(format_value, {"type"}, "Custom tool format")
             body["input_schema"] = {
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
+                **custom_tool_input_schema(description=None),
                 "additionalProperties": False,
             }
         else:
@@ -233,9 +236,7 @@ class _ToolScope:
         return identity, body
 
     def alias(self, identity: ResponsesToolIdentity) -> str:
-        name = responses_tool_name_to_anthropic_name(
-            identity.name, namespace=identity.namespace
-        )
+        name = flatten_responses_tool_name(identity.name, namespace=identity.namespace)
         if self._flat.get(name) != identity:
             raise ResponsesConversionError("Unknown tool identity.")
         return self._codec.encode(name)
@@ -338,11 +339,10 @@ def _content(value: JsonValue, *, images: bool, empty: bool = False) -> list[Jso
 
 
 class _MessagesInput:
-    def __init__(self, tools: _ToolScope, replay_scope: str) -> None:
+    def __init__(self, tools: _ToolScope) -> None:
         self.messages: list[JsonObject] = []
         self.system: list[JsonValue] = []
         self._tools = tools
-        self._replay_scope = replay_scope
         self._calls: dict[str, Literal["function", "custom"]] = {}
         self._pending: set[str] = set()
 
@@ -400,16 +400,8 @@ class _MessagesInput:
                 raise ResponsesConversionError("Unsupported Responses message role.")
             return
         if kind == "reasoning":
-            _fields(
-                value,
-                {"type", "id", "status", "summary", "content", "encrypted_content"},
-                "Reasoning item",
-            )
-            carrier = _string(
-                value.get("encrypted_content"), "reasoning.encrypted_content"
-            )
-            block = decode_messages_reasoning(carrier, replay_scope=self._replay_scope)
-            self._append("assistant", [block])
+            if blocks := responses_reasoning_blocks(value):
+                self._append("assistant", blocks)
             return
         if kind in ("function_call", "custom_tool_call"):
             self._call(value, custom=kind == "custom_tool_call")
@@ -419,6 +411,16 @@ class _MessagesInput:
             return
         if kind in ("input_text", "output_text", "text", "input_image"):
             self._append("user", _content([value], images=True))
+            return
+        if (
+            isinstance(kind, str)
+            and kind.endswith(("_call", "_result"))
+            and value.get("status")
+            in {None, "completed", "failed", "incomplete", "interrupted"}
+        ):
+            self._append(
+                "assistant", [{"type": "text", "text": tool_history_context(value)}]
+            )
             return
         raise ResponsesConversionError(
             f"Messages upstream cannot represent input item {kind!r}."
@@ -561,7 +563,6 @@ def build_responses_messages_request(
     request: OpenAIResponsesRequest,
     *,
     options: NativeMessagesOptions,
-    replay_scope: str,
 ) -> ResponsesMessagesRequest:
     """Convert caller-owned history directly to the native Messages wire shape."""
 
@@ -587,7 +588,7 @@ def build_responses_messages_request(
             )
     items = _items(request.input)
     scope = _ToolScope(request.tools, items)
-    builder = _MessagesInput(scope, replay_scope)
+    builder = _MessagesInput(scope)
     if request.instructions is not None:
         builder.system.append({"type": "text", "text": request.instructions})
     for item in items:

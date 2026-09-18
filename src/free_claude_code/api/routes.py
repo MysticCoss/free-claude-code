@@ -1,5 +1,7 @@
 """FastAPI route handlers."""
 
+from collections.abc import Mapping
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 
@@ -50,16 +52,21 @@ async def _create_messages_response(
     request_data: MessagesRequest,
     *,
     request_id: str,
+    request_headers: Mapping[str, str] | None = None,
     desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
         lease = await services.requests.acquire()
+        await lease.wait_for_token_estimation()
         handler = MessagesHandler(
             lease.settings,
+            web_tools=services.web_tools,
             provider_resolver=_provider_resolver(lease),
             token_counter=get_token_count,
             generation_id=lease.generation_id,
+            request_headers=request_headers,
+            model_info_lookup=lease.model_info,
             desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
@@ -84,15 +91,18 @@ async def _create_responses_response(
     request_data: OpenAIResponsesRequest,
     *,
     request_id: str,
+    request_headers: Mapping[str, str] | None = None,
     desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
         lease = await services.requests.acquire()
+        await lease.wait_for_token_estimation()
         handler = ResponsesHandler(
             lease.settings,
             provider_resolver=_provider_resolver(lease),
             generation_id=lease.generation_id,
+            request_headers=request_headers,
             desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
@@ -132,6 +142,7 @@ async def create_message(
         services,
         request_data,
         request_id=get_request_id(request),
+        request_headers=request.headers,
         desktop_mode=is_claude_desktop_request(request, settings),
     )
 
@@ -154,6 +165,7 @@ async def create_response(
         services,
         request_data,
         request_id=get_request_id(request),
+        request_headers=request.headers,
         desktop_mode=is_claude_desktop_request(request, settings),
     )
 
@@ -167,16 +179,21 @@ async def probe_responses(_auth=Depends(require_proxy_auth)):
 async def count_tokens(
     request: Request,
     request_data: TokenCountRequest,
-    settings: Settings = Depends(get_settings),
+    services: ApiServices = Depends(get_services),
     _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Count tokens for a request."""
-    handler = TokenCountHandler(
-        settings,
-        token_counter=get_token_count,
-        desktop_mode=is_claude_desktop_request(request, settings),
-    )
-    return handler.count(request_data, request_id=get_request_id(request))
+    lease = await services.requests.acquire()
+    try:
+        await lease.wait_for_token_estimation()
+        handler = TokenCountHandler(
+            lease.settings,
+            token_counter=get_token_count,
+            desktop_mode=is_claude_desktop_request(request, lease.settings),
+        )
+        return handler.count(request_data, request_id=get_request_id(request))
+    finally:
+        await lease.release()
 
 
 @router.api_route("/v1/messages/count_tokens", methods=["HEAD", "OPTIONS"])
@@ -220,16 +237,16 @@ async def list_models(
     request: Request,
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
     services: ApiServices = Depends(get_services),
-    settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
+    snapshot = await services.requests.wait_for_catalog()
     return build_models_list_response(
-        settings,
-        services.requests,
+        snapshot.settings,
+        snapshot,
         view=view,
-        desktop_mode=is_claude_desktop_request(request, settings),
+        desktop_mode=is_claude_desktop_request(request, snapshot.settings),
     )
 
 
@@ -240,12 +257,12 @@ async def list_models(
 )
 async def list_muse_models(
     services: ApiServices = Depends(get_services),
-    settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """List the direct Responses models expected by Muse Code."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
-    return build_muse_models_list_response(settings, services.requests)
+    snapshot = await services.requests.wait_for_catalog()
+    return build_muse_models_list_response(snapshot.settings, snapshot)
 
 
 @router.post("/stop")

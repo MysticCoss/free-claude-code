@@ -292,7 +292,6 @@ async def test_request_full_stop_without_callback_is_a_noop() -> None:
 def test_supervisor_wires_process_stop_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from free_claude_code.cli import commands as commands_module
     from free_claude_code.cli.commands import ServerSupervisor
 
     recorded: dict[str, object] = {}
@@ -303,7 +302,11 @@ def test_supervisor_wires_process_stop_callback(
         recorded["stop"] = process_stop_callback
         raise RuntimeError("stop after capture")
 
-    monkeypatch.setattr(commands_module, "build_asgi_app", fake_build_asgi_app)
+    # commands.py imports build_asgi_app lazily inside _run_bound, so patch
+    # the bootstrap namespace it resolves at call time.
+    monkeypatch.setattr(
+        "free_claude_code.runtime.bootstrap.build_asgi_app", fake_build_asgi_app
+    )
     supervisor = ServerSupervisor()
 
     with pytest.raises(RuntimeError):

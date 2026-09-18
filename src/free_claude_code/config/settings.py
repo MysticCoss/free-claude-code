@@ -24,6 +24,8 @@ from .model_refs import parse_model_fallbacks
 from .nim import NimSettings
 from .provider_catalog import (
     BEDROCK_DEFAULT_BASE,
+    EXPERIENTIAL_DEFAULT_BASE,
+    LIGHTNING_DEFAULT_BASE,
     NARAROUTE_DEFAULT_BASE,
     SUPPORTED_PROVIDER_IDS,
     TOKENROUTER_DEFAULT_BASE,
@@ -197,6 +199,24 @@ class Settings(BaseModel):
         default=None, validation_alias="LLM7_API_KEY"
     )
 
+    # ==================== Lightning AI (OpenAI-compatible) ====================
+    lightning_api_key: OptionalNonEmptyString = Field(
+        default=None, validation_alias="LIGHTNING_API_KEY"
+    )
+    lightning_base_url: NonEmptyString = Field(
+        default=LIGHTNING_DEFAULT_BASE,
+        validation_alias="LIGHTNING_BASE_URL",
+    )
+
+    # ==================== Experiential Labs (OpenAI-compatible) ====================
+    experiential_api_key: OptionalNonEmptyString = Field(
+        default=None, validation_alias="EXPLABS_API_KEY"
+    )
+    experiential_base_url: NonEmptyString = Field(
+        default=EXPERIENTIAL_DEFAULT_BASE,
+        validation_alias="EXPLABS_BASE_URL",
+    )
+
     # ==================== Fireworks AI Config ====================
     fireworks_api_key: OptionalNonEmptyString = Field(
         default=None, validation_alias="FIREWORKS_API_KEY"
@@ -301,6 +321,11 @@ class Settings(BaseModel):
     # ==================== Cerebras Inference (OpenAI-compatible) ====================
     cerebras_api_key: OptionalNonEmptyString = Field(
         default=None, validation_alias="CEREBRAS_API_KEY"
+    )
+
+    # ==================== Scaleway (OpenAI-compatible) ====================
+    scw_secret_key: OptionalNonEmptyString = Field(
+        default=None, validation_alias="SCW_SECRET_KEY"
     )
 
     # ==================== Ollama Cloud ====================
@@ -536,6 +561,12 @@ class Settings(BaseModel):
     llm7_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="LLM7_PROXY"
     )
+    lightning_proxy: OptionalNonEmptyString = Field(
+        default=None, validation_alias="LIGHTNING_PROXY"
+    )
+    experiential_proxy: OptionalNonEmptyString = Field(
+        default=None, validation_alias="EXPLABS_PROXY"
+    )
     fireworks_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="FIREWORKS_PROXY"
     )
@@ -559,6 +590,9 @@ class Settings(BaseModel):
     )
     cerebras_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="CEREBRAS_PROXY"
+    )
+    scw_proxy: OptionalNonEmptyString = Field(
+        default=None, validation_alias="SCW_PROXY"
     )
     ollama_cloud_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="OLLAMA_CLOUD_PROXY"

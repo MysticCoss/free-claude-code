@@ -15,7 +15,7 @@ from free_claude_code.config.env_migrations import (
     consolidate_managed_config,
     migrate_env_setting_in_text,
 )
-from free_claude_code.config.loader import resolve_settings_snapshot
+from free_claude_code.config.loader import ManagedConfigStore
 
 
 @pytest.mark.parametrize("schema", ["", "FCC_CONFIG_SCHEMA=1\n"])
@@ -271,7 +271,7 @@ def test_explicit_managed_path_is_deduplicated(
     [
         ("ANTHROPIC_AUTH_TOKEN=secret\n", {}, "true", "secret"),
         ("ANTHROPIC_AUTH_TOKEN=\n", {}, "false", None),
-        ("", {"ANTHROPIC_AUTH_TOKEN": "process-secret"}, "true", None),
+        ("", {"ANTHROPIC_AUTH_TOKEN": "process-secret"}, "false", None),
         ("", {}, "false", None),
         (
             "PROXY_AUTH_ENABLED=false\nANTHROPIC_AUTH_TOKEN=secret\n",
@@ -308,6 +308,18 @@ def test_process_auth_flag_is_not_persisted(
     consolidate_managed_config({"PROXY_AUTH_ENABLED": "true"})
 
     assert "PROXY_AUTH_ENABLED" not in dotenv_values_from_file(managed)
+
+
+def test_fresh_install_ignores_process_token(monkeypatch, tmp_path):
+    managed, _ = _paths(monkeypatch, tmp_path)
+    process = {"ANTHROPIC_AUTH_TOKEN": "process-secret"}
+    consolidate_managed_config(process)
+    values = dotenv_values_from_file(managed)
+    assert "ANTHROPIC_AUTH_TOKEN" not in values
+    assert "PROXY_AUTH_ENABLED" not in values
+    settings = ManagedConfigStore().read(process).settings
+    assert settings.proxy_auth_token == "freecc"
+    assert settings.proxy_auth_enabled is False
 
 
 def test_only_managed_schema_marker_is_trusted(
@@ -376,10 +388,13 @@ def test_concurrent_loaders_produce_one_valid_managed_file(
     legacy.parent.mkdir(parents=True)
     legacy.write_text("MODEL=deepseek/concurrent\n", encoding="utf-8")
 
+    def initialize_and_read(_index):
+        store = ManagedConfigStore()
+        store.initialize({})
+        return store.read({})
+
     with ThreadPoolExecutor(max_workers=8) as executor:
-        snapshots = list(
-            executor.map(lambda _index: resolve_settings_snapshot({}), range(8))
-        )
+        snapshots = list(executor.map(initialize_and_read, range(8)))
 
     assert {snapshot.settings.model for snapshot in snapshots} == {
         "deepseek/concurrent"

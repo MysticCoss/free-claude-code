@@ -2,13 +2,14 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest
 from free_claude_code.core.anthropic.stream_contracts import parse_sse_text
@@ -44,8 +45,6 @@ class CanonicalFailureProvider:
         self._message = message
         self._retryable = retryable
         self._grouped = grouped
-        self.preflight_messages = MagicMock()
-        self.preflight_responses = MagicMock()
         self.stream_kwargs: list[dict[str, Any]] = []
 
     async def stream_messages(
@@ -101,22 +100,6 @@ class StalledProvider:
         self._responses_chunks = responses_chunks
         self.close_calls = 0
 
-    def preflight_messages(
-        self,
-        _request: MessagesRequest,
-        *,
-        reasoning: ReasoningPolicy,
-    ) -> None:
-        del reasoning
-
-    def preflight_responses(
-        self,
-        _request: OpenAIResponsesRequest,
-        *,
-        reasoning: ReasoningPolicy,
-    ) -> None:
-        del reasoning
-
     async def stream_messages(
         self,
         _request: MessagesRequest,
@@ -125,6 +108,8 @@ class StalledProvider:
         request_id: str,
         response_model: str,
         reasoning: ReasoningPolicy,
+        request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens, request_id, response_model, reasoning
         try:
@@ -141,6 +126,7 @@ class StalledProvider:
         request_id: str,
         response_model: str,
         reasoning: ReasoningPolicy,
+        request_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens, request_id, response_model, reasoning
         try:

@@ -17,6 +17,7 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
+from free_claude_code.core.history_replay import decode_replay
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.providers.model_listing import ModelListResponseError
@@ -25,6 +26,7 @@ from tests.providers.support import (
     REASONING_DEFAULT,
     REASONING_OFF,
     REASONING_ON,
+    SDKStreamDouble,
     immediate_admission,
     make_provider_config,
     profiled_provider,
@@ -57,7 +59,7 @@ def _provider_with_transport(
         http_client=httpx2.AsyncClient(transport=transport),
     )
     with patch(
-        "free_claude_code.providers.openai_chat.provider.AsyncOpenAI",
+        "free_claude_code.providers.openai_chat.client.AsyncOpenAI",
         return_value=client,
     ):
         return profiled_provider(
@@ -81,13 +83,11 @@ def _request(**overrides: JsonValue) -> MessagesRequest:
     return MessagesRequest.model_validate(payload)
 
 
-class AsyncStream:
+class AsyncStream(SDKStreamDouble):
     def __init__(self, chunks: list[SimpleNamespace]) -> None:
         self._chunks = chunks
         self.closed = False
-
-    def __aiter__(self) -> AsyncIterator[SimpleNamespace]:
-        return self._iter()
+        super().__init__(self._iter(), close=self.aclose)
 
     async def _iter(self) -> AsyncIterator[SimpleNamespace]:
         for chunk in self._chunks:
@@ -180,7 +180,7 @@ def test_build_request_body_preserves_nested_model_images_tools_and_results(
         extra_body={"provider_option": "must-not-pass-through"},
     )
 
-    body = cline_pass_provider._build_request_body(
+    body = cline_pass_provider._chat._build_request_body(
         request,
         reasoning=ReasoningPolicy.on(),
     )
@@ -227,7 +227,7 @@ def test_build_request_body_adds_no_undocumented_reasoning_control_or_default_ca
     cline_pass_provider: OpenAIChatProvider,
     reasoning: ReasoningPolicy,
 ) -> None:
-    body = cline_pass_provider._build_request_body(
+    body = cline_pass_provider._chat._build_request_body(
         _request(),
         reasoning=reasoning,
     )
@@ -270,7 +270,7 @@ def test_build_request_body_replays_only_opaque_reasoning_details(
         ]
     )
 
-    body = cline_pass_provider._build_request_body(
+    body = cline_pass_provider._chat._build_request_body(
         request,
         reasoning=ReasoningPolicy.on(),
     )
@@ -278,7 +278,10 @@ def test_build_request_body_replays_only_opaque_reasoning_details(
         message for message in body["messages"] if message["role"] == "assistant"
     )
 
-    assert assistant["content"] == "I will inspect it."
+    assert (
+        assistant["content"]
+        == "[Earlier reasoning]\nNeed a tool.\n\nI will inspect it."
+    )
     assert assistant["reasoning_details"] == [detail]
     assert "reasoning" not in assistant
     assert "reasoning_content" not in assistant
@@ -330,14 +333,13 @@ async def test_stream_uses_upstream_sse_and_preserves_reasoning_details(
     assert await_args.kwargs["model"] == "cline-pass/kimi-k3"
     assert thinking_content(events) == "plan "
     assert text_content(events) == "done"
-    redacted_blocks = [
-        event.data["content_block"]
+    records = [
+        decode_replay(event.data["delta"]["signature"]).native
         for event in events
-        if event.event == "content_block_start"
-        and event.data.get("content_block", {}).get("type") == "redacted_thinking"
+        if event.data.get("delta", {}).get("type") == "signature_delta"
     ]
-    assert len(redacted_blocks) == 1
-    assert json.loads(redacted_blocks[0]["data"]) == detail
+    assert len(records) == 1
+    assert records[0]["reasoning_details"] == [detail]
     assert stream.closed
 
 

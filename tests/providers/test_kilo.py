@@ -15,12 +15,14 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
+from free_claude_code.core.history_replay import decode_replay
 from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.providers.kilo import KiloProvider
 from free_claude_code.providers.model_listing import ModelListResponseError
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.support import (
+    SDKStreamDouble,
     immediate_admission,
     make_provider_config,
     reasoning_for,
@@ -45,13 +47,11 @@ def kilo_provider(kilo_config):
     )
 
 
-class AsyncStream:
+class AsyncStream(SDKStreamDouble):
     def __init__(self, chunks):
         self._chunks = chunks
         self.closed = False
-
-    def __aiter__(self):
-        return self._iter()
+        super().__init__(self._iter(), close=self.aclose)
 
     async def _iter(self):
         for chunk in self._chunks:
@@ -100,7 +100,9 @@ def test_build_request_body_openai_shape(kilo_provider):
         }
     )
 
-    body = kilo_provider._build_request_body(request, reasoning=reasoning_for(request))
+    body = kilo_provider._chat._build_request_body(
+        request, reasoning=reasoning_for(request)
+    )
 
     assert body["model"] == "anthropic/claude-sonnet-4.5"
     assert body["messages"][0] == {"role": "user", "content": "Hello"}
@@ -116,7 +118,9 @@ def test_build_request_body_forwards_caller_extra_body(kilo_provider):
         }
     )
 
-    body = kilo_provider._build_request_body(request, reasoning=reasoning_for(request))
+    body = kilo_provider._chat._build_request_body(
+        request, reasoning=reasoning_for(request)
+    )
 
     assert body.get("extra_body", {}).get("custom_field") == "value"
 
@@ -142,7 +146,9 @@ def test_extra_body_cannot_override_canonical_request_fields(kilo_provider, fiel
     )
 
     with pytest.raises(InvalidRequestError, match=field):
-        kilo_provider._build_request_body(request, reasoning=reasoning_for(request))
+        kilo_provider._chat._build_request_body(
+            request, reasoning=reasoning_for(request)
+        )
 
 
 def test_build_request_body_sends_reasoning_object(kilo_provider):
@@ -154,7 +160,9 @@ def test_build_request_body_sends_reasoning_object(kilo_provider):
         }
     )
 
-    body = kilo_provider._build_request_body(request, reasoning=reasoning_for(request))
+    body = kilo_provider._chat._build_request_body(
+        request, reasoning=reasoning_for(request)
+    )
 
     assert body.get("extra_body", {}).get("reasoning") is not None
 
@@ -167,7 +175,7 @@ def test_build_request_body_sends_reasoning_disabled(kilo_provider):
         }
     )
 
-    body = kilo_provider._build_request_body(
+    body = kilo_provider._chat._build_request_body(
         request,
         reasoning=ReasoningPolicy.off(),
     )
@@ -215,7 +223,7 @@ def test_build_request_body_replays_opaque_reasoning_details_on_tool_turn(
         }
     )
 
-    body = kilo_provider._build_request_body(
+    body = kilo_provider._chat._build_request_body(
         request,
         reasoning=reasoning_for(request),
     )
@@ -272,14 +280,16 @@ async def test_stream_uses_reasoning_field_without_duplicating_plain_details(
     events = parse_sse_text(event_text)
     assert thinking_content(events) == "plan "
     assert text_content(events) == "done"
-    redacted_blocks = [
-        event.data["content_block"]
+    records = [
+        decode_replay(event.data["delta"]["signature"]).native
         for event in events
-        if event.event == "content_block_start"
-        and event.data.get("content_block", {}).get("type") == "redacted_thinking"
+        if event.data.get("delta", {}).get("type") == "signature_delta"
     ]
-    assert len(redacted_blocks) == 1
-    assert json.loads(redacted_blocks[0]["data"]) == encrypted
+    assert len(records) == 1
+    assert records[0]["reasoning_details"] == [
+        {"type": "reasoning.text", "text": "plan "},
+        encrypted,
+    ]
     assert stream.closed
 
 

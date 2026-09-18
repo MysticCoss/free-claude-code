@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 
 import httpx
@@ -20,9 +20,12 @@ from free_claude_code.providers.anthropic_messages.transport import (
     AnthropicMessagesTransport,
 )
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
-from free_claude_code.providers.endpoint import EndpointContext, HttpEndpoint
+from free_claude_code.providers.endpoint_types import EndpointContext, HttpEndpoint
 from free_claude_code.providers.http import close_provider_stream
-from free_claude_code.providers.openai_chat import OpenAIChatProvider
+from free_claude_code.providers.openai_chat import (
+    OpenAIChatBehavior,
+    OpenAIChatTransport,
+)
 from free_claude_code.providers.openai_responses import OpenAIResponsesTransport
 
 from .auth import CopilotAuthManager
@@ -98,7 +101,7 @@ class GitHubCopilotProvider(BaseProvider):
             endpoint_transport=self._openai_pool,
             event_adapter_factory=CopilotResponsesEvents,
         )
-        self._chats: dict[str, tuple[CopilotModel, OpenAIChatProvider]] = {}
+        self._chats: dict[str, tuple[CopilotModel, OpenAIChatTransport]] = {}
         self._condition = asyncio.Condition()
         self._active = 0
         self._closing = False
@@ -114,24 +117,6 @@ class GitHubCopilotProvider(BaseProvider):
             raise InvalidRequestError(
                 "Choose a concrete model from the connected Copilot account."
             )
-
-    def preflight_messages(
-        self,
-        request: MessagesRequest,
-        *,
-        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
-    ) -> None:
-        # Endpoint family and capabilities belong to the current account lease.
-        # Conversion runs after acquisition and before opening the physical stream.
-        self._check_model(request.model)
-
-    def preflight_responses(
-        self,
-        request: OpenAIResponsesRequest,
-        *,
-        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
-    ) -> None:
-        self._check_model(request.model)
 
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         if self._closing:
@@ -150,8 +135,10 @@ class GitHubCopilotProvider(BaseProvider):
         request_id: str | None = None,
         response_model: str | None = None,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
     ) -> AsyncIterator[str]:
-        self.preflight_messages(request, reasoning=reasoning)
+        self._check_model(request.model)
         return self._dispatch(
             request,
             input_tokens,
@@ -168,8 +155,9 @@ class GitHubCopilotProvider(BaseProvider):
         request_id: str | None = None,
         response_model: str | None = None,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        request_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
-        self.preflight_responses(request, reasoning=reasoning)
+        self._check_model(request.model)
         return self._dispatch(
             request,
             input_tokens,
@@ -178,18 +166,20 @@ class GitHubCopilotProvider(BaseProvider):
             reasoning,
         )
 
-    def _chat(self, model: CopilotModel) -> OpenAIChatProvider:
+    def _chat(self, model: CopilotModel) -> OpenAIChatTransport:
         cached = self._chats.get(model.info.model_id)
         if cached is None or cached[0] != model:
-            provider = OpenAIChatProvider(
-                self._config,
-                profile=chat_profile(model),
+            transport = OpenAIChatTransport(
+                behavior=OpenAIChatBehavior(chat_profile(model)),
+                read_timeout_s=self._config.http_read_timeout,
+                log_raw_sse_events=self._config.log_raw_sse_events,
+                log_api_error_tracebacks=self._config.log_api_error_tracebacks,
                 admission=self._admission,
                 client=self._client,
                 endpoint_transport=self._openai_pool,
             )
-            self._chats[model.info.model_id] = (model, provider)
-            return provider
+            self._chats[model.info.model_id] = (model, transport)
+            return transport
         return cached[1]
 
     async def _dispatch(
@@ -234,6 +224,7 @@ class GitHubCopilotProvider(BaseProvider):
                                 request_id=request_id,
                                 response_model=response_model,
                                 reasoning=reasoning,
+                                model_info=lease.model.info,
                             )
                         else:
                             selected = native.stream_responses(
@@ -253,14 +244,28 @@ class GitHubCopilotProvider(BaseProvider):
                             else self._chat(lease.model)
                         )
                         if isinstance(request, MessagesRequest):
-                            selected = transport.stream_messages(
-                                request,
-                                input_tokens=input_tokens,
-                                request_id=request_id,
-                                response_model=response_model,
-                                reasoning=resolved,
-                                endpoint_context=lease,
-                            )
+                            if lease.egress is CopilotEgress.RESPONSES:
+                                selected = self._responses.stream_messages(
+                                    request,
+                                    input_tokens=input_tokens,
+                                    request_id=request_id,
+                                    response_model=response_model,
+                                    reasoning=resolved,
+                                    endpoint_context=lease,
+                                    model_info=lease.model.info,
+                                    can_disable_reasoning="none"
+                                    in (lease.model.supported_efforts or ()),
+                                )
+                            else:
+                                selected = self._chat(lease.model).stream_messages(
+                                    request,
+                                    input_tokens=input_tokens,
+                                    request_id=request_id,
+                                    response_model=response_model,
+                                    reasoning=resolved,
+                                    endpoint_context=lease,
+                                    model_info=lease.model.info,
+                                )
                         else:
                             selected = transport.stream_responses(
                                 request,

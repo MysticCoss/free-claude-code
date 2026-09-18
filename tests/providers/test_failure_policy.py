@@ -1,7 +1,8 @@
 """Raw provider failure classification into the canonical neutral model."""
 
+import ssl
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import httpx
 import httpx2
@@ -76,6 +77,39 @@ def test_stream_retry_classification_distinguishes_protocol_and_status() -> None
     assert not is_retryable_stream_error(_http_status_error(400, "bad request"))
 
 
+@pytest.mark.parametrize(
+    "error_name",
+    [
+        "ReadError",
+        "ReadTimeout",
+        "ConnectError",
+        "ConnectTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "PoolTimeout",
+        "RemoteProtocolError",
+    ],
+)
+def test_http_client_network_errors_have_the_same_failure_policy(
+    error_name: str,
+) -> None:
+    errors = [
+        getattr(module, error_name)("connection interrupted")
+        for module in (httpx, httpx2)
+    ]
+    failures = [
+        classify_provider_failure(
+            error, provider_name="TEST", read_timeout_s=10, request_id="request"
+        )
+        for error in errors
+    ]
+    assert asdict(failures[0]) == asdict(failures[1])
+    assert is_retryable_provider_error(errors[0]) == is_retryable_provider_error(
+        errors[1]
+    )
+    assert is_retryable_stream_error(errors[0]) == is_retryable_stream_error(errors[1])
+
+
 def test_stream_retry_classification_only_accepts_post_open_timeouts() -> None:
     request = httpx.Request("POST", "https://provider.test/v1/messages")
 
@@ -85,6 +119,24 @@ def test_stream_retry_classification_only_accepts_post_open_timeouts() -> None:
     )
     assert not is_retryable_stream_error(httpx.WriteTimeout("write", request=request))
     assert not is_retryable_stream_error(httpx.PoolTimeout("pool", request=request))
+
+
+@pytest.mark.parametrize("read_timeout_s", [None, 120])
+def test_ssl_want_read_error_uses_stream_failure_policy(
+    read_timeout_s: float | None,
+) -> None:
+    error = ssl.SSLWantReadError("the operation did not complete")
+
+    assert is_retryable_stream_error(error)
+    assert is_retryable_provider_error(error)
+    failure = classify_provider_failure(
+        error, provider_name="NIM", read_timeout_s=read_timeout_s, request_id="request"
+    )
+    assert failure.kind is FailureKind.UNAVAILABLE
+    assert failure.status_code == 502
+    assert failure.retryable
+    assert "Could not read the provider response." in failure.message
+    assert "timed out" not in failure.message
 
 
 @pytest.mark.parametrize(

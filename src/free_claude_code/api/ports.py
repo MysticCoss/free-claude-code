@@ -4,14 +4,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from free_claude_code.application.chat import ChatApplicationPort
+from free_claude_code.application.code_sessions import CodeApplicationPort
 from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
     ConnectedAccountStatus,
 )
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.ports import RequestRuntimePort, TaskController
-from free_claude_code.config.admin.state import ConfigInputValue
+from free_claude_code.application.web_tools.ports import WebToolsPort
+from free_claude_code.config.admin.state import ConfigInputValue, ValueState
 from free_claude_code.core.json_types import JsonObject
 
 
@@ -22,13 +23,29 @@ class AdminRuntimePort(Protocol):
         self, updates: Mapping[str, ConfigInputValue]
     ) -> JsonObject: ...
 
-    def admin_status(self) -> JsonObject: ...
+    async def admin_config(self) -> JsonObject: ...
+
+    async def admin_values(self) -> ValueState: ...
+
+    async def admin_status(self) -> JsonObject: ...
+
+    async def claude_vscode_status(self) -> JsonObject: ...
+
+    async def connect_claude_vscode(self) -> JsonObject: ...
+
+    async def disconnect_claude_vscode(self) -> JsonObject: ...
+
+    async def codex_integration_status(self) -> JsonObject: ...
+
+    async def connect_codex(self) -> JsonObject: ...
+
+    async def disconnect_codex(self) -> JsonObject: ...
+
+    async def pick_folder(self, initial_path: str | None) -> str | None: ...
 
     async def test_provider(self, provider_id: str) -> JsonObject: ...
 
     async def refresh_models(self) -> ProviderModelRefreshResult: ...
-
-    async def request_restart(self) -> None: ...
 
     def update_status(self) -> JsonObject: ...
 
@@ -64,4 +81,5 @@ class ApiServices:
     requests: RequestRuntimePort
     admin: AdminRuntimePort
     tasks: TaskController
-    chat: ChatApplicationPort | None = None
+    web_tools: WebToolsPort
+    code: CodeApplicationPort | None = None
