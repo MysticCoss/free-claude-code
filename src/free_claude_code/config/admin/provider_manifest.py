@@ -204,6 +204,13 @@ _PROVIDER_FIELD_OVERRIDES: dict[str, ProviderFieldOverride] = {
             "and tool-capable models."
         ),
     },
+    "SCW_SECRET_KEY": {
+        "label": "Scaleway API Key",
+        "description": (
+            "Scaleway Generative APIs secret key for OpenAI-compatible chat and "
+            "tool-capable models."
+        ),
+    },
     "CHUTES_API_KEY": {
         "label": "Chutes API Key",
         "description": (
@@ -263,6 +270,19 @@ _PROVIDER_FIELD_OVERRIDES: dict[str, ProviderFieldOverride] = {
             "Defaults to https://router.bynara.id/v1."
         ),
     },
+    "LIGHTNING_API_KEY": {
+        "label": "Lightning AI API Key",
+        "description": (
+            "Lightning AI Model APIs key for the OpenAI-compatible endpoint at "
+            "lightning.ai/api/v1. Create one on lightning.ai under Model APIs."
+        ),
+    },
+    "LIGHTNING_BASE_URL": {
+        "description": (
+            "Lightning AI OpenAI-compatible Chat Completions base URL. "
+            "Defaults to https://lightning.ai/api/v1."
+        ),
+    },
     "AGNES_API_KEY": {
         "label": "Agnes AI API Key",
         "description": (
@@ -281,6 +301,20 @@ _PROVIDER_FIELD_OVERRIDES: dict[str, ProviderFieldOverride] = {
         "description": (
             "W&B API key for Serverless Inference at api.inference.wandb.ai/v1. "
             "Create one in [W&B User Settings](https://wandb.ai/settings)."
+        ),
+    },
+    "EXPLABS_API_KEY": {
+        "label": "Experiential Labs API Key",
+        "description": (
+            "Experiential Labs OpenAI-compatible gateway API key for "
+            "api.experientiallabs.ai/v1. Keys look like xpl_ followed by 40 "
+            "hex characters; mint one at platform.experientiallabs.ai/settings/api-keys."
+        ),
+    },
+    "EXPLABS_BASE_URL": {
+        "description": (
+            "Experiential Labs OpenAI-compatible Chat Completions base URL. "
+            "Defaults to https://api.experientiallabs.ai/v1."
         ),
     },
 }
@@ -315,6 +349,11 @@ def _credential_field_specs() -> tuple[ConfigFieldSpec, ...]:
                     section_id="providers",
                     field_type="secret",
                     settings_attr=descriptor.credential_attr,
+                    provider_ids=tuple(
+                        provider.provider_id
+                        for provider in PROVIDER_CATALOG.values()
+                        if provider.credential_env == descriptor.credential_env
+                    ),
                     secret=True,
                 )
             )
@@ -335,6 +374,7 @@ def _base_url_field_specs() -> tuple[ConfigFieldSpec, ...]:
                     label=f"{descriptor.display_name} Base URL",
                     section_id="providers",
                     settings_attr=descriptor.base_url_attr,
+                    provider_ids=(descriptor.provider_id,),
                 )
             )
         )
@@ -348,6 +388,7 @@ def _cloudflare_account_field_specs() -> tuple[ConfigFieldSpec, ...]:
             label="Cloudflare Account ID",
             section_id="providers",
             settings_attr="cloudflare_account_id",
+            provider_ids=("cloudflare",),
             description=(
                 "Cloudflare account ID used to build the /accounts/{id}/ai/v1 endpoint."
             ),
@@ -362,6 +403,7 @@ def _vertex_field_specs() -> tuple[ConfigFieldSpec, ...]:
             label="Google Cloud Project ID",
             section_id="providers",
             settings_attr="vertex_project_id",
+            provider_ids=("vertex",),
             description=(
                 "Google Cloud project used for Vertex AI. Authentication uses "
                 "Application Default Credentials (ADC)."
@@ -372,6 +414,7 @@ def _vertex_field_specs() -> tuple[ConfigFieldSpec, ...]:
             label="Vertex AI Location",
             section_id="providers",
             settings_attr="vertex_location",
+            provider_ids=("vertex",),
             description=(
                 "Use global for the global Vertex AI endpoint or a region such as "
                 "us-central1."
@@ -393,6 +436,7 @@ def _proxy_field_specs() -> tuple[ConfigFieldSpec, ...]:
                     section_id="providers",
                     field_type="secret",
                     settings_attr=descriptor.proxy_attr,
+                    provider_ids=(descriptor.provider_id,),
                     secret=True,
                     advanced=True,
                 )

@@ -19,6 +19,7 @@ from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.openai_chat import (
     NamedEffortReasoning,
+    OpenAIChatBehavior,
     OpenAIChatProfile,
     OpenAIChatProvider,
     OpenAIChatRequestPolicy,
@@ -94,16 +95,14 @@ class _ErrorCandidate:
     field_context: bool = False
 
 
-class GroqProvider(OpenAIChatProvider):
-    """Groq API with model-agnostic reasoning-vocabulary learning."""
+class GroqChatBehavior(OpenAIChatBehavior):
+    """Groq Chat adaptation without HTTP ownership."""
 
-    def __init__(
-        self, config: ProviderConfig, *, admission: ProviderAdmissionController
-    ) -> None:
-        super().__init__(config, profile=_PROFILE, admission=admission)
+    def __init__(self) -> None:
+        super().__init__(_PROFILE)
         self._model_reasoning_vocabularies: dict[str, frozenset[str]] = {}
 
-    def _finalize_chat_body(
+    def finalize_chat_body(
         self,
         body: dict[str, Any],
         *,
@@ -117,7 +116,11 @@ class GroqProvider(OpenAIChatProvider):
             return body
         return _rewrite_reasoning_effort(body, accepted) or body
 
-    def _get_retry_request_body(
+    def reasoning_disable_rejected(self, error: Exception) -> bool:
+        accepted = _parse_reasoning_vocabulary(error)
+        return accepted is not None and "none" not in accepted
+
+    def retry_request_body(
         self, error: Exception, body: dict[str, Any]
     ) -> dict[str, Any] | None:
         accepted = _parse_reasoning_vocabulary(error)
@@ -138,15 +141,14 @@ class GroqProvider(OpenAIChatProvider):
         logger.warning("GROQ_STREAM: {} after upstream rejection", action)
         return retry_body
 
-    def _next_create_retry_body(
+    def retry_after_standard_corrections(
         self,
         error: Exception,
         body: JsonObject,
         used_retry_kinds: set[str],
     ) -> JsonObject | None:
-        retry_body = super()._next_create_retry_body(error, body, used_retry_kinds)
-        if retry_body is not None or "groq_tpm" in used_retry_kinds:
-            return retry_body
+        if "groq_tpm" in used_retry_kinds:
+            return None
 
         correction = correct_tpm_completion_budget(error, body)
         if correction is None:
@@ -161,6 +163,15 @@ class GroqProvider(OpenAIChatProvider):
             correction.corrected_max_completion_tokens,
         )
         return correction.body
+
+
+class GroqProvider(OpenAIChatProvider):
+    """Groq API with model-agnostic reasoning-vocabulary learning."""
+
+    def __init__(
+        self, config: ProviderConfig, *, admission: ProviderAdmissionController
+    ) -> None:
+        super().__init__(config, behavior=GroqChatBehavior(), admission=admission)
 
 
 def _parse_reasoning_vocabulary(error: Exception) -> frozenset[str] | None:

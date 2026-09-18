@@ -17,10 +17,10 @@ from free_claude_code.config.constants import (
 from free_claude_code.config.env_files import dotenv_values_from_file
 from free_claude_code.config.loader import (
     ConfigSource,
+    ManagedConfigStore,
     clear_settings_cache,
     compose_settings_snapshot,
     get_settings,
-    repair_invalid_managed_provider_proxies,
 )
 from free_claude_code.config.model_refs import (
     configured_chat_model_refs,
@@ -81,7 +81,8 @@ def test_retirement_preserves_effective_default_order_and_process_environment(
             "MODEL": "groq/default",
             "MODEL_OPUS": "groq/managed-tier",
             "MODEL_FALLBACKS": "groq/first, github_models/old, deepseek/last",
-        }
+        },
+        dict(loader.os.environ),
     )
     assert snapshot.settings.model == "groq/default"
     assert snapshot.settings.model_opus is None
@@ -243,11 +244,24 @@ def test_blank_required_process_value_is_rejected() -> None:
         compose_settings_snapshot({}, {"MODEL": " "})
 
 
-def test_blank_process_auth_token_uses_retained_default() -> None:
-    snapshot = compose_settings_snapshot({}, {"ANTHROPIC_AUTH_TOKEN": ""})
+@pytest.mark.parametrize("process_token", ["", "  ", "terminal-token"])
+def test_process_auth_token_cannot_override_retained_default(
+    process_token: str,
+) -> None:
+    snapshot = compose_settings_snapshot({}, {"ANTHROPIC_AUTH_TOKEN": process_token})
 
     assert snapshot.settings.proxy_auth_token == "freecc"
     assert snapshot.sources["proxy_auth_token"] is ConfigSource.DEFAULT
+
+
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_auth_checkbox_does_not_change_retained_token(enabled: str) -> None:
+    snapshot = compose_settings_snapshot(
+        {"PROXY_AUTH_ENABLED": enabled, "ANTHROPIC_AUTH_TOKEN": "managed-token"},
+        {"ANTHROPIC_AUTH_TOKEN": "terminal-token"},
+    )
+    assert snapshot.settings.proxy_auth_enabled is (enabled == "true")
+    assert snapshot.settings.proxy_auth_token == "managed-token"
 
 
 def test_process_precedence_and_managed_token_exception() -> None:
@@ -300,7 +314,7 @@ def test_repair_invalid_managed_provider_proxies_removes_all_eligible_values() -
         )
     )
 
-    removed = repair_invalid_managed_provider_proxies({})
+    removed = ManagedConfigStore().repair_invalid_provider_proxies({})
 
     values = dotenv_values_from_file(managed)
     assert removed == ("OPENROUTER_PROXY", "OPENAI_PROXY")
@@ -320,14 +334,14 @@ def test_repair_valid_managed_provider_proxy_leaves_file_unchanged() -> None:
     )
     baseline = managed.read_bytes()
 
-    assert repair_invalid_managed_provider_proxies({}) == ()
+    assert ManagedConfigStore().repair_invalid_provider_proxies({}) == ()
     assert managed.read_bytes() == baseline
 
 
 def test_repair_without_managed_file_is_a_noop() -> None:
     managed = managed_env_path()
 
-    assert repair_invalid_managed_provider_proxies({}) == ()
+    assert ManagedConfigStore().repair_invalid_provider_proxies({}) == ()
     assert not managed.exists()
 
 
@@ -344,7 +358,9 @@ def test_repair_preserves_process_owned_managed_proxy(
     process = {"OPENAI_PROXY": process_value, "KEEP_PROCESS": "unchanged"}
     baseline_process = dict(process)
 
-    assert repair_invalid_managed_provider_proxies(process) == ("OPENROUTER_PROXY",)
+    assert ManagedConfigStore().repair_invalid_provider_proxies(process) == (
+        "OPENROUTER_PROXY",
+    )
 
     values = dotenv_values_from_file(managed)
     assert values["OPENAI_PROXY"] == invalid_openai
@@ -366,7 +382,7 @@ def test_repair_propagates_atomic_write_failure_without_changing_source() -> Non
         ),
         pytest.raises(OSError, match="disk full"),
     ):
-        repair_invalid_managed_provider_proxies({})
+        ManagedConfigStore().repair_invalid_provider_proxies({})
 
     assert managed.read_bytes() == baseline
 
@@ -381,9 +397,11 @@ def test_repair_is_idempotent_and_writes_only_once() -> None:
         "atomic_write_managed_config",
         wraps=loader.atomic_write_managed_config,
     ) as writer:
-        assert repair_invalid_managed_provider_proxies({}) == ("OPENAI_PROXY",)
+        assert ManagedConfigStore().repair_invalid_provider_proxies({}) == (
+            "OPENAI_PROXY",
+        )
         repaired = managed.read_bytes()
-        assert repair_invalid_managed_provider_proxies({}) == ()
+        assert ManagedConfigStore().repair_invalid_provider_proxies({}) == ()
 
     assert writer.call_count == 1
     assert managed.read_bytes() == repaired
@@ -394,7 +412,7 @@ def test_repair_propagates_malformed_managed_config() -> None:
     baseline = managed.read_bytes()
 
     with pytest.raises(ValueError, match="Could not parse configuration file"):
-        repair_invalid_managed_provider_proxies({})
+        ManagedConfigStore().repair_invalid_provider_proxies({})
 
     assert managed.read_bytes() == baseline
 
@@ -419,7 +437,7 @@ def test_repair_propagates_config_lock_timeout(
     monkeypatch.setattr(loader, "InterprocessFileLock", UnavailableLock)
 
     with pytest.raises(TimeoutError, match="Could not acquire managed-config lock"):
-        repair_invalid_managed_provider_proxies({})
+        ManagedConfigStore().repair_invalid_provider_proxies({})
 
     assert managed.read_bytes() == baseline
 

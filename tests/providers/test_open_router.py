@@ -15,25 +15,25 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
+from free_claude_code.core.history_replay import decode_replay
 from free_claude_code.core.model_capabilities import ModelInputModality
 from free_claude_code.providers.open_router import OpenRouterProvider
 from free_claude_code.providers.openai_chat import OpenAIChatProvider
 from tests.providers.request_factory import make_messages_request
 from tests.providers.support import (
     REASONING_OFF,
+    SDKStreamDouble,
     immediate_admission,
     make_provider_config,
     reasoning_for,
 )
 
 
-class AsyncStream:
+class AsyncStream(SDKStreamDouble):
     def __init__(self, chunks):
         self._chunks = chunks
         self.closed = False
-
-    def __aiter__(self):
-        return self._iter()
+        super().__init__(self._iter(), close=self.aclose)
 
     async def _iter(self):
         for chunk in self._chunks:
@@ -85,7 +85,7 @@ def test_init_uses_openai_chat_provider(open_router_provider):
 
 
 def test_build_request_body_uses_openai_chat_shape(open_router_provider):
-    body = open_router_provider._build_request_body(make_request())
+    body = open_router_provider._chat._build_request_body(make_request())
 
     assert body["model"] == "moonshotai/kimi-k2.6:free"
     assert body["temperature"] == 0.5
@@ -98,7 +98,7 @@ def test_build_request_body_uses_openai_chat_shape(open_router_provider):
 
 
 def test_build_request_body_default_max_tokens(open_router_provider):
-    body = open_router_provider._build_request_body(make_request(max_tokens=None))
+    body = open_router_provider._chat._build_request_body(make_request(max_tokens=None))
 
     assert body["max_tokens"] == ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS
 
@@ -107,13 +107,13 @@ def test_openrouter_extra_body_rejects_overriding_reserved_fields(
     open_router_provider,
 ):
     with pytest.raises(InvalidRequestError, match="model"):
-        open_router_provider._build_request_body(
+        open_router_provider._chat._build_request_body(
             make_request(extra_body={"model": "hijack"})
         )
 
 
 def test_openrouter_extra_body_allows_provider_keys(open_router_provider):
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         make_request(extra_body={"transforms": ["no-web"], "plugins": []}),
         reasoning=REASONING_OFF,
     )
@@ -129,7 +129,7 @@ def test_build_request_body_disables_reasoning_when_client_disables_it(
     open_router_provider,
 ):
     request = make_request(thinking={"type": "disabled"})
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         request, reasoning=reasoning_for(request)
     )
 
@@ -140,7 +140,7 @@ def test_build_request_body_maps_thinking_budget_to_reasoning_max_tokens(
     open_router_provider,
 ):
     request = make_request(thinking={"type": "enabled", "budget_tokens": 4096})
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         request, reasoning=reasoning_for(request)
     )
 
@@ -170,7 +170,7 @@ def test_build_request_body_replays_openrouter_reasoning_details(
         }
     )
 
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         request, reasoning=reasoning_for(request)
     )
 
@@ -225,7 +225,7 @@ def test_reasoning_details_skip_neutral_tool_turn_boundary(open_router_provider)
         }
     )
 
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         request, reasoning=reasoning_for(request)
     )
 
@@ -286,7 +286,7 @@ def test_reasoning_details_preserve_redacted_only_assistant_after_tool(
         }
     )
 
-    body = open_router_provider._build_request_body(
+    body = open_router_provider._chat._build_request_body(
         request, reasoning=reasoning_for(request)
     )
 
@@ -327,8 +327,16 @@ async def test_stream_maps_reasoning_content_and_details(open_router_provider):
     event_text = "".join(events)
     parsed = parse_sse_text(event_text)
     assert thinking_content(parsed) == "plan "
-    assert "redacted_thinking" in event_text
-    assert "opaque" in event_text
+    carriers = [
+        event.data["delta"]["signature"]
+        for event in parsed
+        if event.data.get("delta", {}).get("type") == "signature_delta"
+    ]
+    assert len(carriers) == 1
+    assert decode_replay(carriers[0]).native["reasoning_details"] == [
+        {"type": "reasoning.text", "text": "plan "},
+        redacted,
+    ]
     assert text_content(parsed) == "done"
     assert stream.closed
 

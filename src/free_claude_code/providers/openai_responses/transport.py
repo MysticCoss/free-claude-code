@@ -1,40 +1,49 @@
-"""Standard API-key OpenAI Responses execution over the official SDK."""
+"""Shared OpenAI Responses execution over the official SDK."""
 
 import asyncio
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import replace
+from functools import partial
 from typing import cast
 
 import httpx2
 from openai import AsyncOpenAI, AsyncStream
-from openai._types import Omit
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
 
 from free_claude_code.application.errors import InvalidRequestError
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.diagnostics import extract_upstream_error_detail
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
+from free_claude_code.core.history_replay import (
+    prepare_history,
+    preserve_responses_reasoning,
+)
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import (
     OpenAIResponsesRequest,
     ResponsesConversionError,
     ResponsesProviderStream,
     ResponsesStreamFailure,
+    ResponsesToolAdapter,
+    ResponsesToolPolicy,
     build_native_responses_request,
     build_responses_provider_request,
     responses_stream_failure_from_event,
 )
 from free_claude_code.core.openai_tool_names import OpenAIToolNameCodec
-from free_claude_code.core.reasoning import ReasoningPolicy
+from free_claude_code.core.reasoning import ReasoningControl, ReasoningPolicy
 from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
     ProviderExecution,
     ProviderOperationKind,
 )
-from free_claude_code.providers.endpoint import EndpointContext, RequestEndpoint
+from free_claude_code.providers.endpoint import RequestEndpoint
+from free_claude_code.providers.endpoint_types import EndpointContext
 from free_claude_code.providers.failure_policy import (
     RetryableProviderProtocolError,
     classify_provider_failure,
@@ -44,7 +53,21 @@ from free_claude_code.providers.failure_policy import (
     provider_authentication_status,
     reports_context_window_incomplete,
 )
+from free_claude_code.providers.history_replay import (
+    replay_origin,
+    validate_history,
+)
 from free_claude_code.providers.http import ProviderAttemptScope, maybe_await_aclose
+from free_claude_code.providers.openai_client import OpenAIRequestClient
+from free_claude_code.providers.openai_stream import OpenAIStreamAdapter
+from free_claude_code.providers.reasoning_compatibility import (
+    ReasoningCorrection,
+    prepare_messages_reasoning,
+)
+from free_claude_code.providers.request_recovery import (
+    RequestCorrections,
+    RequestRecovery,
+)
 from free_claude_code.providers.stream_recovery import (
     RecoveryController,
     RecoveryFailureAction,
@@ -64,22 +87,6 @@ class _TruncatedResponsesStream(RetryableProviderProtocolError):
     """A Responses stream ended without a terminal lifecycle event."""
 
 
-class _ClosableResponsesStream(AsyncIterator[ResponseStreamEvent]):
-    """Expose the OpenAI SDK stream through the shared ``aclose`` contract."""
-
-    def __init__(self, stream: AsyncStream[ResponseStreamEvent]) -> None:
-        self._stream = stream
-
-    def __aiter__(self) -> AsyncIterator[ResponseStreamEvent]:
-        return self
-
-    async def __anext__(self) -> ResponseStreamEvent:
-        return await anext(self._stream)
-
-    async def aclose(self) -> None:
-        await self._stream.close()
-
-
 class OpenAIResponsesTransport:
     """Execute public Responses requests with provider-owned retry semantics."""
 
@@ -93,22 +100,18 @@ class OpenAIResponsesTransport:
         log_raw_sse_events: bool,
         endpoint_transport: httpx2.AsyncBaseTransport | None = None,
         event_adapter_factory: Callable[[], ResponsesEventAdapter] | None = None,
+        omitted_request_fields: frozenset[str] = frozenset(),
+        tool_policy: ResponsesToolPolicy = ResponsesToolPolicy(),
     ) -> None:
         self._client = client
         self._endpoint_transport = endpoint_transport
         self._event_adapter_factory = event_adapter_factory
+        self._omitted_request_fields = omitted_request_fields
+        self._tool_policy = tool_policy
         self._admission = admission
         self._provider_name = provider_name
         self._read_timeout_s = read_timeout_s
         self._log_raw_sse_events = log_raw_sse_events
-
-    def preflight_messages(
-        self,
-        request: MessagesRequest,
-        *,
-        reasoning: ReasoningPolicy,
-    ) -> None:
-        self._build_messages_body(request, reasoning=reasoning)
 
     def stream_messages(
         self,
@@ -119,17 +122,33 @@ class OpenAIResponsesTransport:
         response_model: str,
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
-        session_headers: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        can_disable_reasoning: bool = True,
     ) -> AsyncIterator[str]:
-        body = self._build_messages_body(request, reasoning=reasoning)
+        prepared, wire_reasoning = prepare_messages_reasoning(
+            request,
+            reasoning,
+            model_info=model_info,
+            can_disable=can_disable_reasoning,
+            normal_max_tokens=None,
+        )
+        body = self._build_messages_body(prepared, reasoning=wire_reasoning)
+        correction = (
+            ReasoningCorrection((("reasoning",),), "max_output_tokens", None)
+            if reasoning.control is ReasoningControl.PREFER_OFF
+            and wire_reasoning.control is ReasoningControl.OFF
+            else None
+        )
         tool_names = OpenAIToolNameCodec.from_request(request)
         message_id = f"msg_{uuid.uuid4()}"
         return self._run_stream(
             body,
+            reasoning_correction=correction,
             endpoint_context=endpoint_context,
+            extra_headers=dict(extra_headers or {}),
             request_id=request_id,
             response_model=response_model,
-            session_headers=session_headers,
             presenter_factory=lambda: MessagesResponsesPresenter(
                 ResponsesProviderStream(
                     message_id=message_id,
@@ -141,14 +160,6 @@ class OpenAIResponsesTransport:
             ),
         )
 
-    def preflight_responses(
-        self,
-        request: OpenAIResponsesRequest,
-        *,
-        reasoning: ReasoningPolicy,
-    ) -> None:
-        self._build_native_body(request, reasoning=reasoning)
-
     def stream_responses(
         self,
         request: OpenAIResponsesRequest,
@@ -158,53 +169,78 @@ class OpenAIResponsesTransport:
         response_model: str,
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
-        session_headers: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens
-        body = self._build_native_body(request, reasoning=reasoning)
+        body, tools = self._build_native_body(request, reasoning=reasoning)
         return self._run_stream(
             body,
             endpoint_context=endpoint_context,
+            extra_headers=dict(extra_headers or {}),
             request_id=request_id,
             response_model=response_model,
-            session_headers=session_headers,
             presenter_factory=lambda: NativeResponsesPresenter(
-                public_model=response_model
+                public_model=response_model, tool_events=tools.event_adapter()
             ),
         )
 
-    @staticmethod
     def _build_messages_body(
+        self,
         request: MessagesRequest,
         *,
         reasoning: ReasoningPolicy,
+        model_info: ProviderModelInfo | None = None,
+        can_disable_reasoning: bool = True,
     ) -> JsonObject:
+        validate_history(request.model_dump(mode="json"))
+        request, reasoning = prepare_messages_reasoning(
+            request,
+            reasoning,
+            model_info=model_info,
+            can_disable=can_disable_reasoning,
+            normal_max_tokens=None,
+        )
         try:
-            return cast(
-                JsonObject,
+            return self._prepare_body(
                 cast(
-                    ResponseCreateParamsStreaming,
-                    build_responses_provider_request(request, reasoning=reasoning),
-                ),
+                    JsonObject,
+                    cast(
+                        ResponseCreateParamsStreaming,
+                        build_responses_provider_request(request, reasoning=reasoning),
+                    ),
+                )
             )
         except ResponsesConversionError as exc:
             raise InvalidRequestError(str(exc)) from exc
 
-    @staticmethod
     def _build_native_body(
+        self,
         request: OpenAIResponsesRequest,
         *,
         reasoning: ReasoningPolicy,
-    ) -> JsonObject:
+    ) -> tuple[JsonObject, ResponsesToolAdapter]:
+        validate_history(request.model_dump(mode="json"))
         if not request.model.strip():
             raise InvalidRequestError("Responses request model must not be empty.")
         if request.input is None or request.input == "" or request.input == []:
             raise InvalidRequestError("Responses request input must not be empty.")
-        return build_native_responses_request(
-            request,
-            model=request.model,
-            reasoning=reasoning,
+        try:
+            tools = ResponsesToolAdapter(request, self._tool_policy)
+        except ResponsesConversionError as error:
+            raise InvalidRequestError(str(error)) from error
+        body = self._prepare_body(
+            build_native_responses_request(
+                tools.request,
+                model=request.model,
+                reasoning=reasoning,
+            )
         )
+        return body, tools
+
+    def _prepare_body(self, body: JsonObject) -> JsonObject:
+        for field in self._omitted_request_fields:
+            body.pop(field, None)
+        return body
 
     async def _run_stream(
         self,
@@ -214,29 +250,29 @@ class OpenAIResponsesTransport:
         response_model: str,
         presenter_factory: ResponsesPresenterFactory,
         endpoint_context: EndpointContext | None = None,
-        session_headers: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        reasoning_correction: ReasoningCorrection | None = None,
     ) -> AsyncIterator[str]:
         execution = self._admission.start_execution(request_id=request_id)
         outcome = ResponsesExecutionOutcome()
         endpoint = (
-            RequestEndpoint(endpoint_context, self._endpoint_transport)
-            if endpoint_context is not None
-            else None
+            RequestEndpoint(endpoint_context) if endpoint_context is not None else None
         )
+        request_client = OpenAIRequestClient(self._endpoint_transport)
         provider_stream = self._run_execution(
             body,
+            reasoning_correction=reasoning_correction,
             request_id=request_id,
             response_model=response_model,
             presenter_factory=presenter_factory,
             execution=execution,
             outcome=outcome,
             endpoint=endpoint,
-            session_headers=session_headers,
+            request_client=request_client,
+            extra_headers=extra_headers,
         )
         try:
             async for event in provider_stream:
-                if endpoint is not None:
-                    endpoint.commit()
                 yield event
         except asyncio.CancelledError:
             raise
@@ -253,8 +289,7 @@ class OpenAIResponsesTransport:
                 await maybe_await_aclose(provider_stream)
             finally:
                 try:
-                    if endpoint is not None:
-                        await endpoint.aclose()
+                    await request_client.aclose()
                 finally:
                     execution.abandon()
 
@@ -268,9 +303,15 @@ class OpenAIResponsesTransport:
         execution: ProviderExecution,
         outcome: ResponsesExecutionOutcome,
         endpoint: RequestEndpoint | None = None,
-        session_headers: Mapping[str, str] | None = None,
+        request_client: OpenAIRequestClient,
+        extra_headers: Mapping[str, str] | None = None,
+        reasoning_correction: ReasoningCorrection | None = None,
     ) -> AsyncIterator[str]:
         recovery = RecoveryController()
+        request_recovery = RequestRecovery(
+            execution, endpoint=endpoint, stream=recovery
+        )
+        corrections = RequestCorrections("responses", reasoning_correction)
         trace_event(
             stage="provider",
             event="provider.request.sent",
@@ -296,6 +337,19 @@ class OpenAIResponsesTransport:
             scope: ProviderAttemptScope | None = None
             stream_opened = False
             try:
+                client = (
+                    request_client.for_endpoint(self._client, await endpoint.resolve())
+                    if endpoint is not None
+                    else self._client
+                )
+                origin = replay_origin(
+                    self._provider_name,
+                    "responses",
+                    str(body["model"]),
+                    client=client,
+                    endpoint=endpoint.snapshot if endpoint is not None else None,
+                )
+                sent_body = prepare_history(body, origin)
                 attempt = await execution.open_attempt(ProviderOperationKind.GENERATION)
                 scope = ProviderAttemptScope(
                     attempt,
@@ -303,11 +357,12 @@ class OpenAIResponsesTransport:
                     request_id=request_id,
                 )
                 sdk_stream = await self._create_sdk_stream(
-                    body,
-                    endpoint=endpoint,
-                    session_headers=session_headers,
+                    sent_body,
+                    client=client,
+                    request_client=request_client,
+                    extra_headers=extra_headers,
                 )
-                stream = scope.retain(_ClosableResponsesStream(sdk_stream))
+                stream = scope.retain(OpenAIStreamAdapter(sdk_stream))
                 stream_opened = True
 
                 async for upstream_event in stream:
@@ -349,6 +404,14 @@ class OpenAIResponsesTransport:
                         raise context_window_exceeded_provider_failure()
                     if adapt_event is not None:
                         payload = adapt_event(upstream_event.type, payload)
+                    response = payload.get("response")
+                    if (
+                        isinstance(response, dict)
+                        and isinstance(response.get("model"), str)
+                        and response["model"]
+                    ):
+                        origin = replace(origin, model=response["model"])
+                    payload = preserve_responses_reasoning(payload, origin)
                     for event in presenter.feed(upstream_event.type, payload):
                         for held in recovery.push(event):
                             yield held
@@ -373,15 +436,25 @@ class OpenAIResponsesTransport:
                 raise
             except Exception as raw_error:
                 error = _effective_error(raw_error)
-                if (
-                    scope is not None
-                    and endpoint is not None
-                    and await endpoint.retry_authentication(
-                        error, scope.attempt, execution
+                if scope is not None:
+                    corrected_body = await request_recovery.retry_request(
+                        error,
+                        provider_authentication_status(error),
+                        scope.attempt,
+                        body,
+                        operation_kind=ProviderOperationKind.GENERATION,
+                        propose_correction=partial(
+                            corrections.next_body,
+                            raw_error,
+                            body,
+                            sent_body=sent_body,
+                            reasoning_error=raw_error,
+                        ),
                     )
-                ):
-                    recovery.discard()
-                    continue
+                    if corrected_body is not None:
+                        body = corrected_body
+                        recovery.discard()
+                        continue
                 attempt_failure = None
                 if scope is not None and not scope.attempt.accepted:
                     attempt_failure = await scope.attempt.fail(error)
@@ -454,8 +527,9 @@ class OpenAIResponsesTransport:
         self,
         body: JsonObject,
         *,
-        endpoint: RequestEndpoint | None = None,
-        session_headers: Mapping[str, str] | None = None,
+        client: AsyncOpenAI,
+        request_client: OpenAIRequestClient,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> AsyncStream[ResponseStreamEvent]:
         model = body.get("model")
         if not isinstance(model, str) or not model:
@@ -466,26 +540,17 @@ class OpenAIResponsesTransport:
             for key, value in body.items()
             if key not in {"model", "input", "stream", "store"}
         }
-        client = (
-            await endpoint.openai_client(self._client)
-            if endpoint is not None
-            else self._client
-        )
-        # Provider-injected headers (e.g. x-opencode-session) merge over the
-        # endpoint's own; the SDK consumes extra_headers and never puts it
-        # into the JSON body.
-        merged_headers: dict[str, str | Omit] | None = (
-            dict(endpoint.openai_headers()) if endpoint is not None else None
-        )
-        if session_headers:
-            merged_headers = {**(merged_headers or {}), **session_headers}
         return await client.responses.create(
             model=model,
             input=input_value,
             stream=True,
             store=False,
             extra_body=extra_body or None,
-            extra_headers=merged_headers,
+            extra_headers={
+                **(extra_headers or {}),
+                **request_client.openai_headers(),
+            }
+            or None,
         )
 
 

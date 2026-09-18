@@ -26,7 +26,6 @@ from .provider_stream import (
     responses_stream_failure_from_event,
 )
 from .reasoning import responses_reasoning_config, responses_reasoning_policy
-from .reasoning_replay import MessagesReplayOrigin
 from .streaming.blocks import ReasoningBlockState, TextBlockState, ToolBlockState
 from .streaming.completion import (
     ResponseBlockCompleter,
@@ -37,12 +36,19 @@ from .streaming.error_mapping import replay_unsafe_function_call_error
 from .streaming.event_builders import ResponseEventBuilder
 from .streaming.ledger import ResponsesOutputLedger
 from .tokens import estimate_responses_input_tokens
-from .tools import ResponsesToolIdentity, responses_tool_identity_from_anthropic_name
+from .tool_adaptation import (
+    ResponsesToolAdapter,
+    ResponsesToolEventAdapter,
+    ResponsesToolPolicy,
+)
+from .tools import (
+    ResponsesToolIdentity,
+    flatten_responses_tool_name,
+)
 
 __all__ = [
     "OPENAI_RESPONSES_SSE_HEADERS",
     "AnthropicToResponsesStream",
-    "MessagesReplayOrigin",
     "NativeResponsesRelay",
     "OpenAIResponsesRequest",
     "ReasoningBlockState",
@@ -54,7 +60,10 @@ __all__ = [
     "ResponsesOutputLedger",
     "ResponsesProviderStream",
     "ResponsesStreamFailure",
+    "ResponsesToolAdapter",
+    "ResponsesToolEventAdapter",
     "ResponsesToolIdentity",
+    "ResponsesToolPolicy",
     "TextBlockState",
     "ToolBlockState",
     "build_native_responses_request",
@@ -63,6 +72,7 @@ __all__ = [
     "build_responses_provider_request",
     "committed_response_failure_frame",
     "estimate_responses_input_tokens",
+    "flatten_responses_tool_name",
     "new_call_id",
     "new_message_item_id",
     "new_reasoning_item_id",
@@ -76,6 +86,5 @@ __all__ = [
     "responses_reasoning_config",
     "responses_reasoning_policy",
     "responses_stream_failure_from_event",
-    "responses_tool_identity_from_anthropic_name",
     "tool_item",
 ]

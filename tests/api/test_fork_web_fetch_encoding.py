@@ -1,10 +1,11 @@
 """Fork regression coverage for web_fetch response charset handling.
 
-Kept in its own file so upstream rewrites of ``test_web_server_tools.py``
-cannot drop it. Upstream ``_run_web_fetch`` called ``response.get_encoding()``
-on a never-fully-read aiohttp response, which raises ``RuntimeError`` for any
-site that omits the ``charset`` Content-Type parameter (e.g. docs.python.org);
-the fix parses the charset from the header text instead.
+Kept in its own file so upstream rewrites of the web-tool tests cannot drop
+it. ``HTTPWebToolsClient.fetch`` must not call aiohttp's
+``response.get_encoding()`` on a never-fully-read response, which raises
+``RuntimeError`` for any site that omits the ``charset`` Content-Type
+parameter (e.g. docs.python.org); the fix parses the charset from the header
+text instead.
 """
 
 import codecs
@@ -13,10 +14,10 @@ from unittest.mock import patch
 
 import pytest
 
-from free_claude_code.api.web_tools.egress import WebFetchEgressPolicy
-from free_claude_code.api.web_tools.outbound import (
+from free_claude_code.application.web_tools.ports import WebFetchEgressPolicy
+from free_claude_code.runtime.web_tools.client import (
+    HTTPWebToolsClient,
     _content_type_charset,
-    _run_web_fetch,
 )
 
 _STRICT_EGRESS = WebFetchEgressPolicy(
@@ -67,7 +68,7 @@ class _FakeResponseCM:
         return False
 
 
-def _patch_client_session(response: _FakeResponse):
+def _patch_fetch_transport(response: _FakeResponse):
     class _FakeSession:
         """Stands in for ``aiohttp.ClientSession``; always returns one response."""
 
@@ -83,7 +84,14 @@ def _patch_client_session(response: _FakeResponse):
         def get(self, url: str, **kwargs: object) -> _FakeResponseCM:
             return _FakeResponseCM(response)
 
-    return patch("free_claude_code.api.web_tools.outbound.ClientSession", _FakeSession)
+    return (
+        patch("free_claude_code.runtime.web_tools.client.ClientSession", _FakeSession),
+        patch(
+            "free_claude_code.runtime.web_tools.client"
+            ".get_validated_stream_addrinfos_for_egress",
+            return_value=[(2, 1, 6, "", ("8.8.8.8", 0))],
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -96,7 +104,7 @@ def _patch_client_session(response: _FakeResponse):
     ],
 )
 @pytest.mark.asyncio
-async def test_run_web_fetch_decodes_without_aiohttp_get_encoding(
+async def test_fetch_decodes_without_aiohttp_get_encoding(
     header: str, raw: bytes, expected: str
 ) -> None:
     response = _FakeResponse(
@@ -105,11 +113,14 @@ async def test_run_web_fetch_decodes_without_aiohttp_get_encoding(
         headers={"content-type": header},
         body=raw,
     )
-    with _patch_client_session(response):
-        out = await _run_web_fetch("http://8.8.8.8/page", _STRICT_EGRESS)
+    session_patch, egress_patch = _patch_fetch_transport(response)
+    with session_patch, egress_patch:
+        out = await HTTPWebToolsClient().fetch(
+            "http://8.8.8.8/page", egress=_STRICT_EGRESS
+        )
 
-    assert out["data"] == expected
-    assert out["url"] == "http://8.8.8.8/page"
+    assert out.data == expected
+    assert out.url == "http://8.8.8.8/page"
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import importlib
 import inspect
 import logging
 import os
@@ -9,19 +10,22 @@ import traceback
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
+from functools import partial
+from typing import TYPE_CHECKING
 
+from anyio import to_thread
 from loguru import logger
 
-import free_claude_code.cli.managed as cli_managed
-import free_claude_code.messaging.session as messaging_session
-import free_claude_code.messaging.workflow as messaging_workflow_module
-from free_claude_code.application.chat import ChatService
+from free_claude_code.application.code_sessions import CodeService
 from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
     ConnectedAccountPort,
     ConnectedAccountStatus,
 )
-from free_claude_code.application.errors import ApplicationUnavailableError
+from free_claude_code.application.errors import (
+    ApplicationUnavailableError,
+    InvalidRequestError,
+)
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
 from free_claude_code.application.ports import StopResult
 from free_claude_code.application.updater import (
@@ -30,20 +34,21 @@ from free_claude_code.application.updater import (
 )
 from free_claude_code.config.admin.persistence import (
     PreparedAdminUpdate,
-    commit_prepared_admin_update,
-    prepare_admin_update,
 )
-from free_claude_code.config.admin.state import ConfigInputValue
+from free_claude_code.config.admin.state import ConfigInputValue, ValueState
 from free_claude_code.config.admin.status import provider_config_status
-from free_claude_code.config.admin.values import load_value_state
 from free_claude_code.config.loader import clear_settings_cache
 from free_claude_code.config.model_refs import parse_provider_type
-from free_claude_code.config.paths import messaging_state_dir_path
+from free_claude_code.config.paths import (
+    codex_model_catalog_path,
+    messaging_state_dir_path,
+)
 from free_claude_code.config.server_urls import local_admin_url, local_proxy_root_url
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.updates import update_capable
 from free_claude_code.core.version import package_version
+from free_claude_code.harnesses import claude_integration, codex_integration
 from free_claude_code.messaging.platforms import factory as messaging_platform_factory
 from free_claude_code.messaging.platforms.factory import MessagingPlatformOptions
 from free_claude_code.messaging.platforms.ports import (
@@ -56,9 +61,20 @@ from free_claude_code.providers.credential_validation import (
     check_credentials,
 )
 
-from .provider_manager import ProviderRuntimeManager
+if TYPE_CHECKING:
+    import free_claude_code.cli.managed as cli_managed
+    import free_claude_code.messaging.workflow as messaging_workflow_module
 
-RestartCallback = Callable[[], Awaitable[None] | None]
+from free_claude_code.application.readiness import InitializationWait
+from free_claude_code.core.async_tasks import run_sync_owned
+
+from .configuration import ConfigurationService
+from .folder_picker import NativeFolderPicker
+from .provider_manager import ProviderRuntimeManager
+from .retired_chat import remove_retired_chat_history
+
+RestartCallback = Callable[[], None]
+ProcessStopCallback = Callable[[], None] | Callable[[], Awaitable[None]]
 
 _PROVIDER_CHECK_FAILURE_MESSAGE = (
     "Could not refresh this provider's models. Verify its configuration and access."
@@ -112,6 +128,38 @@ def startup_failure_message(settings: Settings, exc: Exception) -> str:
 AUTO_UPDATE_MIN_INTERVAL_SECONDS = 60.0
 
 
+async def _await_owned_task[T](
+    task: asyncio.Task[T],
+    *,
+    cancel_on_interrupt: Callable[[], bool] | None = None,
+) -> T:
+    """Keep ownership until a task settles, then propagate caller cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            # wait never cancels the owned task or logs its exception on interruption.
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+                if cancel_on_interrupt is not None and cancel_on_interrupt():
+                    task.cancel()
+    try:
+        result = task.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            if not isinstance(exc, asyncio.CancelledError):
+                logger.warning(
+                    "Cancelled runtime operation failed: exc_type={}",
+                    type(exc).__name__,
+                )
+            raise cancellation from exc
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
 class ApplicationRuntime:
     """Own every process-lifetime resource used by one server instance."""
 
@@ -119,16 +167,22 @@ class ApplicationRuntime:
         self,
         provider_manager: ProviderRuntimeManager,
         *,
+        configuration: ConfigurationService,
         transcriber: Transcriber | None,
-        chat_service: ChatService | None = None,
+        code_service: CodeService | None = None,
+        transcriber_factory: Callable[[Settings], Awaitable[Transcriber | None]]
+        | None = None,
         restart_callback: RestartCallback | None = None,
         connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
-        process_stop_callback: RestartCallback | None = None,
+        process_stop_callback: ProcessStopCallback | None = None,
         updates: UpdateService | None = None,
     ) -> None:
         self.provider_manager = provider_manager
-        self._chat_service = chat_service
+        self._configuration = configuration
+        self._code_service = code_service
+        self._folder_picker = NativeFolderPicker()
         self._transcriber = transcriber
+        self._transcriber_factory = transcriber_factory
         self._restart_callback = restart_callback
         self._process_stop_callback = process_stop_callback
         self._updates = updates or UpdateService()
@@ -151,7 +205,13 @@ class ApplicationRuntime:
         self._closed = False
         self._provider_manager_closed = False
         self._connected_accounts_closed = False
-        self._close_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._startup_tasks: list[asyncio.Task[None]] = []
+        self._http_ready = asyncio.Event()
+        self._messaging_state = (
+            "disabled" if self.settings.messaging_platform == "none" else "starting"
+        )
+        self._messaging_error: str | None = None
 
     @property
     def settings(self) -> Settings:
@@ -163,48 +223,93 @@ class ApplicationRuntime:
         return self._closed
 
     async def start(self) -> None:
-        if self._started:
-            return
-        logger.info("Starting Claude Code Proxy...")
         try:
-            await self.provider_manager.warm_referenced_model_cache()
-            self.provider_manager.start_model_list_refresh()
-            if self._chat_service is not None:
-                await self._chat_service.start()
-            await self._start_messaging_if_configured()
-            if self.settings.fcc_update_auto and update_capable(package_version()):
-                self._update_task = asyncio.create_task(
-                    self._run_update_auto_loop(),
-                    name="fcc-auto-update",
+            async with self._lifecycle_lock:
+                if self._draining:
+                    raise ApplicationUnavailableError(
+                        "Application runtime is shutting down."
+                    )
+                if self._started:
+                    return
+                logger.info("Starting Claude Code Proxy...")
+                await _await_owned_task(
+                    asyncio.create_task(self._configuration.initialize())
                 )
-            logging.getLogger("uvicorn.error").info(
-                "Admin UI: %s (local-only)",
-                local_admin_url(self.settings),
-            )
-            self._started = True
+                if self._draining:
+                    raise ApplicationUnavailableError(
+                        "Application runtime is shutting down."
+                    )
+                self.provider_manager.start_model_list_refresh()
+                self._startup_tasks.append(
+                    asyncio.create_task(
+                        run_sync_owned(remove_retired_chat_history),
+                        name="fcc-retired-chat-cleanup",
+                    )
+                )
+                if self._code_service is not None:
+                    self._startup_tasks.append(
+                        asyncio.create_task(
+                            self._code_service.start(), name="fcc-code-startup"
+                        )
+                    )
+                self._startup_tasks.append(
+                    asyncio.create_task(
+                        self._start_messaging_if_configured(),
+                        name="fcc-messaging-startup",
+                    )
+                )
+                if self.settings.fcc_update_auto and update_capable(package_version()):
+                    self._update_task = asyncio.create_task(
+                        self._run_update_auto_loop(),
+                        name="fcc-auto-update",
+                    )
+                self._started = True
         except asyncio.CancelledError:
             await self.close()
             raise
         except Exception as exc:
             logger.error(
-                "Startup failed:\n{}",
-                startup_failure_message(self.settings, exc),
+                "Startup failed:\n{}", startup_failure_message(self.settings, exc)
             )
             await self.close()
             raise
 
+    def http_started(self) -> None:
+        """Called by the server after lifespan and socket adoption, not at reservation."""
+        if self._draining or self._http_ready.is_set():
+            return
+        self._http_ready.set()
+        logging.getLogger("uvicorn.error").info(
+            "Admin UI: %s (local-only)", local_admin_url(self.settings)
+        )
+
     def begin_shutdown(self) -> None:
         """Finish indefinite observer responses before the server drains HTTP."""
         self._draining = True
-        if self._chat_service is not None:
-            self._chat_service.begin_shutdown()
+        self.provider_manager.begin_shutdown()
+        self._folder_picker.begin_shutdown()
+        if self._code_service is not None:
+            self._code_service.begin_shutdown()
 
     async def close(self) -> bool:
-        async with self._close_lock:
+        self.begin_shutdown()
+        async with self._lifecycle_lock:
             if self._closed:
                 return True
             logger.info("Shutdown requested, cleaning up...")
-            self._closed = await self._close_owned_resources()
+            for task in self._startup_tasks:
+                if not task.done():
+                    task.cancel()
+            results = await asyncio.gather(*self._startup_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "Background initialization ended with exc_type={}",
+                        type(result).__name__,
+                    )
+            self._startup_tasks.clear()
+            async with self._config_lock:
+                self._closed = await self._close_owned_resources()
             if self._closed:
                 self._started = False
                 logger.info("Server shut down cleanly")
@@ -214,13 +319,23 @@ class ApplicationRuntime:
                 )
             return self._closed
 
+    async def pick_folder(self, initial_path: str | None) -> str | None:
+        return await self._folder_picker.pick_folder(initial_path)
+
     async def apply_admin_config(
         self,
         updates: Mapping[str, ConfigInputValue],
     ) -> JsonObject:
         """Apply one validated config update without splitting runtime ownership."""
+        caller = asyncio.current_task()
+        assert caller is not None
+        initial_cancellations = caller.cancelling()
         async with self._config_lock:
-            prepared = prepare_admin_update(updates)
+            if self._draining:
+                raise ApplicationUnavailableError(
+                    "Configuration runtime is shutting down."
+                )
+            prepared = await self._configuration.prepare(updates, self.settings)
             if not prepared.valid:
                 return prepared.applied_response() | {"credential_checks": []}
             assert prepared.settings is not None
@@ -246,45 +361,171 @@ class ApplicationRuntime:
                     "credential_checks": check_response,
                 }
 
-            if prepared.pending_fields:
-                result = self._commit_admin_update(prepared)
-                result["credential_checks"] = check_response
-                restart = self._restart_metadata(
-                    prepared.pending_fields,
-                    prepared.settings,
-                )
-                result["restart"] = restart
-                self._pending_fields = (
-                    [] if restart["automatic"] else list(prepared.pending_fields)
-                )
-                return result
+            persistence_started = False
 
+            async def commit() -> JsonObject:
+                nonlocal persistence_started
+                # The caller's cancellation wakeup may run after finalization starts.
+                if caller.cancelling() > initial_cancellations:
+                    raise asyncio.CancelledError
+                persistence_started = True
+                return await self._commit_admin_update(prepared)
+
+            finalization = asyncio.create_task(
+                self._finalize_admin_update(prepared, check_response, commit)
+            )
+            return await _await_owned_task(
+                finalization,
+                cancel_on_interrupt=lambda: not persistence_started,
+            )
+
+    async def _finalize_admin_update(
+        self,
+        prepared: PreparedAdminUpdate,
+        check_response: list[JsonObject],
+        commit: Callable[[], Awaitable[JsonObject]],
+    ) -> JsonObject:
+        assert prepared.settings is not None
+        if prepared.pending_fields:
+            result = await commit()
+        else:
             result: JsonObject = {}
 
-            def commit() -> None:
-                result.update(self._commit_admin_update(prepared))
+            async def publish_commit() -> None:
+                result.update(await commit())
 
             await self.provider_manager.replace(
                 prepared.settings,
-                commit=commit,
+                commit=publish_commit,
                 reason="admin_apply",
             )
+        self._pending_fields = list(prepared.pending_fields)
+        automatic = bool(prepared.pending_fields and self._signal_restart())
+        if automatic:
             self._pending_fields = []
-            result["restart"] = self._restart_metadata((), prepared.settings)
-            result["credential_checks"] = check_response
-            return result
+        result["restart"] = self._restart_metadata(
+            prepared.pending_fields,
+            prepared.settings,
+            automatic=automatic,
+        )
+        result["credential_checks"] = check_response
+        return result
 
-    def admin_status(self) -> JsonObject:
+    async def admin_config(self) -> JsonObject:
+        return await self._configuration.admin_config()
+
+    async def admin_values(self) -> ValueState:
+        return await self._configuration.admin_values()
+
+    async def claude_vscode_status(self) -> JsonObject:
+        return await self._claude_vscode(None)
+
+    async def connect_claude_vscode(self) -> JsonObject:
+        return await self._claude_vscode(True)
+
+    async def disconnect_claude_vscode(self) -> JsonObject:
+        return await self._claude_vscode(False)
+
+    async def _claude_vscode(self, connected: bool | None) -> JsonObject:
+        async with self._config_lock:
+            if self._draining or self._pending_fields:
+                raise ApplicationUnavailableError(
+                    "Wait for FCC to restart before changing the integration."
+                )
+            settings = self.settings
+            try:
+                return await _await_owned_task(
+                    asyncio.create_task(
+                        to_thread.run_sync(
+                            claude_integration.configure,
+                            claude_integration.settings_path(),
+                            claude_integration.claude_state_path(),
+                            local_proxy_root_url(settings),
+                            settings.proxy_auth_token,
+                            connected,
+                        )
+                    )
+                )
+            except ValueError, UnicodeError:
+                raise InvalidRequestError(
+                    "Could not read Claude integration settings. Check the JSON in VS Code settings.json and .claude.json."
+                ) from None
+            except OSError:
+                raise ApplicationUnavailableError(
+                    "Could not access VS Code settings.json or .claude.json. Check file permissions and try again."
+                ) from None
+
+    async def codex_integration_status(self) -> JsonObject:
+        return await self._codex_integration(None)
+
+    async def connect_codex(self) -> JsonObject:
+        return await self._codex_integration(True)
+
+    async def disconnect_codex(self) -> JsonObject:
+        return await self._codex_integration(False)
+
+    async def _codex_integration(self, connected: bool | None) -> JsonObject:
+        wait = InitializationWait()
+        while True:
+            generation_id = (
+                await self.provider_manager.wait_for_catalog_file(wait)
+                if connected is True
+                else None
+            )
+            async with self._config_lock:
+                if connected is True and (
+                    generation_id != self.provider_manager.current_generation_id
+                    or self.provider_manager.catalog_status()["catalog"] != "ready"
+                ):
+                    continue
+                if self._draining or self._pending_fields:
+                    raise ApplicationUnavailableError(
+                        "Wait for FCC to restart before changing the integration."
+                    )
+                settings = self.settings
+                try:
+                    return await _await_owned_task(
+                        asyncio.create_task(
+                            to_thread.run_sync(
+                                codex_integration.configure,
+                                codex_integration.config_path(),
+                                codex_model_catalog_path(),
+                                local_proxy_root_url(settings),
+                                connected,
+                            )
+                        )
+                    )
+                except ValueError, UnicodeError:
+                    raise InvalidRequestError(
+                        "Could not read Codex settings. Check the TOML in config.toml."
+                    ) from None
+                except OSError:
+                    raise ApplicationUnavailableError(
+                        "Could not access Codex config.toml. Check file permissions and try again."
+                    ) from None
+
+    async def admin_status(self) -> JsonObject:
+        values = await self.admin_values()
         settings = self.settings
         return {
             "status": "stopping" if self._draining else "running",
             "instance_id": self._instance_id,
+            "startup": {
+                **self.provider_manager.catalog_status(),
+                "code": self._code_service.storage_status()
+                if self._code_service
+                else {"state": "disabled"},
+                "messaging": {
+                    "state": self._messaging_state,
+                    "message": self._messaging_error,
+                },
+            },
             "host": settings.host,
             "port": settings.port,
             "model": settings.model,
             "provider": parse_provider_type(settings.model),
             "pending_fields": list(self._pending_fields),
-            "provider_status": provider_config_status(load_value_state()),
+            "provider_status": provider_config_status(values),
             "cached_models": {
                 provider_id: sorted(model_ids)
                 for provider_id, model_ids in self.provider_manager.cached_model_ids().items()
@@ -292,28 +533,19 @@ class ApplicationRuntime:
         }
 
     async def test_provider(self, provider_id: str) -> JsonObject:
-        lease = await self.provider_manager.acquire()
-        try:
-            provider = lease.resolve_provider(provider_id)
-            infos = await provider.list_model_infos()
-        except Exception as exc:
-            logger.warning(
-                "Admin provider check failed: provider={} exc_type={}",
-                provider_id,
-                type(exc).__name__,
-            )
+        result = await self.provider_manager.refresh_provider(provider_id)
+        if result.failed_provider_ids:
             return {
                 "provider_id": provider_id,
                 "ok": False,
                 "message": _PROVIDER_CHECK_FAILURE_MESSAGE,
             }
-        finally:
-            await lease.release()
-        self.provider_manager.cache_model_infos(provider_id, infos)
         return {
             "provider_id": provider_id,
             "ok": True,
-            "models": sorted(info.model_id for info in infos),
+            "models": sorted(
+                self.provider_manager.cached_model_ids().get(provider_id, ())
+            ),
         }
 
     async def refresh_models(self) -> ProviderModelRefreshResult:
@@ -363,13 +595,28 @@ class ApplicationRuntime:
         self._connected_account_revisions[provider_id] = status.revision
         return status
 
-    async def request_restart(self) -> None:
+    def _signal_restart(self) -> bool:
+        """Invoke a synchronous signal; failure leaves the saved change pending."""
         callback = self._restart_callback
         if callback is None:
-            return
-        result = callback()
-        if inspect.isawaitable(result):
-            await result
+            return False
+        try:
+            result = callback()
+            # Enforce the contract for dynamically supplied callbacks as well.
+            # Never execute an async callback that could await runtime.close().
+            if inspect.iscoroutine(result):
+                result.close()
+            if result is not None:
+                raise TypeError(
+                    "Restart callback must signal synchronously and return None."
+                )
+        except Exception as exc:
+            logger.warning(
+                "Config saved but restart signal failed: exc_type={}",
+                type(exc).__name__,
+            )
+            return False
+        return True
 
     def update_status(self) -> JsonObject:
         return self._updates.snapshot(self.settings)
@@ -425,11 +672,11 @@ class ApplicationRuntime:
             return StopResult(source="cli_manager")
         return None
 
-    def _commit_admin_update(
+    async def _commit_admin_update(
         self,
         prepared: PreparedAdminUpdate,
     ) -> JsonObject:
-        result = commit_prepared_admin_update(prepared)
+        result = await self._configuration.commit(prepared)
         clear_settings_cache()
         return result
 
@@ -437,8 +684,9 @@ class ApplicationRuntime:
         self,
         fields: tuple[str, ...],
         settings: Settings,
+        *,
+        automatic: bool,
     ) -> JsonObject:
-        automatic = bool(fields and self._restart_callback is not None)
         result: JsonObject = {
             "required": bool(fields),
             "automatic": automatic,
@@ -450,14 +698,34 @@ class ApplicationRuntime:
         return result
 
     async def _start_messaging_if_configured(self) -> None:
+        if self.settings.messaging_platform == "none":
+            return
         try:
+
+            def load_modules() -> None:
+                for name in ("cli.managed", "messaging.session", "messaging.workflow"):
+                    importlib.import_module(f"free_claude_code.{name}")
+                importlib.import_module(
+                    f"free_claude_code.messaging.platforms.{self.settings.messaging_platform}"
+                )
+
+            await run_sync_owned(load_modules)
+            if self._transcriber_factory is not None:
+                self._transcriber = await self._transcriber_factory(self.settings)
             components = messaging_platform_factory.create_messaging_components(
                 self.settings.messaging_platform,
                 self._messaging_options(),
             )
             if components is not None:
                 await self._start_messaging_workflow(components)
+                self._messaging_state = "ready"
+            else:
+                self._messaging_state = "disabled"
         except ImportError as exc:
+            self._messaging_state = "failed"
+            self._messaging_error = (
+                "Messaging could not start. Check its configuration and restart FCC."
+            )
             cleaned = await self._cleanup_messaging()
             if self.settings.log_api_error_tracebacks:
                 logger.warning("Messaging module import error: {}", exc)
@@ -469,6 +737,10 @@ class ApplicationRuntime:
             if not cleaned:
                 raise RuntimeError("Messaging startup cleanup incomplete") from exc
         except Exception as exc:
+            self._messaging_state = "failed"
+            self._messaging_error = (
+                "Messaging could not start. Check its configuration and restart FCC."
+            )
             cleaned = await self._cleanup_messaging()
             if self.settings.log_api_error_tracebacks:
                 logger.error("Failed to start messaging platform: {}", exc)
@@ -501,6 +773,10 @@ class ApplicationRuntime:
         self,
         components: MessagingPlatformComponents,
     ) -> None:
+        import free_claude_code.cli.managed as cli_managed
+        import free_claude_code.messaging.session as messaging_session
+        import free_claude_code.messaging.workflow as messaging_workflow_module
+
         settings = self.settings
         self._messaging_runtime = components.runtime
         workspace = (
@@ -508,9 +784,9 @@ class ApplicationRuntime:
             if settings.allowed_dir
             else os.getcwd()
         )
-        os.makedirs(workspace, exist_ok=True)
+        await run_sync_owned(partial(os.makedirs, workspace, exist_ok=True))
         data_path = os.path.abspath(messaging_state_dir_path())
-        os.makedirs(data_path, exist_ok=True)
+        await run_sync_owned(partial(os.makedirs, data_path, exist_ok=True))
         allowed_dirs = [workspace] if settings.allowed_dir else []
 
         self._cli_manager = cli_managed.ManagedClaudeSessionManager(
@@ -521,9 +797,12 @@ class ApplicationRuntime:
             log_raw_cli_diagnostics=settings.log_raw_cli_diagnostics,
             log_messaging_error_details=settings.log_messaging_error_details,
         )
-        session_store = messaging_session.SessionStore(
-            storage_path=os.path.join(data_path, "sessions.json"),
-            managed_message_cap=settings.max_message_log_entries_per_chat,
+        session_store = await run_sync_owned(
+            partial(
+                messaging_session.SessionStore,
+                storage_path=os.path.join(data_path, "sessions.json"),
+                managed_message_cap=settings.max_message_log_entries_per_chat,
+            )
         )
         workflow = messaging_workflow_module.MessagingWorkflow(
             platform_name=components.name,
@@ -539,6 +818,9 @@ class ApplicationRuntime:
         self._messaging_workflow = workflow
         workflow.restore()
         components.runtime.on_message(workflow.handle_message)
+        await self._http_ready.wait()
+        if self._draining:
+            return
         await components.runtime.start()
         await workflow.repair_restored_statuses()
         if components.startup_notice is not None:
@@ -552,12 +834,14 @@ class ApplicationRuntime:
             update_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await update_task
+        if not await best_effort("folder_picker.close", self._folder_picker.close()):
+            return False
         if not await self._cleanup_messaging():
             return False
         verbose = self.settings.log_api_error_tracebacks
-        if self._chat_service is not None and not await best_effort(
-            "chat_service.close",
-            self._chat_service.close(),
+        if self._code_service is not None and not await best_effort(
+            "code_service.close",
+            self._code_service.close(),
             log_verbose_errors=verbose,
         ):
             return False

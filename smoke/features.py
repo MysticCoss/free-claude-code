@@ -28,6 +28,29 @@ class FeatureCoverage:
 
 FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
     FeatureCoverage(
+        "code_session_modes",
+        "Code session permission choices reach native Codex and persist their review results",
+        (
+            "tests/application/test_code_sessions.py",
+            "tests/runtime/test_codex_app_server.py",
+            "tests/runtime/test_codex_protocol.py",
+            "tests/runtime/test_code_sessions_sqlite.py",
+            "e2e/test_code_sessions.py",
+        ),
+        (),
+        (
+            "test_codex_modes_local_e2e",
+            "test_codex_child_review_local_e2e",
+            "test_codex_modes_free_provider_e2e",
+        ),
+        ("clients",),
+        (
+            "Codex executable",
+            "FCC_SMOKE_CODEX_FREE_MODEL and OpenRouter key for optional live inference",
+        ),
+        "local behavior must pass when Codex and native sandbox prerequisites are available; free inference is explicitly selected and pricing checked",
+    ),
+    FeatureCoverage(
         "zero_cost_provider_access",
         "Configured provider accepts real conversation turns",
         ("tests/api/test_dependencies.py", "tests/providers/"),
@@ -87,6 +110,8 @@ FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
             "tests/api/test_openai_responses.py",
             "tests/cli/test_entrypoints.py",
             "tests/cli/test_codex_model_catalog.py",
+            "tests/harnesses/test_codex_model_catalog.py",
+            "tests/runtime/test_codex_catalog.py",
             "tests/core/openai_responses/test_native.py",
             "tests/providers/test_openai_chat_stream_output.py",
         ),
@@ -111,7 +136,9 @@ FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
         "OpenCode discovers FCC models and sends Responses through the proxy",
         (
             "tests/cli/test_opencode_launcher.py",
-            "tests/cli/test_model_catalog.py",
+            "tests/application/test_model_catalog.py",
+            "tests/cli/test_model_catalog_decoder.py",
+            "tests/cli/test_catalog_http.py",
         ),
         ("test_probe_and_models_routes",),
         ("test_opencode_cli_prompt_e2e",),
@@ -128,7 +155,9 @@ FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
         (
             "tests/cli/test_aider_config.py",
             "tests/cli/test_aider_launcher.py",
-            "tests/cli/test_model_catalog.py",
+            "tests/application/test_model_catalog.py",
+            "tests/cli/test_model_catalog_decoder.py",
+            "tests/cli/test_catalog_http.py",
         ),
         ("test_probe_and_models_routes",),
         ("test_aider_cli_prompt_e2e",),
@@ -144,7 +173,9 @@ FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
         "Cline discovers FCC models and sends Responses through the proxy",
         (
             "tests/cli/test_cline_launcher.py",
-            "tests/cli/test_model_catalog.py",
+            "tests/application/test_model_catalog.py",
+            "tests/cli/test_model_catalog_decoder.py",
+            "tests/cli/test_catalog_http.py",
         ),
         ("test_probe_and_models_routes",),
         ("test_cline_cli_prompt_e2e",),
@@ -190,7 +221,9 @@ FEATURE_INVENTORY: tuple[FeatureCoverage, ...] = (
         "Grok Build discovers FCC models and sends Responses through the proxy",
         (
             "tests/cli/test_grok_launcher.py",
-            "tests/cli/test_model_catalog.py",
+            "tests/application/test_model_catalog.py",
+            "tests/cli/test_model_catalog_decoder.py",
+            "tests/cli/test_catalog_http.py",
         ),
         ("test_probe_and_models_routes",),
         ("test_grok_cli_headless_e2e",),

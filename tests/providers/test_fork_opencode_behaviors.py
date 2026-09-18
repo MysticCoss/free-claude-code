@@ -26,7 +26,10 @@ from free_claude_code.providers.openai_chat import (
     OpenAIChatRequestPolicy,
 )
 from free_claude_code.providers.openai_chat.reasoning import NO_REASONING
-from free_claude_code.providers.opencode import create_opencode_provider
+from free_claude_code.providers.opencode import (
+    OpenCodeProvider,
+    create_opencode_provider,
+)
 from tests.providers.support import (
     immediate_admission,
     make_provider_config,
@@ -43,10 +46,10 @@ def _config():
     )
 
 
-def _opencode_provider(provider_id: str) -> OpenAIChatProvider:
+def _opencode_provider(provider_id: str) -> OpenCodeProvider:
     """Build a real OpenCode provider without touching the network."""
     with (
-        patch("free_claude_code.providers.openai_chat.provider.AsyncOpenAI"),
+        patch("free_claude_code.providers.openai_chat.client.AsyncOpenAI"),
         patch("httpx.AsyncClient"),
     ):
         return create_opencode_provider(
@@ -56,9 +59,15 @@ def _opencode_provider(provider_id: str) -> OpenAIChatProvider:
         )
 
 
-def _chat_body(provider: OpenAIChatProvider, payload: dict) -> dict:
+def _chat_body(provider: OpenCodeProvider, payload: dict) -> dict:
     request = MessagesRequest.model_validate(payload)
-    return provider._build_request_body(request, reasoning=reasoning_for(request))
+    return provider._chat._build_request_body(request, reasoning=reasoning_for(request))
+
+
+def _session_headers(provider: OpenCodeProvider, payload: dict) -> dict:
+    """Build the x-opencode-* trio exactly as stream dispatch would send it."""
+    request = MessagesRequest.model_validate(payload)
+    return dict(provider._upstream_headers({}, request))
 
 
 _SYSTEM_POLICY_MESSAGES = [
@@ -146,7 +155,7 @@ def test_gateway_model_name_never_selects_latest_reminder(model: str) -> None:
 def test_opencode_session_headers_forward_mapped_session_id(
     provider_id: str,
 ) -> None:
-    body = _chat_body(
+    headers = _session_headers(
         _opencode_provider(provider_id),
         {
             "model": "some-model",
@@ -156,7 +165,7 @@ def test_opencode_session_headers_forward_mapped_session_id(
         },
     )
 
-    assert body["extra_headers"] == {
+    assert headers == {
         "x-opencode-client": "fcc",
         "x-opencode-session": claude_to_opencode_session_id("session-abc"),
     }
@@ -164,7 +173,7 @@ def test_opencode_session_headers_forward_mapped_session_id(
 
 @pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
 def test_opencode_session_headers_include_request_id(provider_id: str) -> None:
-    body = _chat_body(
+    headers = _session_headers(
         _opencode_provider(provider_id),
         {
             "model": "some-model",
@@ -175,7 +184,7 @@ def test_opencode_session_headers_include_request_id(provider_id: str) -> None:
         },
     )
 
-    assert body["extra_headers"]["x-opencode-request"] == "req-123"
+    assert headers["x-opencode-request"] == "req-123"
 
 
 def test_non_opencode_profile_does_not_inject_session_headers() -> None:
@@ -191,15 +200,15 @@ def test_non_opencode_profile_does_not_inject_session_headers() -> None:
         admission=immediate_admission(provider_name="NOT_OPENCODE"),
     )
 
-    body = _chat_body(
-        provider,
+    request = MessagesRequest.model_validate(
         {
             "model": "grok",
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "hi"}],
             "fcc_session_id": "session-abc",
-        },
+        }
     )
+    body = provider._chat._build_request_body(request, reasoning=reasoning_for(request))
 
     assert "extra_headers" not in body
 
@@ -208,7 +217,7 @@ def test_non_opencode_profile_does_not_inject_session_headers() -> None:
 def test_reasoning_delta_preserves_empty_field_as_onset_signal(
     provider_id: str,
 ) -> None:
-    profile = _opencode_provider(provider_id)._profile
+    profile = _opencode_provider(provider_id)._opencode_profile.chat_profile
 
     assert profile.reasoning_delta(SimpleNamespace(reasoning_content="think")) == (
         "think"
@@ -325,7 +334,7 @@ def test_go_chat_body_seeds_session_for_headerless_client() -> None:
     Deterministic seed of this conversation opening is exactly the first (and
     only) user message text, so the mapped value is recomputable here.
     """
-    body = _chat_body(
+    headers = _session_headers(
         _opencode_provider("opencode_go"),
         {
             "model": "some-model",
@@ -333,13 +342,13 @@ def test_go_chat_body_seeds_session_for_headerless_client() -> None:
             "messages": [{"role": "user", "content": "open the pods"}],
         },
     )
-    session = body["extra_headers"]["x-opencode-session"]
+    session = headers["x-opencode-session"]
     assert session == claude_to_opencode_session_id("open the pods")
     assert len(session) == 30
 
 
-def test_zen_chat_body_keeps_no_session_sentinel() -> None:
-    body = _chat_body(
+def test_zen_chat_body_omits_session_without_identity() -> None:
+    headers = _session_headers(
         _opencode_provider("opencode_zen"),
         {
             "model": "some-model",
@@ -347,20 +356,43 @@ def test_zen_chat_body_keeps_no_session_sentinel() -> None:
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
-    assert body["extra_headers"]["x-opencode-session"] == ""
+    assert headers == {"x-opencode-client": "fcc"}
+
+
+@pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
+def test_upstream_headers_forward_client_session_verbatim(
+    provider_id: str,
+) -> None:
+    """Client-addressed session values go out untouched, never mapped."""
+    provider = _opencode_provider(provider_id)
+    headers = dict(
+        provider._upstream_headers(
+            {"X-OpenCode-Session": "conversation-a"},
+            MessagesRequest.model_validate(
+                {
+                    "model": "some-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "fcc_session_id": "session-abc",
+                }
+            ),
+        )
+    )
+    assert headers["x-opencode-session"] == "conversation-a"
 
 
 def test_go_chat_seed_is_stable_across_follow_up_turns() -> None:
-    opener = _chat_body(
-        _opencode_provider("opencode_go"),
+    provider = _opencode_provider("opencode_go")
+    opener = _session_headers(
+        provider,
         {
             "model": "some-model",
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "same opener"}],
         },
     )
-    follow_up = _chat_body(
-        _opencode_provider("opencode_go"),
+    follow_up = _session_headers(
+        provider,
         {
             "model": "some-model",
             "max_tokens": 100,
@@ -372,7 +404,7 @@ def test_go_chat_seed_is_stable_across_follow_up_turns() -> None:
         },
     )
     assert (
-        opener["extra_headers"]["x-opencode-session"]
-        == follow_up["extra_headers"]["x-opencode-session"]
+        opener["x-opencode-session"]
+        == follow_up["x-opencode-session"]
         == claude_to_opencode_session_id("same opener")
     )

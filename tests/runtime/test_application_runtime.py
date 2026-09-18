@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +34,7 @@ from free_claude_code.providers.credential_validation import (
 )
 from free_claude_code.providers.runtime import ProviderRuntime
 from free_claude_code.runtime.application import ApplicationRuntime
+from free_claude_code.runtime.configuration import ConfigurationService
 from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 from tests.providers.support import make_provider_config
 
@@ -64,22 +65,6 @@ class AdminModelProvider(BaseProvider):
         self._model_infos = model_infos
         self._error = error
 
-    def preflight_messages(
-        self,
-        request: MessagesRequest,
-        *,
-        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
-    ) -> None:
-        return None
-
-    def preflight_responses(
-        self,
-        request: OpenAIResponsesRequest,
-        *,
-        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
-    ) -> None:
-        return None
-
     async def cleanup(self) -> None:
         return None
 
@@ -96,6 +81,8 @@ class AdminModelProvider(BaseProvider):
         request_id: str | None = None,
         response_model: str | None = None,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
     ) -> AsyncIterator[str]:
         if False:
             yield ""
@@ -108,6 +95,7 @@ class AdminModelProvider(BaseProvider):
         request_id: str | None = None,
         response_model: str | None = None,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+        request_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
         if False:
             yield ""
@@ -252,7 +240,9 @@ def _runtime_with_admin_provider(
             {"nvidia_nim": provider},
         ),
     )
-    return ApplicationRuntime(manager, transcriber=None), manager
+    return ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    ), manager
 
 
 @pytest.mark.asyncio
@@ -326,7 +316,7 @@ async def test_provider_check_never_returns_unrecognized_credentials(
     }
     log_text = " | ".join(record.getMessage() for record in caplog.records)
     assert "provider=nvidia_nim" in log_text
-    assert "exc_type=RuntimeError" in log_text
+    assert "RuntimeError" in log_text
     assert secret not in log_text
     assert "error_type" not in result
     await manager.close()
@@ -335,7 +325,9 @@ async def test_provider_check_never_returns_unrecognized_credentials(
 @pytest.mark.asyncio
 async def test_stop_all_maps_messaging_outcome_to_application_count() -> None:
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     workflow = MagicMock()
     workflow.stop_all_tasks = AsyncMock(
         return_value=StopOutcome(
@@ -361,7 +353,9 @@ async def test_provider_apply_constructs_before_commit_then_publishes(tmp_path) 
         _settings("nvidia_nim/old"),
         runtime_factory=factory,
     )
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     prepared = _prepared(_settings("nvidia_nim/new"), tmp_path)
     factory.events.clear()
 
@@ -371,12 +365,14 @@ async def test_provider_apply_constructs_before_commit_then_publishes(tmp_path) 
         return _applied_response()
 
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update",
+        patch.object(
+            runtime._configuration,
+            "commit",
             side_effect=commit,
         ),
     ):
@@ -401,18 +397,19 @@ async def test_candidate_failure_never_commits_and_preserves_current(tmp_path) -
         _settings("nvidia_nim/old"),
         runtime_factory=factory,
     )
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     prepared = _prepared(_settings("nvidia_nim/new"), tmp_path)
     factory.fail = True
 
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update"
-        ) as commit,
+        patch.object(runtime._configuration, "commit") as commit,
         pytest.raises(RuntimeError, match="candidate failed"),
     ):
         await runtime.apply_admin_config({"MODEL": "nvidia_nim/new"})
@@ -432,16 +429,20 @@ async def test_persistence_failure_closes_candidate_and_preserves_current(
         _settings("nvidia_nim/old"),
         runtime_factory=factory,
     )
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     prepared = _prepared(_settings("nvidia_nim/new"), tmp_path)
 
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update",
+        patch.object(
+            runtime._configuration,
+            "commit",
             side_effect=OSError("disk full"),
         ),
         pytest.raises(OSError, match="disk full"),
@@ -461,9 +462,10 @@ async def test_restart_required_apply_commits_without_hot_publication(tmp_path) 
         _settings("nvidia_nim/old"),
         runtime_factory=factory,
     )
-    restart = AsyncMock()
+    restart = MagicMock(return_value=None)
     runtime = ApplicationRuntime(
         manager,
+        configuration=AsyncMock(spec=ConfigurationService),
         transcriber=None,
         restart_callback=restart,
     )
@@ -472,15 +474,20 @@ async def test_restart_required_apply_commits_without_hot_publication(tmp_path) 
         tmp_path,
         pending_fields=("PORT",),
     )
-    instance_id = runtime.admin_status()["instance_id"]
+    with patch.object(
+        runtime._configuration, "admin_values", AsyncMock(return_value={})
+    ):
+        instance_id = (await runtime.admin_status())["instance_id"]
 
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update",
+        patch.object(
+            runtime._configuration,
+            "commit",
             return_value=_applied_response(("PORT",)),
         ) as commit,
     ):
@@ -496,9 +503,7 @@ async def test_restart_required_apply_commits_without_hot_publication(tmp_path) 
         "fields": ["PORT"],
         "instance_id": instance_id,
     }
-    restart.assert_not_awaited()
-    await runtime.request_restart()
-    restart.assert_awaited_once()
+    restart.assert_called_once_with()
     await manager.close()
 
 
@@ -510,7 +515,9 @@ async def test_credential_checks_gate_both_apply_paths(tmp_path, pending, status
     manager = ProviderRuntimeManager(
         _settings("nvidia_nim/old"), runtime_factory=factory
     )
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     prepared = replace(
         _prepared(_settings("nvidia_nim/new"), tmp_path, pending_fields=pending),
         changed_keys=("GROQ_API_KEY",),
@@ -520,16 +527,18 @@ async def test_credential_checks_gate_both_apply_paths(tmp_path, pending, status
         CredentialCheck("OPENROUTER_API_KEY", CredentialStatus.VERIFIED, "Accepted"),
     )
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
         patch(
             "free_claude_code.runtime.application.check_credentials",
             AsyncMock(return_value=checks),
         ) as check,
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update",
+        patch.object(
+            runtime._configuration,
+            "commit",
             return_value=_applied_response(pending),
         ) as commit,
     ):
@@ -553,22 +562,23 @@ async def test_credential_checks_gate_both_apply_paths(tmp_path, pending, status
 @pytest.mark.asyncio
 async def test_cancelled_credential_check_never_commits(tmp_path):
     manager = ProviderRuntimeManager(_settings("nvidia_nim/old"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     prepared = replace(
         _prepared(_settings("nvidia_nim/new"), tmp_path), changed_keys=("GROQ_API_KEY",)
     )
     with (
-        patch(
-            "free_claude_code.runtime.application.prepare_admin_update",
+        patch.object(
+            runtime._configuration,
+            "prepare",
             return_value=prepared,
         ),
         patch(
             "free_claude_code.runtime.application.check_credentials",
             AsyncMock(side_effect=asyncio.CancelledError),
         ),
-        patch(
-            "free_claude_code.runtime.application.commit_prepared_admin_update"
-        ) as commit,
+        patch.object(runtime._configuration, "commit") as commit,
         pytest.raises(asyncio.CancelledError),
     ):
         await runtime.apply_admin_config({"GROQ_API_KEY": "new"})
@@ -582,7 +592,11 @@ async def test_close_drains_messaging_before_transcriber_and_is_idempotent() -> 
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = TrackingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
     runtime._messaging_runtime = TrackingMessagingRuntime(events)
     workflow = MagicMock()
     workflow.close = AsyncMock(side_effect=lambda: events.append("workflow.close"))
@@ -611,7 +625,11 @@ async def test_close_retains_transcriber_ownership_when_close_fails() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = FailingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
     runtime._messaging_runtime = TrackingMessagingRuntime(events)
 
     assert await runtime.close() is False
@@ -632,7 +650,11 @@ async def test_close_retries_runtime_before_closing_later_resources() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = TrackingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
     messaging = TrackingMessagingRuntime(events, fail_close_once=True)
     runtime._messaging_runtime = messaging
 
@@ -669,6 +691,7 @@ async def test_close_retries_connected_account_without_reclosing_providers() -> 
     account.close = AsyncMock(side_effect=[RuntimeError("auth cleanup failed"), None])
     runtime = ApplicationRuntime(
         manager,
+        configuration=AsyncMock(spec=ConfigurationService),
         transcriber=None,
         connected_accounts={"openai": account},
     )
@@ -708,6 +731,7 @@ async def test_connected_account_status_reports_cached_model_count() -> None:
     )
     runtime = ApplicationRuntime(
         manager,
+        configuration=AsyncMock(spec=ConfigurationService),
         transcriber=None,
         connected_accounts={"openai": account},
     )
@@ -724,7 +748,9 @@ async def test_connected_account_status_reports_cached_model_count() -> None:
 async def test_close_retries_workflow_close_before_closing_delivery() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events)
     workflow = MagicMock()
     close_calls = 0
@@ -762,7 +788,9 @@ async def test_close_retries_workflow_close_before_closing_delivery() -> None:
 async def test_close_does_not_drain_workflow_until_ingress_is_quiescent() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events, fail_quiesce_once=True)
     workflow = MagicMock()
     workflow.close = AsyncMock(side_effect=lambda: events.append("workflow.close"))
@@ -790,7 +818,9 @@ async def test_close_does_not_drain_workflow_until_ingress_is_quiescent() -> Non
 async def test_close_retries_failed_persistence_before_closing_delivery() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events)
     workflow = MagicMock()
     close_calls = 0
@@ -829,7 +859,9 @@ async def test_close_retries_real_workflow_persistence_without_losing_latest_sta
 ) -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events)
     cli_manager = MagicMock()
     cli_manager.stop_all = AsyncMock()
@@ -912,7 +944,11 @@ async def test_cancelled_transcriber_close_retains_ownership() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = CancelledTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await runtime._cleanup_transcriber()
@@ -927,7 +963,11 @@ async def test_cancelled_application_close_remains_retryable() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = CancellingOnceTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await runtime.close()
@@ -947,12 +987,16 @@ async def test_startup_failure_closes_owned_transcriber() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = TrackingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
 
     with (
         patch.object(
-            manager,
-            "warm_referenced_model_cache",
+            runtime._configuration,
+            "initialize",
             AsyncMock(side_effect=RuntimeError("startup failed")),
         ),
         pytest.raises(RuntimeError, match="startup failed"),
@@ -967,7 +1011,11 @@ async def test_startup_cancellation_cleans_partial_messaging_and_reraises() -> N
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
     transcriber = TrackingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
     messaging = TrackingMessagingRuntime(events)
     entered = asyncio.Event()
 
@@ -981,11 +1029,9 @@ async def test_startup_cancellation_cleans_partial_messaging_and_reraises() -> N
         "_start_messaging_if_configured",
         side_effect=start_messaging,
     ):
-        start_task = asyncio.create_task(runtime.start())
+        await runtime.start()
         await entered.wait()
-        start_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await start_task
+        assert await runtime.close()
 
     assert events == [
         "messaging.quiesce",
@@ -1000,8 +1046,14 @@ async def test_startup_cancellation_cleans_partial_messaging_and_reraises() -> N
 @pytest.mark.asyncio
 async def test_public_start_retries_transient_partial_messaging_cleanup() -> None:
     events: list[str] = []
-    manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    manager = ProviderRuntimeManager(
+        _settings("nvidia_nim/model").model_copy(
+            update={"messaging_platform": "telegram"}
+        )
+    )
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events, fail_quiesce_once=True)
     workflow = MagicMock()
     workflow.close = AsyncMock(side_effect=lambda: events.append("workflow.close"))
@@ -1023,11 +1075,6 @@ async def test_public_start_retries_transient_partial_messaging_cleanup() -> Non
         raise startup_failure
 
     with (
-        patch.object(
-            manager,
-            "warm_referenced_model_cache",
-            AsyncMock(),
-        ),
         patch.object(manager, "start_model_list_refresh"),
         patch(
             "free_claude_code.runtime.application.messaging_platform_factory.create_messaging_components",
@@ -1038,9 +1085,12 @@ async def test_public_start_retries_transient_partial_messaging_cleanup() -> Non
             "_start_messaging_workflow",
             side_effect=fail_after_publication,
         ),
-        pytest.raises(RuntimeError, match="cleanup incomplete") as raised,
     ):
         await runtime.start()
+        with pytest.raises(RuntimeError, match="cleanup incomplete") as raised:
+            await asyncio.gather(*runtime._startup_tasks)
+        assert runtime._messaging_state == "failed"
+        assert await runtime.close() is True
 
     assert raised.value.__cause__ is startup_failure
     assert events == [
@@ -1061,9 +1111,17 @@ async def test_public_start_retains_persistently_unclean_partial_messaging_graph
     None
 ):
     events: list[str] = []
-    manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
+    manager = ProviderRuntimeManager(
+        _settings("nvidia_nim/model").model_copy(
+            update={"messaging_platform": "telegram"}
+        )
+    )
     transcriber = TrackingTranscriber(events)
-    runtime = ApplicationRuntime(manager, transcriber=transcriber)
+    runtime = ApplicationRuntime(
+        manager,
+        configuration=AsyncMock(spec=ConfigurationService),
+        transcriber=transcriber,
+    )
     messaging = PersistentlyFailingMessagingRuntime(events)
     workflow = MagicMock()
     workflow.close = AsyncMock(side_effect=lambda: events.append("workflow.close"))
@@ -1085,11 +1143,6 @@ async def test_public_start_retains_persistently_unclean_partial_messaging_graph
         raise startup_failure
 
     with (
-        patch.object(
-            manager,
-            "warm_referenced_model_cache",
-            AsyncMock(),
-        ),
         patch.object(manager, "start_model_list_refresh"),
         patch(
             "free_claude_code.runtime.application.messaging_platform_factory.create_messaging_components",
@@ -1100,9 +1153,12 @@ async def test_public_start_retains_persistently_unclean_partial_messaging_graph
             "_start_messaging_workflow",
             side_effect=fail_after_publication,
         ),
-        pytest.raises(RuntimeError, match="cleanup incomplete") as raised,
     ):
         await runtime.start()
+        with pytest.raises(RuntimeError, match="cleanup incomplete") as raised:
+            await asyncio.gather(*runtime._startup_tasks)
+        assert runtime._messaging_state == "failed"
+        assert await runtime.close() is False
 
     assert raised.value.__cause__ is startup_failure
     assert events == ["messaging.quiesce", "messaging.quiesce"]
@@ -1132,7 +1188,9 @@ async def test_public_start_retains_persistently_unclean_partial_messaging_graph
 @pytest.mark.asyncio
 async def test_messaging_start_failure_is_nonfatal_after_complete_cleanup() -> None:
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
 
     with (
         patch(
@@ -1151,7 +1209,9 @@ async def test_messaging_start_failure_fails_closed_when_cleanup_is_incomplete()
     None
 ):
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
 
     with (
         patch(
@@ -1171,7 +1231,9 @@ async def test_messaging_start_failure_fails_closed_when_cleanup_is_incomplete()
 async def test_composition_records_runtime_before_workspace_setup() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events)
     components = MessagingPlatformComponents(
         name="tracking",
@@ -1200,7 +1262,9 @@ async def test_composition_records_runtime_before_workspace_setup() -> None:
 async def test_composition_publishes_startup_notice_after_runtime_and_repair() -> None:
     events: list[str] = []
     manager = ProviderRuntimeManager(_settings("nvidia_nim/model"))
-    runtime = ApplicationRuntime(manager, transcriber=None)
+    runtime = ApplicationRuntime(
+        manager, configuration=AsyncMock(spec=ConfigurationService), transcriber=None
+    )
     messaging = TrackingMessagingRuntime(events)
     notice = MessagingStartupNotice(
         chat_id="chat",
@@ -1226,15 +1290,16 @@ async def test_composition_publishes_startup_notice_after_runtime_and_repair() -
 
     with (
         patch(
-            "free_claude_code.runtime.application.cli_managed.ManagedClaudeSessionManager",
+            "free_claude_code.cli.managed.ManagedClaudeSessionManager",
             return_value=cli_manager,
         ) as manager_constructor,
-        patch("free_claude_code.runtime.application.messaging_session.SessionStore"),
+        patch("free_claude_code.messaging.session.SessionStore"),
         patch(
-            "free_claude_code.runtime.application.messaging_workflow_module.MessagingWorkflow",
+            "free_claude_code.messaging.workflow.MessagingWorkflow",
             return_value=workflow,
         ),
     ):
+        runtime.http_started()
         await runtime._start_messaging_workflow(components)
 
     assert events == [
@@ -1250,4 +1315,39 @@ async def test_composition_publishes_startup_notice_after_runtime_and_repair() -
     assert "api_url" not in manager_constructor.call_args.kwargs
     assert "plans_directory" not in manager_constructor.call_args.kwargs
 
+    assert await runtime.close() is True
+
+
+@pytest.mark.asyncio
+async def test_folder_picker_is_stopped_before_http_shutdown_drains(monkeypatch):
+    import uvicorn
+
+    from free_claude_code.cli.uvicorn_server import RuntimeServer
+
+    runtime, _manager = _runtime_with_admin_provider(AdminModelProvider())
+    started = asyncio.Event()
+    signals = []
+
+    async def select(_initial, stop):
+        signals.append(stop)
+        started.set()
+        await stop.wait()
+        return None
+
+    monkeypatch.setattr(runtime._folder_picker, "_select", select)
+    request = asyncio.create_task(runtime.pick_folder(None))
+    await started.wait()
+
+    async def drain(_server, sockets=None):
+        assert signals[0].is_set()
+        assert await request is None
+
+    monkeypatch.setattr(uvicorn.Server, "shutdown", drain)
+    server = RuntimeServer(
+        uvicorn.Config("unused:app"),
+        begin_shutdown=runtime.begin_shutdown,
+        on_started=runtime.http_started,
+        close_runtime=runtime.close,
+    )
+    await server.shutdown()
     assert await runtime.close() is True

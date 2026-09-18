@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import httpx2
@@ -19,29 +20,38 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
 )
 from free_claude_code.core.failures import ExecutionFailure
+from free_claude_code.core.history_replay import (
+    ReplayOrigin,
+    ReplayRecord,
+    encode_replay,
+)
 from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.openai_responses import (
-    MessagesReplayOrigin,
     OpenAIResponsesRequest,
-)
-from free_claude_code.core.openai_responses.reasoning_replay import (
-    encode_messages_reasoning,
 )
 from free_claude_code.core.reasoning import (
     DEFAULT_REASONING_POLICY,
+    ReasoningCapability,
     ReasoningEffort,
     ReasoningPolicy,
 )
 from free_claude_code.providers.anthropic_messages.request_policy import (
     MessagesModelCapabilities,
 )
-from free_claude_code.providers.endpoint import HttpEndpoint
+from free_claude_code.providers.anthropic_messages.transport import (
+    AnthropicMessagesTransport,
+)
+from free_claude_code.providers.endpoint_types import HttpEndpoint
 from free_claude_code.providers.github_copilot.auth import CopilotAuthManager
 from free_claude_code.providers.github_copilot.provider import GitHubCopilotProvider
 from free_claude_code.providers.github_copilot.types import (
     CopilotEgress,
     CopilotEndpoint,
     CopilotModel,
+)
+from free_claude_code.providers.openai_chat import OpenAIChatTransport
+from free_claude_code.providers.openai_responses.transport import (
+    OpenAIResponsesTransport,
 )
 from tests.providers.copilot_support import FakeRuntime, FakeSession
 from tests.providers.support import immediate_admission, make_provider_config
@@ -54,6 +64,48 @@ from tests.providers.test_openai_responses_transport import (
 from tests.providers.test_openai_responses_transport import (
     _sse as responses_sse,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("egress", list(CopilotEgress))
+@pytest.mark.parametrize("responses", [False, True])
+async def test_conversion_runs_once_under_current_account_lease(
+    tmp_path, egress, responses
+):
+    harness = Harness(tmp_path, egress)
+    cls, name = {
+        (CopilotEgress.CHAT, False): (OpenAIChatTransport, "_build_request_body"),
+        (CopilotEgress.CHAT, True): (
+            OpenAIChatTransport,
+            "_build_responses_request_body",
+        ),
+        (CopilotEgress.RESPONSES, False): (
+            OpenAIResponsesTransport,
+            "_build_messages_body",
+        ),
+        (CopilotEgress.RESPONSES, True): (
+            OpenAIResponsesTransport,
+            "_build_native_body",
+        ),
+        (CopilotEgress.MESSAGES, False): (AnthropicMessagesTransport, "_messages_body"),
+        (CopilotEgress.MESSAGES, True): (AnthropicMessagesTransport, "_responses_body"),
+    }[egress, responses]
+    original = getattr(cls, name)
+
+    def build(transport, *args, **kwargs):
+        assert harness.runtime.session_calls == 1
+        assert not harness.runtime.sessions[0].closed
+        assert harness.provider._active == 1
+        assert harness.seen == []
+        return original(transport, *args, **kwargs)
+
+    try:
+        with patch.object(cls, name, autospec=True, side_effect=build) as conversion:
+            assert "ok" in await collect(harness.stream(responses))
+        assert conversion.call_count == len(harness.seen) == 1
+        assert harness.provider._active == 0
+    finally:
+        await harness.close()
 
 
 class Wire(httpx.AsyncByteStream, httpx2.AsyncByteStream):
@@ -129,7 +181,8 @@ class Harness:
             encoding="utf-8",
         )
         self.auth = CopilotAuthManager(
-            state_path=state, runtime_factory=lambda: self.runtime
+            state_path=state,
+            runtime_factory=AsyncMock(side_effect=lambda: self.runtime),
         )
         self.seen: list[httpx.Request | httpx2.Request] = []
         self.wires: list[Wire] = []
@@ -244,6 +297,66 @@ class Harness:
         await self.provider.cleanup()
         assert self.runtime.close_calls == 0
         await self.auth.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("egress", list(CopilotEgress))
+@pytest.mark.parametrize("supports_off", [False, True])
+async def test_classifier_uses_current_lease_controls_and_clears_raw_hints(
+    tmp_path, egress, supports_off
+):
+    harness = Harness(tmp_path, egress)
+    current = harness.runtime.available[0]
+    efforts = ("none", "high") if supports_off else ("high",)
+    harness.runtime.available = (
+        replace(
+            current,
+            supported_efforts=efforts,
+            info=replace(
+                current.info,
+                reasoning_capability=ReasoningCapability.OPTIONAL
+                if supports_off
+                else ReasoningCapability.UNKNOWN,
+            ),
+        ),
+    )
+    request = MessagesRequest.model_validate(
+        {
+            "model": harness.runtime.name,
+            "messages": [{"role": "user", "content": "classify"}],
+            "max_tokens": 64,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "output_config": {"effort": "xhigh"},
+        }
+    )
+    try:
+        output = [
+            event
+            async for event in harness.provider.stream_messages(
+                request,
+                reasoning=ReasoningPolicy.prefer_off(),
+                model_info=ProviderModelInfo(
+                    harness.runtime.name, reasoning_capability=ReasoningCapability.NONE
+                ),
+            )
+        ]
+        assert text_content(parse_sse_text("".join(output))) == "ok"
+        body = json.loads(harness.seen[0].content)
+        if egress is CopilotEgress.MESSAGES:
+            assert body["thinking"] == {"type": "disabled"}
+            assert body["max_tokens"] == (64 if supports_off else 4096)
+        elif egress is CopilotEgress.RESPONSES:
+            assert body.get("reasoning") == (
+                {"effort": "none"} if supports_off else None
+            )
+            assert body.get("max_output_tokens") == (64 if supports_off else None)
+        else:
+            assert body.get("reasoning_effort") == ("none" if supports_off else None)
+            assert body.get("max_tokens") == (64 if supports_off else None)
+        assert request.thinking is not None and request.thinking.budget_tokens == 1024
+        assert all(wire.closed for wire in harness.wires)
+    finally:
+        await harness.close()
 
 
 def _request(
@@ -511,9 +624,13 @@ async def test_native_reasoning_carrier_replays_only_to_messages_egress(
         "thinking": "private reasoning",
         "signature": "exact-signature",
     }
-    carrier = encode_messages_reasoning(
-        block,
-        origin=MessagesReplayOrigin("github_copilot/anthropic_messages", "prior-model"),
+    carrier = encode_replay(
+        ReplayRecord(
+            ReplayOrigin(
+                "github_copilot/anthropic_messages", "messages", "", "", "prior-model"
+            ),
+            block,
+        )
     )
     request = OpenAIResponsesRequest.model_validate(
         {
@@ -534,11 +651,13 @@ async def test_native_reasoning_carrier_replays_only_to_messages_egress(
             body = json.loads(harness.seen[0].content)
             assert body["messages"][0]["content"][0] == block
         else:
-            with pytest.raises(
-                (InvalidRequestError, ValueError), match=r"[Rr]easoning"
-            ):
-                await collect(harness.provider.stream_responses(request))
-            assert not harness.seen
+            await collect(harness.provider.stream_responses(request))
+            body = json.loads(harness.seen[0].content)
+            wire = json.dumps(body)
+            assert "[Earlier reasoning]" in wire
+            assert "private reasoning" in wire
+            assert "exact-signature" not in wire
+            assert carrier not in wire
     finally:
         await harness.close()
 
