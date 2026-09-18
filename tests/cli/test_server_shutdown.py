@@ -10,7 +10,7 @@ import pytest
 
 from free_claude_code.cli import commands
 from free_claude_code.config.settings import Settings
-from free_claude_code.runtime.application import RestartCallback
+from free_claude_code.runtime.application import ProcessStopCallback, RestartCallback
 from free_claude_code.runtime.asgi import RuntimeASGIApp
 from free_claude_code.runtime.bootstrap import build_asgi_app
 
@@ -42,7 +42,7 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
         settings: Settings,
         *,
         restart_callback: RestartCallback,
-        process_stop_callback: RestartCallback | None = None,
+        process_stop_callback: ProcessStopCallback | None = None,
     ):
         app = build_asgi_app(
             settings,

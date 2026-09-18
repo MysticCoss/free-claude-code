@@ -85,9 +85,7 @@ def _patch_fetch_transport(response: _FakeResponse):
             return _FakeResponseCM(response)
 
     return (
-        patch(
-            "free_claude_code.runtime.web_tools.client.ClientSession", _FakeSession
-        ),
+        patch("free_claude_code.runtime.web_tools.client.ClientSession", _FakeSession),
         patch(
             "free_claude_code.runtime.web_tools.client"
             ".get_validated_stream_addrinfos_for_egress",

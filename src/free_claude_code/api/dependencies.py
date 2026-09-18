@@ -37,7 +37,7 @@ def is_claude_desktop_request(request: Request, settings: Settings) -> bool:
         return False
     try:
         accepted_port = int(server[1])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     return accepted_port == settings.claude_desktop_port
 

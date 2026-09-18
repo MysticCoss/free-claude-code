@@ -1639,7 +1639,7 @@ function showMessage(message, kind = "") {
   }
 }
 
-byId("applyButton").addEventListener("click", apply);
+byId("applyButton").addEventListener("click", () => apply());
 byId("updateCheckButton").addEventListener("click", checkForUpdates);
 byId("updateApplyButton").addEventListener("click", applyUpdate);
 byId("saveProvider").addEventListener("click", () => apply(state.providerId));

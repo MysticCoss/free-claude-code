@@ -74,6 +74,7 @@ from .provider_manager import ProviderRuntimeManager
 from .retired_chat import remove_retired_chat_history
 
 RestartCallback = Callable[[], None]
+ProcessStopCallback = Callable[[], None] | Callable[[], Awaitable[None]]
 
 _PROVIDER_CHECK_FAILURE_MESSAGE = (
     "Could not refresh this provider's models. Verify its configuration and access."
@@ -173,7 +174,7 @@ class ApplicationRuntime:
         | None = None,
         restart_callback: RestartCallback | None = None,
         connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
-        process_stop_callback: RestartCallback | None = None,
+        process_stop_callback: ProcessStopCallback | None = None,
         updates: UpdateService | None = None,
     ) -> None:
         self.provider_manager = provider_manager
@@ -445,7 +446,7 @@ class ApplicationRuntime:
                         )
                     )
                 )
-            except (ValueError, UnicodeError):
+            except ValueError, UnicodeError:
                 raise InvalidRequestError(
                     "Could not read Claude integration settings. Check the JSON in VS Code settings.json and .claude.json."
                 ) from None
@@ -494,7 +495,7 @@ class ApplicationRuntime:
                             )
                         )
                     )
-                except (ValueError, UnicodeError):
+                except ValueError, UnicodeError:
                     raise InvalidRequestError(
                         "Could not read Codex settings. Check the TOML in config.toml."
                     ) from None

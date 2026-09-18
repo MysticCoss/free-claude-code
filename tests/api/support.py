@@ -15,7 +15,11 @@ from free_claude_code.config.loader import ManagedConfigStore
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import BaseProvider
 from free_claude_code.providers.runtime import ProviderRuntime
-from free_claude_code.runtime.application import ApplicationRuntime, RestartCallback
+from free_claude_code.runtime.application import (
+    ApplicationRuntime,
+    ProcessStopCallback,
+    RestartCallback,
+)
 from free_claude_code.runtime.configuration import ConfigurationService
 from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 from tests.web_tools_support import StubWebToolsClient
@@ -46,7 +50,7 @@ def create_test_app(
     restart_callback: RestartCallback | None = None,
     connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
     code: CodeApplicationPort | None = None,
-    process_stop_callback: RestartCallback | None = None,
+    process_stop_callback: ProcessStopCallback | None = None,
     updates: UpdateService | None = None,
 ) -> FastAPI:
     """Build an API app with explicit in-memory runtime services."""

@@ -156,13 +156,13 @@ def _content_type_charset(content_type: str) -> str | None:
     message["content-type"] = content_type
     try:
         charset = message.get_param("charset")
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if not isinstance(charset, str):
         return None
     try:
         return codecs.lookup(charset).name
-    except (LookupError, ValueError):
+    except LookupError, ValueError:
         return None
 
 
