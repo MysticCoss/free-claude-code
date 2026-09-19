@@ -49,6 +49,18 @@ class ReasoningReplayMode(StrEnum):
     REASONING = "reasoning"
 
 
+class MidConversationSystemMode(StrEnum):
+    """How mid-conversation system messages map onto the OpenAI wire.
+
+    The request-level ``system`` field is unaffected: it always becomes the
+    index-zero system message.
+    """
+
+    DEMOTE_USER = "demote_user"
+    DROP = "drop"
+    LATEST_REMINDER = "latest_reminder"
+
+
 def resolve_anthropic_tool_choice(
     tools: list[Any] | None,
     tool_choice: dict[str, Any] | None,
@@ -474,6 +486,9 @@ class AnthropicToOpenAIConverter:
         messages: list[Any],
         *,
         reasoning_replay: ReasoningReplayMode = ReasoningReplayMode.THINK_TAGS,
+        mid_conversation_system: MidConversationSystemMode = (
+            MidConversationSystemMode.DEMOTE_USER
+        ),
     ) -> list[dict[str, Any]]:
         ledger = _OpenAIChatHistoryLedger()
 
@@ -486,6 +501,31 @@ class AnthropicToOpenAIConverter:
 
             if role == "user" and isinstance(content, list):
                 ledger.add_user_blocks(content)
+                continue
+
+            if (
+                role == "system"
+                and mid_conversation_system is not MidConversationSystemMode.DEMOTE_USER
+            ):
+                if mid_conversation_system is MidConversationSystemMode.DROP:
+                    continue
+                system_text = _openai_system_text(
+                    content,
+                    context="an inline Anthropic system message",
+                )
+                if system_text is None:
+                    raise OpenAIConversionError(
+                        "OpenAI chat conversion requires an inline Anthropic system "
+                        "message to contain text."
+                    )
+                ledger.add_plain(
+                    [
+                        {
+                            "role": MidConversationSystemMode.LATEST_REMINDER.value,
+                            "content": system_text,
+                        }
+                    ]
+                )
                 continue
 
             segments = AnthropicToOpenAIConverter._convert_message_to_segments(
@@ -839,12 +879,16 @@ def build_base_request_body(
     *,
     default_max_tokens: int | None = None,
     reasoning_replay: ReasoningReplayMode = ReasoningReplayMode.THINK_TAGS,
+    mid_conversation_system: MidConversationSystemMode = (
+        MidConversationSystemMode.DEMOTE_USER
+    ),
 ) -> dict[str, Any]:
     """Build the common parts of an OpenAI-format request body."""
     _openai_reject_native_only_top_level_fields(request_data)
     messages = AnthropicToOpenAIConverter.convert_messages(
         request_data.messages,
         reasoning_replay=reasoning_replay,
+        mid_conversation_system=mid_conversation_system,
     )
 
     system = request_data.system

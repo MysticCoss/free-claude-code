@@ -259,7 +259,10 @@ printf '%s\n' "$FCC_PS_OUTPUT"
         awk = shutil.which("awk", path=self.env["PATH"])
         if awk is None:
             pytest.skip("awk is required for the POSIX process fallback scenario")
-        shutil.copy2(awk, fallback_bin / "awk")
+        # Symlink, never copy: copied macOS platform binaries (/usr/bin/awk)
+        # are SIGKILLed at exec, and copy2 also trips chflags EPERM on their
+        # SIP "restricted" flag. The symlink resolves to the original file.
+        os.symlink(awk, fallback_bin / "awk")
         self.env["FCC_PS_OUTPUT"] = process_line
         self.env["PATH"] = str(fallback_bin)
 

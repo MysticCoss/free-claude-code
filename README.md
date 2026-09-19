@@ -41,6 +41,22 @@ Free-tier availability and limits are controlled by each provider and may change
   <p><em>Claude Code running with FCC.</em></p>
 </div>
 
+### What This Fork Adds
+
+This fork adds several enhancements on top of upstream:
+
+**MODEL_COMPACT — dedicated compaction routing.** Route Claude Code compaction/summarization requests to a cheaper model. Set `MODEL_COMPACT` in the Admin UI to a provider/model slug (e.g. `opencode_go/deepseek-v4-flash`). This keeps your main model for coding and a lighter model for context compaction, reducing cost. Falls back to normal routing when unset.
+
+**FCC_1M_MODELS — 1M-token context window variants.** Configure `FCC_1M_MODELS` in the Admin UI as a comma-separated list of provider/model refs (e.g. `opencode_go/deepseek-v4-pro`). Each matching model gets a `[1m]`-suffixed variant in the `/v1/models` response, signaling Claude Code to grant the full 1M-token context window for those models. The suffix is stripped before the request reaches the upstream provider.
+
+**Claude Desktop 3P Mode.** Claude Desktop's third-party model mode only lists "recognizably Claude" ids, hiding every FCC-advertised `anthropic/<provider>/<model>` id — and its discovery filter *also* rejects any id whose name contains a third-party model vendor token (`deepseek`, `qwen`, `glm`, `kimi`, …) even when it starts with `claude-`. Check "Claude Desktop 3P Mode" in the Admin UI (or set `ENABLE_CLAUDE_DESKTOP_3P=true`) to start a dedicated second listener (default port `8083`, configurable via `CLAUDE_DESKTOP_PORT`) that advertises each model as a single-segment `claude-<provider>-<model>` id in which every blacklisted vendor token is obfuscated with a hyphen — the first vowel of the token is replaced (`deepseek` → `d-epseek`), or, for vowelless tokens, a hyphen is inserted after the first character (`glm` → `g-lm`) — e.g. `deepseek/deepseek-v4-flash` → `claude-d-epseek-d-epseek-v4-flash`. Obfuscated ids pass Desktop's name filter on their own and decode back losslessly (restored segments are validated by re-encoding to the exact wire id) before routing, so every model is discoverable in the picker; no-thinking variants carry the same obfuscation under the shared `claude-3-freecc-no-thinking/` prefix. The main port keeps serving the normal catalog untouched, so Claude Code and Claude Desktop can both be pointed at the same running proxy — just at different ports.
+
+**OpenCode — session/billing correlation.** The Claude Code session id is mapped deterministically to an opencode-style session id and forwarded as `x-opencode-client` / `x-opencode-session` headers (plus `x-opencode-request` when available) on `opencode_go` and `opencode_zen` requests, so the OpenCode billing dashboard can group requests by Claude session.
+
+**Mid-conversation system messages.** The request-level `system` prompt is unaffected (index-zero system message, as upstream). For the remaining mid-conversation `role: system` messages on OpenAI-compatible wires: the native DeepSeek provider receives them under DeepSeek's native `latest_reminder` role; every other provider drops them, since they cannot represent the system role mid-conversation. The choice is provider-capability driven only — gateways that proxy DeepSeek-named models (e.g. `deepseek-v4-flash` on opencode_go) do not accept the tag and drop like everyone else.
+
+**Streaming content-block fix.** OpenAI-compatible relays that keep `reasoning_content` present as an empty string on every content chunk (e.g. the OpenCode qwen gateway) no longer cause a content-block churn in the Anthropic SSE stream, which previously fragmented assistant output into many tiny blocks in Claude Code.
+
 <div align="center">
   <img src="assets/browser-code-session.png" alt="Native Codex browser session in FCC, showing model controls and a repository exploration" width="700">
   <p><em>A native Codex session in FCC's browser UI.</em></p>

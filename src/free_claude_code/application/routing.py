@@ -16,8 +16,12 @@ from free_claude_code.config.provider_catalog import (
 )
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
-from free_claude_code.core.anthropic import MessagesRequest, TokenCountRequest
-from free_claude_code.core.gateway_model_ids import decode_gateway_model_id
+from free_claude_code.core.anthropic import Message, MessagesRequest, TokenCountRequest
+from free_claude_code.core.gateway_model_ids import (
+    decode_claude_desktop_model_id,
+    decode_claude_desktop_no_thinking_model_id,
+    decode_gateway_model_id,
+)
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
 
@@ -29,6 +33,61 @@ _ROUTE_SETTINGS = (
     ("haiku", "model_haiku", "reasoning_haiku"),
     ("sonnet", "model_sonnet", "reasoning_sonnet"),
 )
+
+# Markers Claude Code injects into compaction / summarization requests.
+# When either marker is present, the request is redirected to ``model_compact``
+# (if configured) so a cheaper model handles context summarization.
+COMPACT_SYSTEM_MARKER = "summarizing conversations"
+COMPACT_USER_MARKER = "CRITICAL: Respond with TEXT ONLY"
+
+# Suffix Claude Code reads in /v1/models to grant the 1M-token context window.
+# Stripped from ``provider_model`` before sending to upstream so the real
+# provider only sees the bare model id.
+ONE_M_CONTEXT_SUFFIX = "[1m]"
+
+
+def _strip_1m_suffix(model: str) -> str:
+    """Remove the ``[1m]`` context-window marker so upstream receives the real model id."""
+    return model.removesuffix(ONE_M_CONTEXT_SUFFIX)
+
+
+def _block_text(block: object) -> str | None:
+    text = getattr(block, "text", None)
+    if text is None and isinstance(block, dict):
+        text = block.get("text")
+    return text
+
+
+def _carries_compaction_prompt(message: Message) -> bool:
+    """True when the message contains Claude Code's compaction prompt."""
+    content = message.content
+    if isinstance(content, str):
+        return content.startswith(COMPACT_USER_MARKER)
+    return any(
+        (text := _block_text(block)) is not None
+        and text.startswith(COMPACT_USER_MARKER)
+        for block in content
+    )
+
+
+def _is_compaction_request(request: MessagesRequest) -> bool:
+    """True when the request looks like a Claude Code compaction/summarization call."""
+    system = request.system
+    if isinstance(system, str) and COMPACT_SYSTEM_MARKER in system:
+        return True
+    if isinstance(system, list):
+        for block in system:
+            text = _block_text(block)
+            if text and COMPACT_SYSTEM_MARKER in text:
+                return True
+    # Claude Code appends system-reminder messages *after* the compaction
+    # prompt and sends the prompt inside a block list (following tool_result
+    # or filler blocks), so the prompt is neither the last message nor a bare
+    # string. Scan back to the last user message and every text block.
+    for message in reversed(request.messages):
+        if message.role == "user":
+            return _carries_compaction_prompt(message)
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,16 +132,35 @@ class RoutedTokenCountRequest:
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, desktop_mode: bool = False):
         self._settings = settings
+        self._desktop_mode = desktop_mode
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
-        (
-            direct_provider_id,
-            direct_provider_model,
-            force_reasoning_off,
-        ) = self._direct_provider_model(claude_model_name)
+        # Claude Desktop 3P mode advertises obfuscated
+        # claude-<provider>-<model> ids; decode them before the generic
+        # gateway parser, whose raw split would leave vendor-token
+        # obfuscation inside the provider/model segments.
+        decoded = (
+            decode_claude_desktop_model_id(claude_model_name, SUPPORTED_PROVIDER_IDS)
+            or decode_claude_desktop_no_thinking_model_id(
+                claude_model_name, SUPPORTED_PROVIDER_IDS
+            )
+            if self._desktop_mode
+            else None
+        )
+        if decoded is not None:
+            direct_provider_id = decoded.provider_id
+            direct_provider_model = decoded.provider_model
+            force_reasoning_off = decoded.force_reasoning_off
+        else:
+            (
+                direct_provider_id,
+                direct_provider_model,
+                force_reasoning_off,
+            ) = self._direct_provider_model(claude_model_name)
         if direct_provider_id is not None and direct_provider_model is not None:
+            stripped_provider_model = _strip_1m_suffix(direct_provider_model)
             reasoning_preference = (
                 ReasoningPreference.OFF
                 if force_reasoning_off
@@ -92,10 +170,10 @@ class ModelRouter:
                 "MODEL DIRECT: '{}' -> provider='{}' model='{}' reasoning={}",
                 claude_model_name,
                 direct_provider_id,
-                direct_provider_model,
+                stripped_provider_model,
                 reasoning_preference.value,
             )
-            primary = self._target(direct_provider_id, direct_provider_model)
+            primary = self._target(direct_provider_id, stripped_provider_model)
             return ResolvedModelRoute(
                 original_model=claude_model_name,
                 primary=primary,
@@ -105,7 +183,10 @@ class ModelRouter:
 
         provider_model_ref = self._resolve_model_ref(claude_model_name)
         reasoning_preference = self._resolve_reasoning_preference(claude_model_name)
-        primary = self._target_from_ref(provider_model_ref)
+        primary = self._target(
+            parse_provider_type(provider_model_ref),
+            _strip_1m_suffix(parse_model_name(provider_model_ref)),
+        )
         if primary.provider_model != claude_model_name:
             logger.debug(
                 "MODEL MAPPING: '{}' -> '{}'",
@@ -117,6 +198,22 @@ class ModelRouter:
             primary=primary,
             fallbacks=self._fallback_targets(primary),
             reasoning_preference=reasoning_preference,
+        )
+
+    def _resolve_compact_override(self) -> ResolvedModelRoute | None:
+        """Resolve ``settings.model_compact`` into a route, validating the provider."""
+        ref = self._settings.model_compact
+        if ref is None:
+            return None
+        target = self._target(
+            parse_provider_type(ref),
+            _strip_1m_suffix(parse_model_name(ref)),
+        )
+        return ResolvedModelRoute(
+            original_model="<compact>",
+            primary=target,
+            fallbacks=(),
+            reasoning_preference=self._settings.reasoning_policy,
         )
 
     def _target_from_ref(self, provider_model_ref: str) -> ProviderModelTarget:
@@ -214,6 +311,24 @@ class ModelRouter:
         self, request: MessagesRequest
     ) -> RoutedMessagesRequest:
         """Return an internal routed request context."""
+        if self._settings.model_compact is not None and _is_compaction_request(request):
+            resolved = self._resolve_compact_override()
+            if resolved is not None:
+                routed = request.model_copy(deep=True)
+                routed.model = resolved.primary.provider_model
+                logger.debug(
+                    "MODEL COMPACT: routing compaction request -> provider='{}' model='{}'",
+                    resolved.primary.provider_id,
+                    resolved.primary.provider_model,
+                )
+                return RoutedMessagesRequest(
+                    request=routed,
+                    resolved=resolved,
+                    reasoning=resolve_reasoning_policy(
+                        routed,
+                        resolved.reasoning_preference,
+                    ),
+                )
         resolved = self.resolve(request.model)
         routed = request.model_copy(deep=True)
         routed.model = resolved.primary.provider_model

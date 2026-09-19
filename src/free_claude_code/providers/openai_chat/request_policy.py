@@ -9,6 +9,7 @@ from loguru import logger
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.core.anthropic import (
+    MidConversationSystemMode,
     ReasoningReplayMode,
     build_base_request_body,
 )
@@ -44,6 +45,24 @@ class OpenAIChatRequestPolicy:
     normalize_n_to_one: bool = False
 
 
+def _mid_conversation_system_mode(
+    policy: OpenAIChatRequestPolicy,
+) -> MidConversationSystemMode:
+    """Choose how mid-conversation system messages reach the upstream.
+
+    Only the native DeepSeek provider documents the dedicated
+    ``latest_reminder`` role, so only it receives the system text under that
+    role. Every other OpenAI Chat upstream cannot represent the system role
+    mid-conversation — gateways serving DeepSeek-family model names are not
+    DeepSeek (Console Go rejects the tag with a 422), so those messages are
+    dropped rather than demoted into user content. Selection is
+    provider-capability driven, never model-name driven.
+    """
+    if policy.provider_name == "DEEPSEEK":
+        return MidConversationSystemMode.LATEST_REMINDER
+    return MidConversationSystemMode.DROP
+
+
 def build_openai_chat_request_body(
     request_data: MessagesRequest,
     *,
@@ -64,6 +83,7 @@ def build_openai_chat_request_body(
             request_data,
             default_max_tokens=policy.default_max_tokens,
             reasoning_replay=policy.reasoning_replay,
+            mid_conversation_system=_mid_conversation_system_mode(policy),
         )
     except OpenAIConversionError as exc:
         raise InvalidRequestError(str(exc)) from exc

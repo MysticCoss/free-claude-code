@@ -8,6 +8,8 @@ from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.reasoning import ReasoningPreference
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic.models import (
+    ContentBlockText,
+    ContentBlockToolResult,
     Message,
     MessagesRequest,
     TokenCountRequest,
@@ -69,6 +71,8 @@ def settings():
     settings.model_opus = None
     settings.model_sonnet = None
     settings.model_haiku = None
+    settings.model_compact = None
+    settings.fcc_1m_models = None
     settings.reasoning_policy = ReasoningPreference.CLIENT
     settings.reasoning_fable = ReasoningPreference.INHERIT
     settings.reasoning_opus = ReasoningPreference.INHERIT
@@ -397,3 +401,279 @@ def test_model_router_preserves_typed_error_for_unknown_mapped_provider(settings
     assert str(exc_info.value) == (
         f"Unknown provider_type: 'unknown'. Supported: '{supported}'"
     )
+
+
+# ----------------- [1m] suffix stripping -----------------
+
+
+def test_resolve_strips_1m_suffix_from_direct_provider_model(settings):
+    """Direct provider model with [1m] suffix is stripped before upstream send."""
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="anthropic/opencode_go/deepseek-v4-pro[1m]",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert routed.resolved.primary.provider_id == "opencode_go"
+    assert routed.resolved.primary.provider_model == "deepseek-v4-pro"
+    assert routed.resolved.primary.provider_model_ref == "opencode_go/deepseek-v4-pro"
+    assert routed.resolved.original_model == (
+        "anthropic/opencode_go/deepseek-v4-pro[1m]"
+    )
+    assert routed.request.model == "deepseek-v4-pro"
+
+
+def test_resolve_strips_1m_suffix_from_mapped_model(settings):
+    """A configured MODEL_SONNET that ends in [1m] is stripped before upstream send."""
+    settings.model_sonnet = "opencode_go/deepseek-v4-pro[1m]"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert routed.resolved.primary.provider_id == "opencode_go"
+    assert routed.resolved.primary.provider_model == "deepseek-v4-pro"
+    assert routed.resolved.primary.provider_model_ref == "opencode_go/deepseek-v4-pro"
+    assert routed.request.model == "deepseek-v4-pro"
+
+
+def test_resolve_keeps_1m_only_in_original_model(settings):
+    """Canonical targets are suffix-stripped; the raw request id keeps [1m]."""
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="anthropic/opencode_go/deepseek-v4-pro[1m]",
+            max_tokens=100,
+            messages=[Message(role="user", content="hello")],
+        )
+    )
+
+    assert "[1m]" in routed.resolved.original_model
+    assert "[1m]" not in routed.resolved.primary.provider_model_ref
+
+
+# ----------------- MODEL_COMPACT override -----------------
+
+
+def test_resolve_messages_request_uses_compact_model_on_compaction_request(settings):
+    """Compaction-shaped request is rerouted to settings.model_compact."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant summarizing conversations.",
+            messages=[Message(role="user", content="Summarize this thread")],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_id == "opencode_go"
+    assert routed.resolved.primary.provider_model == "deepseek-v4-flash"
+    assert routed.resolved.primary.provider_model_ref == "opencode_go/deepseek-v4-flash"
+    assert routed.request.model == "deepseek-v4-flash"
+
+
+def test_resolve_messages_request_falls_back_when_compact_unset(settings):
+    """Compaction-shaped request falls through to normal routing when MODEL_COMPACT is unset."""
+    assert settings.model_compact is None
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant summarizing conversations.",
+            messages=[Message(role="user", content="Summarize this thread")],
+        )
+    )
+
+    assert routed.resolved.original_model == "claude-sonnet-4-20250514"
+    # Default model in the test fixture is "nvidia_nim/fallback-model".
+    assert routed.resolved.primary.provider_id == "nvidia_nim"
+    assert routed.resolved.primary.provider_model == "fallback-model"
+
+
+def test_resolve_messages_request_no_compaction_when_marker_absent(settings):
+    """Non-compaction request with MODEL_COMPACT set still uses normal routing."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant.",
+            messages=[Message(role="user", content="Hello, world")],
+        )
+    )
+
+    assert routed.resolved.original_model == "claude-sonnet-4-20250514"
+    assert routed.resolved.primary.provider_model_ref == "nvidia_nim/fallback-model"
+
+
+def test_resolve_messages_request_detects_compact_user_marker(settings):
+    """Last user message starting with 'CRITICAL: Respond with TEXT ONLY' triggers override."""
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            system="You are a helpful assistant.",
+            messages=[
+                Message(
+                    role="user",
+                    content="CRITICAL: Respond with TEXT ONLY. Do not use tools.",
+                )
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_model == "deepseek-v4-flash"
+
+
+# Regression: Claude Code 2.1.260 desktop-3p sends the compaction prompt as a
+# block list (often after tool_result/filler blocks) and appends system-role
+# reminder messages *after* it, so neither "last message" nor "str content"
+# matched. See ~/.fcc/logs/server - Copy.log req_1e228842 / req_995bad87.
+
+
+def test_compact_detected_when_prompt_is_text_block_after_tool_results(settings):
+    """CRITICAL prompt as the last text block of the last user message."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-opencode_go-d-epseek-v4-flash",
+            max_tokens=100,
+            messages=[
+                Message(role="user", content="hello"),
+                Message(role="assistant", content="hi"),
+                Message(
+                    role="user",
+                    content=[
+                        ContentBlockToolResult(
+                            type="tool_result", tool_use_id="tu_1", content="ok"
+                        ),
+                        ContentBlockToolResult(
+                            type="tool_result", tool_use_id="tu_2", content="ok"
+                        ),
+                        ContentBlockText(
+                            type="text",
+                            text="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                        ),
+                    ],
+                ),
+                # Claude Code appends a system reminder after the prompt.
+                Message(
+                    role="system",
+                    content="The task tools haven't been used recently.",
+                ),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_model == "hy3"
+
+
+def test_compact_detected_when_prompt_block_follows_filler_text(settings):
+    """CRITICAL prompt may sit behind an unrelated leading text block."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        ContentBlockText(type="text", text="lO\n"),
+                        ContentBlockText(
+                            type="text",
+                            text="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                        ),
+                    ],
+                ),
+                Message(role="system", content="The date has changed."),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "<compact>"
+    assert routed.resolved.primary.provider_model == "hy3"
+
+
+def test_compact_not_detected_when_last_user_message_is_plain(settings):
+    """A CRITICAL prompt earlier in history must not reroute the current turn."""
+    settings.model_compact = "opencode_go/hy3"
+
+    routed = ModelRouter(settings).resolve_messages_request(
+        MessagesRequest(
+            model="claude-sonnet-4-20250514",
+            max_tokens=100,
+            messages=[
+                Message(
+                    role="user",
+                    content="CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                ),
+                Message(role="assistant", content="the summary"),
+                Message(role="user", content="thanks, continue the task"),
+            ],
+        )
+    )
+
+    assert routed.resolved.original_model == "claude-sonnet-4-20250514"
+    assert routed.resolved.primary.provider_model == "fallback-model"
+
+
+def test_resolve_messages_request_preserves_request_body_for_compaction(settings):
+    """Compaction request body is passed through unchanged (no sanitization)."""
+    from free_claude_code.core.anthropic.models import (
+        ContentBlockToolUse,
+        Tool,
+    )
+
+    settings.model_compact = "opencode_go/deepseek-v4-flash"
+
+    request = MessagesRequest(
+        model="claude-sonnet-4-20250514",
+        max_tokens=100,
+        system="You are a helpful assistant summarizing conversations.",
+        tools=[Tool(name="search", description="search the web")],
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    ContentBlockToolUse(
+                        type="tool_use",
+                        id="toolu_1",
+                        name="search",
+                        input={"q": "weather"},
+                    )
+                ],
+            )
+        ],
+    )
+
+    original_tools = request.tools
+    original_content = request.messages[0].content
+
+    routed = ModelRouter(settings).resolve_messages_request(request)
+
+    # Model is replaced, but tools and tool blocks are NOT stripped.
+    assert routed.request.model == "deepseek-v4-flash"
+    assert routed.request.tools == original_tools
+    assert isinstance(routed.request.messages[0].content, list)
+    assert isinstance(routed.request.messages[0].content[0], ContentBlockToolUse)
+    # Original request is untouched.
+    assert request.model == "claude-sonnet-4-20250514"
+    assert request.tools is not None
+    assert request.messages[0].content is original_content

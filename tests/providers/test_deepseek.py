@@ -268,6 +268,31 @@ def test_build_request_body_openai_chat_shape(deepseek_provider):
     assert "stream_options" not in body
 
 
+def test_build_request_body_maps_inline_system_to_latest_reminder(deepseek_provider):
+    """Native DeepSeek gets the dedicated reminder role, not demoted user text."""
+    request = MessagesRequest.model_validate(
+        {
+            "model": "deepseek-chat",
+            "system": "S",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Reminder text"},
+            ],
+        }
+    )
+
+    body = deepseek_provider._chat._build_request_body(
+        request, reasoning=reasoning_for(request)
+    )
+
+    assert body["messages"] == [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "Hello"},
+        {"role": "latest_reminder", "content": "Reminder text"},
+    ]
+
+
 def test_build_request_body_default_max_tokens(deepseek_provider):
     request = MessagesRequest(
         model="m",

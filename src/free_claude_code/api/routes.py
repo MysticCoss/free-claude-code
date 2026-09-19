@@ -15,11 +15,15 @@ from free_claude_code.core.anthropic import (
     get_token_count,
 )
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
-from free_claude_code.core.trace import trace_event
+from free_claude_code.core.trace import (
+    extract_claude_session_id_from_headers,
+    trace_event,
+)
 
 from .dependencies import (
     get_services,
     get_settings,
+    is_claude_desktop_request,
     require_anthropic_proxy_auth,
     require_proxy_auth,
     resolve_provider,
@@ -49,6 +53,7 @@ async def _create_messages_response(
     *,
     request_id: str,
     request_headers: Mapping[str, str] | None = None,
+    desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
@@ -62,6 +67,7 @@ async def _create_messages_response(
             generation_id=lease.generation_id,
             request_headers=request_headers,
             model_info_lookup=lease.model_info,
+            desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -86,6 +92,7 @@ async def _create_responses_response(
     *,
     request_id: str,
     request_headers: Mapping[str, str] | None = None,
+    desktop_mode: bool = False,
 ) -> object:
     lease: RequestRuntimeLease | None = None
     try:
@@ -96,6 +103,7 @@ async def _create_responses_response(
             provider_resolver=_provider_resolver(lease),
             generation_id=lease.generation_id,
             request_headers=request_headers,
+            desktop_mode=desktop_mode,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -123,14 +131,19 @@ async def create_message(
     request: Request,
     request_data: MessagesRequest,
     services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
     _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Create a message (JSON by default; stream=true returns Anthropic SSE)."""
+    session_id = extract_claude_session_id_from_headers(request.headers)
+    if session_id:
+        request_data.fcc_session_id = session_id
     return await _create_messages_response(
         services,
         request_data,
         request_id=get_request_id(request),
         request_headers=request.headers,
+        desktop_mode=is_claude_desktop_request(request, settings),
     )
 
 
@@ -144,6 +157,7 @@ async def create_response(
     request: Request,
     request_data: OpenAIResponsesRequest,
     services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """Create an OpenAI Responses-compatible response through this proxy."""
@@ -152,6 +166,7 @@ async def create_response(
         request_data,
         request_id=get_request_id(request),
         request_headers=request.headers,
+        desktop_mode=is_claude_desktop_request(request, settings),
     )
 
 
@@ -171,7 +186,11 @@ async def count_tokens(
     lease = await services.requests.acquire()
     try:
         await lease.wait_for_token_estimation()
-        handler = TokenCountHandler(lease.settings, token_counter=get_token_count)
+        handler = TokenCountHandler(
+            lease.settings,
+            token_counter=get_token_count,
+            desktop_mode=is_claude_desktop_request(request, lease.settings),
+        )
         return handler.count(request_data, request_id=get_request_id(request))
     finally:
         await lease.release()
@@ -215,6 +234,7 @@ async def probe_health():
     response_model_exclude_none=True,
 )
 async def list_models(
+    request: Request,
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
     services: ApiServices = Depends(get_services),
     _auth=Depends(require_proxy_auth),
@@ -222,7 +242,12 @@ async def list_models(
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
     snapshot = await services.requests.wait_for_catalog()
-    return build_models_list_response(snapshot.settings, snapshot, view=view)
+    return build_models_list_response(
+        snapshot.settings,
+        snapshot,
+        view=view,
+        desktop_mode=is_claude_desktop_request(request, snapshot.settings),
+    )
 
 
 @router.get(

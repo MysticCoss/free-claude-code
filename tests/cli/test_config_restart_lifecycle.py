@@ -33,7 +33,7 @@ def test_supervised_http_apply_finishes_and_reconnects(monkeypatch, stop_during_
     store.commit(dict(store.read().managed) | {"PORT": str(port)})
     runtimes = []
 
-    def build(settings, restart_callback):
+    def build(settings, restart_callback, process_stop_callback=None):
         manager = ProviderRuntimeManager(
             settings, runtime_factory=lambda snapshot: ProviderRuntime(snapshot, {})
         )
@@ -44,6 +44,7 @@ def test_supervised_http_apply_finishes_and_reconnects(monkeypatch, stop_during_
             configuration=ConfigurationService(ManagedConfigStore()),
             transcriber=None,
             restart_callback=restart_callback,
+            process_stop_callback=process_stop_callback,
         )
         runtimes.append(runtime)
         return RuntimeASGIApp(

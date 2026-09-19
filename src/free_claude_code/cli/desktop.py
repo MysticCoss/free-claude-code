@@ -153,4 +153,8 @@ def launch_desktop(tray_factory: DesktopTrayFactory) -> None:
         supervisor.request_open_admin,
         run_server,
     )
+    # In-app updates relaunch the process: give the runtime a way to ask the
+    # desktop controller to quit so update_apply can exit cleanly for the
+    # guardian to replace the binary.
+    supervisor.process_stop_callback = controller.quit
     controller.run()

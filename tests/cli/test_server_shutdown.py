@@ -10,7 +10,7 @@ import pytest
 
 from free_claude_code.cli import commands
 from free_claude_code.config.settings import Settings
-from free_claude_code.runtime.application import RestartCallback
+from free_claude_code.runtime.application import ProcessStopCallback, RestartCallback
 from free_claude_code.runtime.asgi import RuntimeASGIApp
 from free_claude_code.runtime.bootstrap import build_asgi_app
 
@@ -38,8 +38,17 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
     )
     apps: list[RuntimeASGIApp] = []
 
-    def create_app(settings: Settings, *, restart_callback: RestartCallback):
-        app = build_asgi_app(settings, restart_callback=restart_callback)
+    def create_app(
+        settings: Settings,
+        *,
+        restart_callback: RestartCallback,
+        process_stop_callback: ProcessStopCallback | None = None,
+    ):
+        app = build_asgi_app(
+            settings,
+            restart_callback=restart_callback,
+            process_stop_callback=process_stop_callback,
+        )
         # Only provider discovery is external; retain the real Code, HTTP,
         # runtime cleanup, and supervisor lifecycle under investigation.
         monkeypatch.setattr(

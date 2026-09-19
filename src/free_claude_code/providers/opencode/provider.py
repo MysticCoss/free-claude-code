@@ -1,5 +1,6 @@
 """OpenCode provider with catalog-driven Chat/Responses dispatch."""
 
+import json
 import sys
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -15,6 +16,10 @@ from free_claude_code.core.openai_responses import (
     ResponsesToolPolicy,
 )
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.core.session_id import (
+    conversation_seed,
+    opencode_request_headers,
+)
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.endpoint_types import EndpointContext
@@ -143,13 +148,28 @@ class OpenCodeProvider(BaseProvider):
         return snapshot.model_infos
 
     def _upstream_headers(
-        self, request_headers: Mapping[str, str]
+        self,
+        request_headers: Mapping[str, str],
+        request: MessagesRequest | OpenAIResponsesRequest | None = None,
+        request_id: str | None = None,
     ) -> Mapping[str, str]:
+        """Build the x-opencode-* header trio for one upstream request.
+
+        A session value the client already addressed to opencode (or that a
+        harness such as Pi forwarded) goes out verbatim — the client owns
+        that identity. Otherwise the ``fcc_session_id`` the API layer
+        extracted from Claude-shaped headers is mapped to opencode shape.
+        Console Go answers 400 MissingSessionID unless the header carries a
+        value, so Go requests whose client sent no session fall back to a
+        deterministic seed of the conversation's opening; Zen omits the
+        header and lets the gateway report the absence.
+        """
         headers = {name.lower(): value for name, value in request_headers.items()}
-        upstream_headers = {}
         user_agent = headers.get("user-agent")
-        if user_agent and user_agent.isascii() and user_agent.strip():
-            upstream_headers["User-Agent"] = user_agent
+        if not (user_agent and user_agent.isascii() and user_agent.strip()):
+            user_agent = None
+        if request_id is None and request is not None:
+            request_id = getattr(request, "fcc_request_id", None) or None
         for name in (
             "x-opencode-session",
             "session-id",
@@ -161,10 +181,40 @@ class OpenCodeProvider(BaseProvider):
             "x-tbh-session-id",
             "x-fcc-launch-id",
         ):
-            session_id = headers.get(name)
-            if session_id and session_id.strip():
-                upstream_headers["x-opencode-session"] = session_id
-                break
+            candidate = headers.get(name)
+            if candidate and candidate.strip():
+                upstream_headers = opencode_request_headers(
+                    candidate,
+                    request_id=request_id,
+                    verbatim_session=True,
+                )
+                if user_agent:
+                    upstream_headers["User-Agent"] = user_agent
+                return upstream_headers
+        session_id: str | None = None
+        if request is not None:
+            session_id = getattr(request, "fcc_session_id", None) or None
+        fallback_seed: str | None = None
+        if (
+            session_id is None
+            and request is not None
+            and self._opencode_profile.provider_id == "opencode_go"
+        ):
+            if isinstance(request, MessagesRequest):
+                fallback_seed = conversation_seed(request)
+            else:
+                fallback_seed = (
+                    json.dumps(request.input, sort_keys=True, default=str)
+                    + "\n"
+                    + (request.instructions or "")
+                )
+        upstream_headers = opencode_request_headers(
+            session_id,
+            request_id=request_id,
+            fallback_seed=fallback_seed,
+        )
+        if user_agent:
+            upstream_headers["User-Agent"] = user_agent
         return upstream_headers
 
     def stream_messages(
@@ -213,7 +263,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, routed, request_id
+                    ),
                     model_info=route.model_info,
                 )
             else:
@@ -224,7 +276,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, routed, request_id
+                    ),
                     model_info=route.model_info,
                 )
             async for event in selected_stream:
@@ -283,7 +337,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, routed, request_id
+                    ),
                 )
             else:
                 selected_stream = self._chat.stream_responses(
@@ -293,7 +349,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, routed, request_id
+                    ),
                 )
             async for event in selected_stream:
                 yield event

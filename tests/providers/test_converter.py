@@ -4,6 +4,7 @@ import pytest
 
 from free_claude_code.core.anthropic import (
     AnthropicToOpenAIConverter,
+    MidConversationSystemMode,
     OpenAIConversionError,
     ReasoningReplayMode,
     build_base_request_body,
@@ -295,6 +296,140 @@ def test_openai_build_rejects_empty_inline_system_content() -> None:
 
     with pytest.raises(OpenAIConversionError, match="contain text"):
         build_base_request_body(request)
+
+
+# --- Mid-Conversation System Policy Tests ---
+
+
+def _mid_system_request(model: str) -> MessagesRequest:
+    return MessagesRequest.model_validate(
+        {
+            "model": model,
+            "system": "Conversation-wide instructions",
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {"role": "system", "content": "Time: now"},
+                {"role": "assistant", "content": "First answer"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Reminder line 1"},
+                        {"type": "text", "text": "Reminder line 2"},
+                    ],
+                },
+                {"role": "user", "content": "Second question"},
+            ],
+        }
+    )
+
+
+def test_drop_mode_removes_inline_system_messages() -> None:
+    body = build_base_request_body(
+        _mid_system_request("qwen3"),
+        mid_conversation_system=MidConversationSystemMode.DROP,
+    )
+
+    assert body["messages"] == [
+        {"role": "system", "content": "Conversation-wide instructions"},
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+    ]
+
+
+def test_drop_mode_tolerates_non_text_inline_system_blocks() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.com/a.png",
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": "hi"},
+            ],
+        }
+    )
+
+    body = build_base_request_body(
+        request, mid_conversation_system=MidConversationSystemMode.DROP
+    )
+
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_drop_mode_coalesces_users_exposed_by_removed_system_message() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "model",
+            "messages": [
+                {"role": "user", "content": "A"},
+                {"role": "system", "content": "gone"},
+                {"role": "user", "content": "B"},
+            ],
+        }
+    )
+
+    body = build_base_request_body(
+        request, mid_conversation_system=MidConversationSystemMode.DROP
+    )
+
+    # Adjacent user messages coalesce; the removed system text never lands.
+    assert body["messages"] == [{"role": "user", "content": "A\n\nB"}]
+
+
+def test_latest_reminder_mode_uses_native_role_without_coalescing() -> None:
+    body = build_base_request_body(
+        _mid_system_request("deepseek-v4-pro"),
+        mid_conversation_system=MidConversationSystemMode.LATEST_REMINDER,
+    )
+
+    assert body["messages"] == [
+        {"role": "system", "content": "Conversation-wide instructions"},
+        {"role": "user", "content": "First question"},
+        {"role": "latest_reminder", "content": "Time: now"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "latest_reminder", "content": "Reminder line 1\n\nReminder line 2"},
+        {"role": "user", "content": "Second question"},
+    ]
+
+
+def test_latest_reminder_mode_rejects_non_text_inline_system_blocks() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "deepseek-chat",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.com/a.png",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        OpenAIConversionError,
+        match="inline Anthropic system message content block 'image' without data loss",
+    ):
+        build_base_request_body(
+            request, mid_conversation_system=MidConversationSystemMode.LATEST_REMINDER
+        )
 
 
 # --- Tool Conversion Tests ---

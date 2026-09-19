@@ -75,9 +75,13 @@ class MessagesHandler:
         generation_id: int | None = None,
         request_headers: Mapping[str, str] | None = None,
         model_info_lookup: ModelInfoLookup | None = None,
+        desktop_mode: bool = False,
     ) -> None:
         self._settings = settings
-        self._model_router = model_router or ModelRouter(settings)
+        self._model_router = model_router or ModelRouter(
+            settings, desktop_mode=desktop_mode
+        )
+        self._token_counter = token_counter
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,
             progress_timeout_seconds=settings.provider_progress_timeout,

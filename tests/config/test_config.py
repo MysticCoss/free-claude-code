@@ -591,6 +591,448 @@ def test_nim_settings_keep_request_local_validation() -> None:
             NimSettings(top_p=unsupported_top_p)
 
 
+class TestSettingsEmptyStringNormalization:
+    """Blank optional env values normalize to None at the loader boundary.
+
+    Upstream moved Settings off BaseSettings: direct construction performs no
+    environment I/O, so these fork regression checks go through the loader.
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "attribute", "value", "expected"),
+        [
+            ("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "abc123", "abc123"),
+            ("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "", None),
+            ("ALLOWED_TELEGRAM_USER_ID", "allowed_telegram_user_id", "", None),
+            (
+                "DISCORD_BOT_TOKEN",
+                "discord_bot_token",
+                "discord_token_123",
+                "discord_token_123",
+            ),
+            ("DISCORD_BOT_TOKEN", "discord_bot_token", "", None),
+            (
+                "ALLOWED_DISCORD_CHANNELS",
+                "allowed_discord_channels",
+                "111,222,333",
+                "111,222,333",
+            ),
+            ("MESSAGING_PLATFORM", "messaging_platform", "discord", "discord"),
+            ("WHISPER_DEVICE", "whisper_device", "cpu", "cpu"),
+            ("WHISPER_DEVICE", "whisper_device", "cuda", "cuda"),
+        ],
+    )
+    def test_optional_env_values_at_loader_boundary(
+        self,
+        key: str,
+        attribute: str,
+        value: str,
+        expected: object,
+    ) -> None:
+        snapshot = compose_settings_snapshot({}, {key: value})
+
+        assert getattr(snapshot.settings, attribute) == expected
+
+    def test_whisper_device_auto_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="whisper_device"):
+            compose_settings_snapshot({}, {"WHISPER_DEVICE": "auto"})
+
+
+class TestPerModelMapping:
+    """Test per-model settings and model-ref helpers."""
+
+    def test_model_fields_default_none(self):
+        """Per-model fields default to None."""
+        from free_claude_code.config.settings import Settings
+
+        s = Settings()
+        assert s.model_fable is None
+        assert s.model_opus is None
+        assert s.model_sonnet is None
+        assert s.model_haiku is None
+
+    def test_model_opus_loader(self):
+        """MODEL_OPUS env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_OPUS": "open_router/deepseek/deepseek-r1"}
+        )
+        assert snapshot.settings.model_opus == "open_router/deepseek/deepseek-r1"
+
+    def test_model_fable_loader(self):
+        """MODEL_FABLE env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_FABLE": "open_router/anthropic/claude-fable-5"}
+        )
+        assert snapshot.settings.model_fable == "open_router/anthropic/claude-fable-5"
+
+    def test_model_sonnet_loader(self):
+        """MODEL_SONNET env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot(
+            {}, {"MODEL_SONNET": "nvidia_nim/meta/llama-3.3-70b-instruct"}
+        )
+        assert (
+            snapshot.settings.model_sonnet == "nvidia_nim/meta/llama-3.3-70b-instruct"
+        )
+
+    def test_model_haiku_loader(self):
+        """MODEL_HAIKU env var is loaded at the loader boundary."""
+        snapshot = compose_settings_snapshot({}, {"MODEL_HAIKU": "lmstudio/qwen2.5-7b"})
+        assert snapshot.settings.model_haiku == "lmstudio/qwen2.5-7b"
+
+    @pytest.mark.parametrize(
+        "env_var", ["MODEL_FABLE", "MODEL_OPUS", "MODEL_SONNET", "MODEL_HAIKU"]
+    )
+    def test_empty_model_override_env_is_unset(self, env_var: str):
+        """Empty per-model override env vars are treated as unset."""
+        from free_claude_code.application.routing import ModelRouter
+
+        settings = compose_settings_snapshot({}, {env_var: ""}).settings
+        assert getattr(settings, env_var.lower()) is None
+        model_name = env_var.removeprefix("MODEL_").lower()
+        assert (
+            ModelRouter(settings)
+            .resolve(f"claude-{model_name}-4")
+            .primary.provider_model_ref
+            == settings.model
+        )
+
+    @pytest.mark.parametrize(
+        "env_vars,expected_model,expected_haiku",
+        [
+            (
+                {"MODEL": "nvidia_nim/meta/llama3-70b-instruct"},
+                "nvidia_nim/meta/llama3-70b-instruct",
+                None,
+            ),
+            (
+                {
+                    "MODEL": "open_router/anthropic/claude-3-opus",
+                    "MODEL_HAIKU": "open_router/anthropic/claude-3-haiku",
+                },
+                "open_router/anthropic/claude-3-opus",
+                "open_router/anthropic/claude-3-haiku",
+            ),
+            ({"MODEL": "deepseek/deepseek-chat"}, "deepseek/deepseek-chat", None),
+            ({"MODEL": "wafer/DeepSeek-V4-Pro"}, "wafer/DeepSeek-V4-Pro", None),
+            (
+                {"MODEL": "cloudflare/@cf/moonshotai/kimi-k2.6"},
+                "cloudflare/@cf/moonshotai/kimi-k2.6",
+                None,
+            ),
+            (
+                # Retired provider refs are migrated to the default model at
+                # the loader boundary (upstream: retire github_models #1668).
+                {"MODEL": "github_models/openai/gpt-4.1"},
+                DEFAULT_MODEL,
+                None,
+            ),
+            (
+                {"MODEL": "sambanova/Meta-Llama-3.3-70B-Instruct"},
+                "sambanova/Meta-Llama-3.3-70B-Instruct",
+                None,
+            ),
+            ({"MODEL": "lmstudio/qwen2.5-7b"}, "lmstudio/qwen2.5-7b", None),
+            ({"MODEL": "llamacpp/local-model"}, "llamacpp/local-model", None),
+            ({"MODEL": "ollama/llama3.1"}, "ollama/llama3.1", None),
+            (
+                {"MODEL": "ollama_cloud/qwen3-coder:480b"},
+                "ollama_cloud/qwen3-coder:480b",
+                None,
+            ),
+        ],
+    )
+    def test_settings_models_from_env(
+        self,
+        env_vars: dict[str, str],
+        expected_model: str,
+        expected_haiku: str | None,
+    ):
+        """Environment variables override model defaults."""
+        settings = compose_settings_snapshot({}, env_vars).settings
+        assert settings.model == expected_model
+        assert settings.model_haiku == expected_haiku
+
+    @pytest.mark.parametrize(
+        ("env_var", "value", "message"),
+        [
+            ("MODEL_OPUS", "bad_provider/some-model", "Invalid provider"),
+            ("MODEL_OPUS", "noprefix", "provider type"),
+            ("MODEL_HAIKU", "invalid/model", "Invalid provider"),
+            ("MODEL_FABLE", "invalid/model", "Invalid provider"),
+            ("MODEL_COMPACT", "invalid/model", "Invalid provider"),
+        ],
+    )
+    def test_invalid_model_refs_raise_at_loader_boundary(
+        self, env_var: str, value: str, message: str
+    ):
+        """Malformed per-model refs are rejected during validation."""
+        with pytest.raises(ValidationError, match=message):
+            compose_settings_snapshot({}, {env_var: value})
+
+    def test_model_compact_loader(self):
+        """MODEL_COMPACT loads through the boundary and blanks to None."""
+        loaded = compose_settings_snapshot(
+            {}, {"MODEL_COMPACT": "opencode_go/anthropic/claude-fable-5"}
+        ).settings
+        assert loaded.model_compact == "opencode_go/anthropic/claude-fable-5"
+
+        blank = compose_settings_snapshot({}, {"MODEL_COMPACT": ""}).settings
+        assert blank.model_compact is None
+
+    def test_model_compact_default_is_none(self):
+        """MODEL_COMPACT defaults to None when unset."""
+        from free_claude_code.config.settings import Settings
+
+        assert Settings().model_compact is None
+
+    def test_fcc_1m_models_default_is_none(self):
+        """FCC_1M_MODELS defaults to None when unset (upstream ban on empty strings)."""
+        from free_claude_code.config.settings import Settings
+
+        assert Settings().fcc_1m_models is None
+
+    def test_fcc_1m_models_loaded_from_env(self):
+        """FCC_1M_MODELS env var is loaded into settings."""
+        snapshot = compose_settings_snapshot(
+            {},
+            {
+                "FCC_1M_MODELS": (
+                    "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash"
+                )
+            },
+        )
+        assert snapshot.settings.fcc_1m_models == (
+            "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (
+                "opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash",
+                frozenset(
+                    {
+                        "opencode_go/deepseek-v4-pro",
+                        "opencode_go/deepseek-v4-flash",
+                    }
+                ),
+            ),
+            (
+                "opencode_go/deepseek-v4-pro[1m]",
+                frozenset({"opencode_go/deepseek-v4-pro"}),
+            ),
+            (" a/b , c/d ", frozenset({"a/b", "c/d"})),
+            ("", frozenset()),
+        ],
+    )
+    def test_one_m_model_refs_parsing(self, value: str, expected: frozenset[str]):
+        """one_m_model_refs parses, trims, strips [1m], and tolerates blanks."""
+        settings = compose_settings_snapshot({}, {"FCC_1M_MODELS": value}).settings
+        assert settings.one_m_model_refs() == expected
+
+    def test_resolve_model_fable_override(self):
+        """ModelRouter returns model_fable for Fable model names."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model_fable="open_router/anthropic/claude-fable-5")
+        assert (
+            ModelRouter(s).resolve("claude-fable-5").primary.provider_model_ref
+            == "open_router/anthropic/claude-fable-5"
+        )
+
+    def test_resolve_model_opus_override(self):
+        """ModelRouter returns model_opus for opus model names."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model_opus="open_router/deepseek/deepseek-r1")
+        router = ModelRouter(s)
+        for name in (
+            "claude-opus-4-20250514",
+            "claude-3-opus",
+            "claude-3-opus-20240229",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "open_router/deepseek/deepseek-r1"
+            )
+
+    def test_resolve_model_sonnet_override(self):
+        """ModelRouter returns model_sonnet for sonnet model names."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model_sonnet="nvidia_nim/meta/llama-3.3-70b-instruct")
+        router = ModelRouter(s)
+        for name in ("claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022"):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "nvidia_nim/meta/llama-3.3-70b-instruct"
+            )
+
+    def test_resolve_model_haiku_override(self):
+        """ModelRouter returns model_haiku for haiku model names."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model_haiku="lmstudio/qwen2.5-7b")
+        router = ModelRouter(s)
+        for name in (
+            "claude-3-haiku-20240307",
+            "claude-3-5-haiku-20241022",
+            "claude-haiku-4-20250514",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "lmstudio/qwen2.5-7b"
+            )
+
+    def test_resolve_model_fallback_when_override_not_set(self):
+        """ModelRouter falls back to MODEL when model override is None."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model="nvidia_nim/fallback-model")
+        router = ModelRouter(s)
+        for name in (
+            "claude-fable-5",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-3-haiku-20240307",
+        ):
+            assert router.resolve(name).primary.provider_model_ref == (
+                "nvidia_nim/fallback-model"
+            )
+
+    def test_resolve_model_unknown_model_falls_back(self):
+        """ModelRouter falls back to MODEL for unrecognized model names."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(
+            model="nvidia_nim/fallback-model",
+            model_opus="open_router/opus-model",
+        )
+        router = ModelRouter(s)
+        assert router.resolve("claude-2.1").primary.provider_model_ref == (
+            "nvidia_nim/fallback-model"
+        )
+        assert router.resolve("some-unknown-model").primary.provider_model_ref == (
+            "nvidia_nim/fallback-model"
+        )
+
+    def test_resolve_model_case_insensitive(self):
+        """Model classification is case-insensitive."""
+        from free_claude_code.application.routing import ModelRouter
+        from free_claude_code.config.settings import Settings
+
+        s = Settings(model_opus="open_router/opus-model")
+        assert ModelRouter(s).resolve("Claude-OPUS-4").primary.provider_model_ref == (
+            "open_router/opus-model"
+        )
+
+    def test_parse_provider_type(self):
+        """parse_provider_type extracts provider from model string."""
+
+        assert parse_provider_type("nvidia_nim/meta/llama") == "nvidia_nim"
+        assert parse_provider_type("open_router/deepseek/r1") == "open_router"
+        assert parse_provider_type("mistral/devstral-small-latest") == "mistral"
+        assert (
+            parse_provider_type("mistral_codestral/codestral-latest")
+            == "mistral_codestral"
+        )
+        assert parse_provider_type("deepseek/deepseek-chat") == "deepseek"
+        assert parse_provider_type("lmstudio/qwen") == "lmstudio"
+        assert parse_provider_type("llamacpp/model") == "llamacpp"
+        assert parse_provider_type("ollama/llama3.1") == "ollama"
+        assert parse_provider_type("ollama_cloud/qwen3-coder:480b") == "ollama_cloud"
+        assert parse_provider_type("wafer/DeepSeek-V4-Pro") == "wafer"
+        assert parse_provider_type("minimax/MiniMax-M3") == "minimax"
+        assert (
+            parse_provider_type("cloudflare/@cf/moonshotai/kimi-k2.6") == "cloudflare"
+        )
+        assert parse_provider_type("vercel/openai/gpt-5.5") == "vercel"
+        assert (
+            parse_provider_type("huggingface/openai/gpt-oss-120b:fastest")
+            == "huggingface"
+        )
+        assert parse_provider_type("cohere/command-a-plus-05-2026") == "cohere"
+        assert parse_provider_type("github_models/openai/gpt-4.1") == ("github_models")
+        assert parse_provider_type("gemini/models/gemini-3.1-flash-lite") == "gemini"
+        assert parse_provider_type("groq/llama-3.3-70b-versatile") == "groq"
+        assert (
+            parse_provider_type("sambanova/Meta-Llama-3.3-70B-Instruct") == "sambanova"
+        )
+        assert parse_provider_type("cerebras/llama3.1-8b") == "cerebras"
+
+    def test_parse_model_name(self):
+        """parse_model_name extracts model name from model string."""
+
+        assert parse_model_name("nvidia_nim/meta/llama") == "meta/llama"
+        assert parse_model_name("mistral/devstral-small-latest") == (
+            "devstral-small-latest"
+        )
+        assert (
+            parse_model_name("mistral_codestral/codestral-latest") == "codestral-latest"
+        )
+        assert parse_model_name("deepseek/deepseek-chat") == "deepseek-chat"
+        assert parse_model_name("lmstudio/qwen") == "qwen"
+        assert parse_model_name("llamacpp/model") == "model"
+        assert parse_model_name("ollama/llama3.1") == "llama3.1"
+        assert parse_model_name("ollama_cloud/qwen3-coder:480b") == "qwen3-coder:480b"
+        assert parse_model_name("wafer/DeepSeek-V4-Pro") == "DeepSeek-V4-Pro"
+        assert parse_model_name("minimax/MiniMax-M3") == "MiniMax-M3"
+        assert (
+            parse_model_name("cloudflare/@cf/moonshotai/kimi-k2.6")
+            == "@cf/moonshotai/kimi-k2.6"
+        )
+        assert parse_model_name("vercel/openai/gpt-5.5") == "openai/gpt-5.5"
+        assert (
+            parse_model_name("huggingface/openai/gpt-oss-120b:fastest")
+            == "openai/gpt-oss-120b:fastest"
+        )
+        assert parse_model_name("cohere/command-a-plus-05-2026") == (
+            "command-a-plus-05-2026"
+        )
+        assert parse_model_name("github_models/openai/gpt-4.1") == "openai/gpt-4.1"
+        assert (
+            parse_model_name("gemini/models/gemini-3.1-flash-lite")
+            == "models/gemini-3.1-flash-lite"
+        )
+        assert (
+            parse_model_name("groq/llama-3.3-70b-versatile")
+            == "llama-3.3-70b-versatile"
+        )
+        assert (
+            parse_model_name("sambanova/Meta-Llama-3.3-70B-Instruct")
+            == "Meta-Llama-3.3-70B-Instruct"
+        )
+        assert parse_model_name("cerebras/llama3.1-8b") == "llama3.1-8b"
+
+    def test_configured_chat_model_refs_collects_unique_models(self):
+        """Model discovery is limited to configured chat references."""
+        from free_claude_code.config.settings import Settings
+
+        s = Settings()
+        s.model = "nvidia_nim/fallback"
+        s.model_fable = "open_router/anthropic/claude-fable-5"
+        s.model_opus = "open_router/anthropic/claude-opus"
+        s.model_sonnet = "nvidia_nim/fallback"
+        s.model_haiku = None
+
+        refs = configured_chat_model_refs(s)
+
+        assert [ref.model_ref for ref in refs] == [
+            "nvidia_nim/fallback",
+            "open_router/anthropic/claude-fable-5",
+            "open_router/anthropic/claude-opus",
+        ]
+        assert refs[0].provider_id == "nvidia_nim"
+        assert refs[0].model_id == "fallback"
+        assert refs[1].provider_id == "open_router"
+        assert refs[1].model_id == "anthropic/claude-fable-5"
+        assert refs[2].provider_id == "open_router"
+        assert refs[2].model_id == "anthropic/claude-opus"
+
+
 def test_settings_defaults_do_not_contain_empty_enum_strings() -> None:
     for _name, value in Settings():
         if isinstance(value, Enum):

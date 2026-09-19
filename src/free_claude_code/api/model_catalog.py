@@ -8,8 +8,11 @@ from pydantic import BaseModel, Field
 
 from free_claude_code.application.model_catalog import ModelCatalog, read_model_catalog
 from free_claude_code.application.ports import ModelCatalogPort
+from free_claude_code.application.routing import ONE_M_CONTEXT_SUFFIX
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
+    claude_desktop_model_id,
+    claude_desktop_no_thinking_model_id,
     gateway_model_id,
     no_thinking_gateway_model_id,
 )
@@ -143,11 +146,16 @@ def build_models_list_response(
     runtime: ModelCatalogPort,
     *,
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
+    desktop_mode: bool = False,
 ) -> ModelsListResponse:
     """Return the application model inventory in the requested client view."""
     catalog = read_model_catalog(runtime, settings)
     if view is ModelCatalogView.CLAUDE:
-        return _build_claude_models_response(catalog)
+        return _build_claude_models_response(
+            catalog,
+            desktop_mode=desktop_mode,
+            one_m_refs=settings.one_m_model_refs(),
+        )
     return _build_direct_models_response(settings, catalog, view=view)
 
 
@@ -178,21 +186,39 @@ def build_muse_models_list_response(
     return catalog
 
 
-def _build_claude_models_response(catalog: ModelCatalog) -> ModelsListResponse:
-    """Keep shortcuts first and provider variants together in catalog order."""
+def _build_claude_models_response(
+    catalog: ModelCatalog,
+    *,
+    desktop_mode: bool = False,
+    one_m_refs: frozenset[str] = frozenset(),
+) -> ModelsListResponse:
+    """Keep shortcuts first and provider variants together in catalog order.
+
+    ``desktop_mode`` is the per-request Claude Desktop 3P flag (the request
+    was accepted on the dedicated desktop listener); it rewrites provider
+    variant ids to the obfuscated claude-<provider>-<model> form so
+    Desktop's vendor-token discovery filter keeps every model. Catalog
+    members listed in ``one_m_refs`` additionally get ``[1m]``-suffixed
+    variants so Claude Code grants the full 1M-token context window.
+    """
     models = list(SUPPORTED_CLAUDE_MODELS)
     for model in catalog.models:
-        ref = model.provider_model_ref
-        if model.supports_reasoning is not False:
-            models.append(
-                _discovered_model_response(gateway_model_id(ref), display_name=ref)
-            )
-        models.append(
-            _discovered_model_response(
-                no_thinking_gateway_model_id(ref),
-                display_name=f"{ref} (no thinking)",
-            )
+        _append_claude_model_variants(
+            models,
+            model.provider_model_ref,
+            model.supports_reasoning,
+            desktop_mode,
         )
+
+    if one_m_refs:
+        for model in catalog.models:
+            if model.provider_model_ref in one_m_refs:
+                _append_claude_model_variants(
+                    models,
+                    f"{model.provider_model_ref}{ONE_M_CONTEXT_SUFFIX}",
+                    model.supports_reasoning,
+                    desktop_mode,
+                )
     return ModelsListResponse(
         data=models,
         first_id=models[0].id if models else None,
@@ -268,4 +294,34 @@ def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResp
         id=model_id,
         display_name=display_name,
         created_at=DISCOVERED_MODEL_CREATED_AT,
+    )
+
+
+def _append_claude_model_variants(
+    models: list[ModelResponse],
+    provider_model_ref: str,
+    supports_reasoning: bool | None,
+    desktop_mode: bool,
+) -> None:
+    """Append the thinking and no-thinking Claude-view variants for one ref."""
+    if supports_reasoning is not False:
+        models.append(
+            _discovered_model_response(
+                claude_desktop_model_id(provider_model_ref)
+                if desktop_mode
+                else gateway_model_id(provider_model_ref),
+                display_name=provider_model_ref,
+            )
+        )
+    # The no-thinking id already starts with "claude-", but vendor tokens in
+    # the provider/model segments can still trip the Claude Desktop 3P name
+    # filter, so desktop mode obfuscates them the same way as its thinking
+    # sibling; the main port keeps the raw gateway id.
+    models.append(
+        _discovered_model_response(
+            claude_desktop_no_thinking_model_id(provider_model_ref)
+            if desktop_mode
+            else no_thinking_gateway_model_id(provider_model_ref),
+            display_name=f"{provider_model_ref} (no thinking)",
+        )
     )

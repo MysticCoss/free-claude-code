@@ -14,5 +14,10 @@ debug-*.log
 .coverage
 llama_cache
 .smoke-results
+Microsoft/
 /test-results/
 .vscode
+
+# Agentic directives live in the private 'directives' submodule (fcc-directives).
+# Root CLAUDE.md/AGENTS.md are tracked @import stubs — never put real directive
+# content in them; `git add -f` on a real copy is considered a leak.

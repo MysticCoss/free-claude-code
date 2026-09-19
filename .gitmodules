@@ -1,0 +1,3 @@
+[submodule "directives"]
+	path = directives
+	url = https://github.com/MysticCoss/fcc-directives.git

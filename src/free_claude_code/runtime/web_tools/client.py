@@ -1,8 +1,10 @@
 """Outbound HTTP for web_search / web_fetch with operation-scoped resources."""
 
 import asyncio
+import codecs
 import socket
 from collections.abc import AsyncIterator
+from email.message import Message
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -142,6 +144,28 @@ async def _drain_aiohttp_body_capped(
             break
 
 
+def _content_type_charset(content_type: str) -> str | None:
+    """Return the normalized charset a Content-Type header declares, if usable.
+
+    ``aiohttp``'s ``get_encoding()`` raises ``RuntimeError`` when the header
+    omits ``charset`` and the body was never fully read, which conflicts with
+    the capped streaming read in :meth:`HTTPWebToolsClient.fetch`; parse the
+    charset from the header text instead.
+    """
+    message = Message()
+    message["content-type"] = content_type
+    try:
+        charset = message.get_param("charset")
+    except TypeError, ValueError:
+        return None
+    if not isinstance(charset, str):
+        return None
+    try:
+        return codecs.lookup(charset).name
+    except LookupError, ValueError:
+        return None
+
+
 class HTTPWebToolsClient:
     """Stateless adapter; each call owns its HTTP resources until completion."""
 
@@ -213,7 +237,7 @@ class HTTPWebToolsClient:
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "text/plain")
                     final_url = str(response.url)
-                    encoding = response.get_encoding() or "utf-8"
+                    encoding = _content_type_charset(content_type) or "utf-8"
                     body_bytes = await _read_aiohttp_body_capped(
                         response, constants._MAX_WEB_FETCH_RESPONSE_BYTES
                     )

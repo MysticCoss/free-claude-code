@@ -81,6 +81,11 @@ SECTIONS: tuple[ConfigSectionSpec, ...] = (
         "Optional live smoke-test model overrides.",
         advanced=True,
     ),
+    ConfigSectionSpec(
+        "updates",
+        "Update",
+        "Fetch new FCC versions from a GitHub branch, test them, and install.",
+    ),
 )
 
 
@@ -136,6 +141,88 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
             "starts. Applies to every client. One request may reach multiple "
             "providers and consume usage at each."
         ),
+    ),
+    ConfigFieldSpec(
+        "MODEL_COMPACT",
+        "Compaction Model",
+        "models",
+        "optional_model",
+        settings_attr="model_compact",
+        description="Optional provider/model for compaction/summarization requests. "
+        "Falls back to normal routing when unset.",
+    ),
+    ConfigFieldSpec(
+        "FCC_1M_MODELS",
+        "1M Context Models",
+        "models",
+        "textarea",
+        settings_attr="fcc_1m_models",
+        description="Comma-separated provider/model refs (e.g. opencode_go/deepseek-v4-pro). "
+        "Each matching model gets a [1m]-suffixed variant in /v1/models "
+        "so Claude Code grants the 1M-token context window.",
+    ),
+    ConfigFieldSpec(
+        "ENABLE_CLAUDE_DESKTOP_3P",
+        "Claude Desktop 3P Mode",
+        "models",
+        "boolean",
+        settings_attr="enable_claude_desktop_3p",
+        description="Start a second listener on Claude Desktop Port that advertises "
+        "every model as claude-<provider>-<model> so Claude Desktop's 3P filter "
+        "(claude-* / anthropic/claude-*) accepts it, and route those ids back to "
+        "their provider. The main port is never rewritten.",
+        restart_required=True,
+    ),
+    ConfigFieldSpec(
+        "CLAUDE_DESKTOP_PORT",
+        "Claude Desktop Port",
+        "models",
+        "number",
+        settings_attr="claude_desktop_port",
+        description="Dedicated port for the Claude Desktop 3P listener "
+        "(must differ from PORT). Point Claude Desktop's gateway base URL here.",
+        restart_required=True,
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_REPO",
+        "Update Repository",
+        "updates",
+        "text",
+        settings_attr="fcc_update_repo",
+        restart_required=True,
+        description="GitHub 'owner/repo' that Update checks and installs download "
+        "from (default: this fork).",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_BRANCH",
+        "Update Branch",
+        "updates",
+        "text",
+        settings_attr="fcc_update_branch",
+        restart_required=True,
+        description="Branch of the Update Repository to install.",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_AUTO",
+        "Automatic Updates",
+        "updates",
+        "boolean",
+        settings_attr="fcc_update_auto",
+        restart_required=True,
+        description="When on, FCC periodically checks the Update Repository and "
+        "installs a newer tested version automatically (the server restarts "
+        "itself during the install).",
+    ),
+    ConfigFieldSpec(
+        "FCC_UPDATE_POLL_HOURS",
+        "Update Poll Interval",
+        "updates",
+        "number",
+        settings_attr="fcc_update_poll_hours",
+        restart_required=True,
+        description="Hours between automatic update checks (used only when "
+        "Automatic Updates is on).",
+        advanced=True,
     ),
     ConfigFieldSpec(
         "REASONING_POLICY",

@@ -7,7 +7,10 @@ from loguru import logger
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from free_claude_code.core.trace import extract_claude_session_id_from_headers
+from free_claude_code.core.trace import (
+    extract_claude_session_id_from_headers,
+    trace_event,
+)
 
 REQUEST_ID_HEADER = "request-id"
 OPENAI_REQUEST_ID_HEADER = "x-request-id"
@@ -40,6 +43,20 @@ class RequestCorrelationMiddleware:
         path = scope.get("path", "")
         request_headers = Headers(scope=scope)
         claude_sid = extract_claude_session_id_from_headers(request_headers)
+        # DEBUG-only snapshot of every ingress' raw headers (credentials
+        # redacted by trace_event) so client fingerprints — e.g. what
+        # session-ish headers Claude Desktop sends vs Claude Code — can be
+        # compared without disturbing the default INFO log stream.
+        trace_event(
+            stage="ingress",
+            event="ingress.headers",
+            source="api",
+            method=method,
+            path=path,
+            request_id=request_id,
+            session_header_matched=claude_sid is not None,
+            headers=dict(request_headers),
+        )
 
         async def send_with_correlation(message: Message) -> None:
             if message["type"] == "http.response.start":

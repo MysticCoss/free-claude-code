@@ -30,6 +30,8 @@ _SECRET_VALUE_KEYS = frozenset(
         "bearer_token",
         "openapi_token",
         "nvidia-api-key",
+        "cookie",
+        "set-cookie",
     )
 )
 
@@ -93,6 +95,8 @@ def extract_claude_session_id_from_headers(headers: Mapping[str, str]) -> str | 
         "x-anthropic-session-id",
         "claude-session-id",
         "x-claude-session-id",
+        "claude-code-session-id",
+        "x-claude-code-session-id",
     ):
         candidate = lowered.get(key)
         if candidate:
