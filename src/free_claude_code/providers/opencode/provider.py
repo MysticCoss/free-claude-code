@@ -165,6 +165,9 @@ class OpenCodeProvider(BaseProvider):
         header and lets the gateway report the absence.
         """
         headers = {name.lower(): value for name, value in request_headers.items()}
+        user_agent = headers.get("user-agent")
+        if not (user_agent and user_agent.isascii() and user_agent.strip()):
+            user_agent = None
         if request_id is None and request is not None:
             request_id = getattr(request, "fcc_request_id", None) or None
         for name in (
@@ -180,11 +183,14 @@ class OpenCodeProvider(BaseProvider):
         ):
             candidate = headers.get(name)
             if candidate and candidate.strip():
-                return opencode_request_headers(
+                upstream_headers = opencode_request_headers(
                     candidate,
                     request_id=request_id,
                     verbatim_session=True,
                 )
+                if user_agent:
+                    upstream_headers["User-Agent"] = user_agent
+                return upstream_headers
         session_id: str | None = None
         if request is not None:
             session_id = getattr(request, "fcc_session_id", None) or None
@@ -202,11 +208,14 @@ class OpenCodeProvider(BaseProvider):
                     + "\n"
                     + (request.instructions or "")
                 )
-        return opencode_request_headers(
+        upstream_headers = opencode_request_headers(
             session_id,
             request_id=request_id,
             fallback_seed=fallback_seed,
         )
+        if user_agent:
+            upstream_headers["User-Agent"] = user_agent
+        return upstream_headers
 
     def stream_messages(
         self,
