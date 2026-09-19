@@ -146,10 +146,12 @@ class OpenCodeProvider(BaseProvider):
         self, request_headers: Mapping[str, str]
     ) -> Mapping[str, str]:
         headers = {name.lower(): value for name, value in request_headers.items()}
-        upstream_headers = {}
         user_agent = headers.get("user-agent")
-        if user_agent and user_agent.isascii() and user_agent.strip():
-            upstream_headers["User-Agent"] = user_agent
+        if not (user_agent and user_agent.isascii() and user_agent.strip()):
+            user_agent = None
+        if request_id is None and request is not None:
+            request_id = getattr(request, "fcc_request_id", None) or None
+
         for name in (
             "x-opencode-session",
             "session-id",
@@ -161,10 +163,41 @@ class OpenCodeProvider(BaseProvider):
             "x-tbh-session-id",
             "x-fcc-launch-id",
         ):
-            session_id = headers.get(name)
-            if session_id and session_id.strip():
-                upstream_headers["x-opencode-session"] = session_id
-                break
+            candidate = headers.get(name)
+            if candidate and candidate.strip():
+                upstream_headers = opencode_request_headers(
+                    candidate,
+                    request_id=request_id,
+                    verbatim_session=True,
+                )
+                if user_agent:
+                    upstream_headers["User-Agent"] = user_agent
+                return upstream_headers
+        session_id: str | None = None
+        if request is not None:
+            session_id = getattr(request, "fcc_session_id", None) or None
+        fallback_seed: str | None = None
+        if (
+            session_id is None
+            and request is not None
+            and self._opencode_profile.provider_id == "opencode_go"
+        ):
+            if isinstance(request, MessagesRequest):
+                fallback_seed = conversation_seed(request)
+            else:
+                fallback_seed = (
+                    json.dumps(request.input, sort_keys=True, default=str)
+                    + "\n"
+                    + (request.instructions or "")
+                )
+        upstream_headers = opencode_request_headers(
+            session_id,
+            request_id=request_id,
+            fallback_seed=fallback_seed,
+        )
+        if user_agent:
+            upstream_headers["User-Agent"] = user_agent
+
         return upstream_headers
 
     def stream_messages(
