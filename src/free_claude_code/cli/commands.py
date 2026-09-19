@@ -358,6 +358,8 @@ class ServerSupervisor:
         apart by the accepting socket port (``scope["server"]``).
         """
 
+        import uvicorn
+
         port = desktop_listener_port(settings)
         if port is None:
             return None, None
