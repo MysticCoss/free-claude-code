@@ -83,6 +83,7 @@ class OpenAICodexProvider(BaseProvider):
             provider_name="OpenAI",
             read_timeout_s=config.http_read_timeout,
             log_raw_sse_events=config.log_raw_sse_events,
+            log_api_error_tracebacks=config.log_api_error_tracebacks,
             endpoint_transport=self._pool,
             omitted_request_fields=frozenset({"max_output_tokens", "metadata"}),
         )

@@ -164,6 +164,30 @@ def extract_upstream_error_detail(exc: Exception) -> UpstreamErrorDetail:
     )
 
 
+def format_upstream_error_diagnostics(exc: Exception) -> str | None:
+    """Render one redacted log line for a terminal upstream provider error.
+
+    Returns ``None`` when the exception carries no upstream status, body, or
+    cause chain, so quiet transports stay quiet. The body is the same bounded
+    redacted text surfaced to clients, letting verbose logs answer "what did
+    upstream actually reject?" without a second reproduction.
+    """
+    detail = extract_upstream_error_detail(exc)
+    if (
+        detail.status_code is None
+        and detail.body_text is None
+        and detail.cause_chain_text is None
+    ):
+        return None
+    return (
+        f"upstream_status={detail.status_code} "
+        f"category={detail.category_hint} "
+        f"body_truncated={detail.body_truncated} "
+        f"cause={detail.cause_chain_text} "
+        f"body={detail.body_text}"
+    )
+
+
 def format_execution_failure_message(
     failure: ExecutionFailure,
     detail: UpstreamErrorDetail,

@@ -4,8 +4,10 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from copy import deepcopy
 from typing import Any
+from unittest.mock import patch
 
 import httpx2
 import pytest
@@ -1505,3 +1507,81 @@ async def test_claude_artifact_pattern_is_portable_on_the_sdk_wire():
     assert request.tools is not None
     assert request.tools[0].input_schema is not None
     assert request.tools[0].input_schema["properties"]["name"]["pattern"] == pattern
+
+
+def _verbose_transport(client: AsyncOpenAI) -> OpenAIResponsesTransport:
+    return OpenAIResponsesTransport(
+        client=client,
+        admission=immediate_admission(
+            provider_name="TEST_RESPONSES",
+            max_attempts=1,
+        ),
+        provider_name="TEST_RESPONSES",
+        read_timeout_s=120.0,
+        log_raw_sse_events=False,
+        log_api_error_tracebacks=True,
+    )
+
+
+def _rendered_log_blob(log_error) -> str:
+    """Render captured loguru-style calls (template + args) into plain text."""
+    lines: list[str] = []
+    for call in log_error.call_args_list:
+        template, *rest = call.args
+        values = [str(value) for value in rest]
+        lines.append(str(template))
+        lines.extend(values)
+        with suppress(Exception):
+            lines.append(str(template).format(*values))
+    return "\n".join(lines)
+
+
+def _terminal_400_handler(_request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(
+        400,
+        json={
+            "error": {
+                "type": "invalid_request_error",
+                "message": "upstream-marker-400",
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_400_logs_upstream_body_and_request_when_verbose() -> None:
+    """Verbose terminal failures must carry the provider rejection + payload.
+
+    Regression coverage: upstream 4xx mapped to client error responses never
+    reach the API exception handlers, so without these lines the rejection
+    reason exists only in the client-visible message.
+    """
+    client = _client(_terminal_400_handler)
+    try:
+        with patch(
+            "free_claude_code.providers.openai_responses.transport.logger.error"
+        ) as log_error, pytest.raises(ExecutionFailure):
+            await _collect(_verbose_transport(client))
+    finally:
+        await client.close()
+
+    blob = _rendered_log_blob(log_error)
+    assert "TEST_RESPONSES_ERROR" in blob
+    assert "upstream_status=400" in blob
+    assert "upstream-marker-400" in blob
+    assert "TEST_RESPONSES_UPSTREAM" in blob
+    assert "TEST_RESPONSES_REQUEST_BODY" in blob
+
+
+@pytest.mark.asyncio
+async def test_terminal_400_stays_quiet_without_verbose_flag() -> None:
+    client = _client(_terminal_400_handler)
+    try:
+        with patch(
+            "free_claude_code.providers.openai_responses.transport.logger.error"
+        ) as log_error, pytest.raises(ExecutionFailure):
+            await _collect(_transport(client, max_attempts=1))
+    finally:
+        await client.close()
+
+    assert "upstream-marker-400" not in _rendered_log_blob(log_error)
