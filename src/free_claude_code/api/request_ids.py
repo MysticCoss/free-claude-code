@@ -7,6 +7,7 @@ from loguru import logger
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from free_claude_code.core.diagnostics import ERROR_DETAIL_DISPLAY_CAP_BYTES
 from free_claude_code.core.trace import (
     extract_claude_session_id_from_headers,
     trace_event,
@@ -15,6 +16,7 @@ from free_claude_code.core.trace import (
 REQUEST_ID_HEADER = "request-id"
 OPENAI_REQUEST_ID_HEADER = "x-request-id"
 _REQUEST_ID_STATE_ATTRIBUTE = "fcc_request_id"
+_BODY_SNAPSHOT_ATTRIBUTE = "fcc_request_body_snapshot"
 _OPENAI_REQUEST_ID_PATHS = frozenset(
     {"/v1/responses", "/v1/models", "/muse-code/models"}
 )
@@ -76,7 +78,11 @@ class RequestCorrelationMiddleware:
             claude_session_id=claude_sid,
             request_id=request_id,
         ):
-            await self._app(scope, receive, send_with_correlation)
+            await self._app(
+                scope,
+                _receive_with_body_snapshot(scope, receive),
+                send_with_correlation,
+            )
 
 
 def new_request_id() -> str:
@@ -97,6 +103,61 @@ def get_request_id(request: Request) -> str:
     request_id = new_request_id()
     set_request_id(request, request_id)
     return request_id
+
+
+def _receive_with_body_snapshot(scope: Scope, receive: Receive) -> Receive:
+    """Observe (never consume) the request body for later error forensics.
+
+    Exception handlers registered for ``Exception`` run at Starlette's
+    outermost ``ServerErrorMiddleware`` with a receive-less request, so the
+    body cannot be read there. This wrapper records each ``http.request``
+    chunk into the scope (bounded by ``ERROR_DETAIL_DISPLAY_CAP_BYTES``)
+    as it flows downstream, leaving the stream itself untouched.
+    """
+
+    cap = ERROR_DETAIL_DISPLAY_CAP_BYTES
+    buffer = bytearray()
+    truncated = False
+    complete = False
+
+    def _stash() -> None:
+        scope[_BODY_SNAPSHOT_ATTRIBUTE] = {
+            "body": bytes(buffer),
+            "truncated": truncated,
+            "complete": complete,
+        }
+
+    async def _receive() -> Message:
+        nonlocal truncated, complete
+        message = await receive()
+        if message["type"] == "http.request":
+            chunk = message.get("body", b"")
+            if isinstance(chunk, bytearray):
+                chunk = bytes(chunk)
+            if isinstance(chunk, bytes) and chunk and len(buffer) < cap:
+                remaining = cap - len(buffer)
+                buffer.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated = True
+            if not message.get("more_body", False):
+                complete = True
+            _stash()
+        return message
+
+    return _receive
+
+
+def get_request_body_snapshot(request: Request) -> tuple[bytes, bool, bool] | None:
+    """Return (body, truncated, complete) observed by the correlation middleware."""
+    snapshot = request.scope.get(_BODY_SNAPSHOT_ATTRIBUTE)
+    if not isinstance(snapshot, dict):
+        return None
+    body = snapshot.get("body")
+    if not isinstance(body, bytes) or not body:
+        return None
+    truncated = snapshot.get("truncated") is True
+    complete = snapshot.get("complete") is not False
+    return (body, truncated, complete)
 
 
 def attach_request_id_headers(

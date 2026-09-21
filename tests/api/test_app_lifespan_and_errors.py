@@ -1,4 +1,5 @@
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -92,7 +93,7 @@ def test_create_app_application_error_handler_returns_anthropic_format():
     assert "x-should-retry" not in response.headers
 
 
-def test_application_error_handler_does_not_log_error_message():
+def test_application_error_logs_one_line_without_error_message():
     app = create_test_app(_settings(log_api_error_tracebacks=False))
     secret = "provider-upstream-secret-detail"
 
@@ -100,15 +101,22 @@ def test_application_error_handler_does_not_log_error_message():
     async def _raise_application_secret():
         raise InvalidRequestError(secret)
 
-    with patch("free_claude_code.api.app.logger.error") as log_error:
+    with patch("free_claude_code.api.request_errors.logger.error") as log_error:
         response = TestClient(app).get("/raise_application_secret")
 
     assert response.status_code == 400
-    blob = " ".join(
-        str(value) for call in log_error.call_args_list for value in call.args
-    )
+    blob_parts: list[str] = []
+    for call in log_error.call_args_list:
+        template, *rest = call.args
+        values = [str(value) for value in rest]
+        blob_parts.extend([str(template), *values])
+        with suppress(Exception):
+            blob_parts.append(str(template).format(*values))
+    blob = " ".join(blob_parts)
     assert secret not in blob
-    log_error.assert_not_called()
+    assert "Application error" in blob
+    assert "status=400" in blob
+    assert "InvalidRequestError" in blob
 
 
 def test_create_app_general_exception_handler_returns_correlated_500():
