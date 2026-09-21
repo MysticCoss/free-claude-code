@@ -1,6 +1,7 @@
 """Shared OpenAI Responses execution over the official SDK."""
 
 import asyncio
+import json
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -9,6 +10,7 @@ from functools import partial
 from typing import cast
 
 import httpx2
+from loguru import logger
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
@@ -16,7 +18,12 @@ from openai.types.responses.response_create_params import ResponseCreateParamsSt
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic.models import MessagesRequest
-from free_claude_code.core.diagnostics import extract_upstream_error_detail
+from free_claude_code.core.diagnostics import (
+    extract_upstream_error_detail,
+    format_upstream_error_diagnostics,
+    redact_and_truncate,
+    redacted_exception_traceback,
+)
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.history_replay import (
     prepare_history,
@@ -98,6 +105,7 @@ class OpenAIResponsesTransport:
         provider_name: str,
         read_timeout_s: float,
         log_raw_sse_events: bool,
+        log_api_error_tracebacks: bool = False,
         endpoint_transport: httpx2.AsyncBaseTransport | None = None,
         event_adapter_factory: Callable[[], ResponsesEventAdapter] | None = None,
         omitted_request_fields: frozenset[str] = frozenset(),
@@ -112,6 +120,7 @@ class OpenAIResponsesTransport:
         self._provider_name = provider_name
         self._read_timeout_s = read_timeout_s
         self._log_raw_sse_events = log_raw_sse_events
+        self._log_api_error_tracebacks = log_api_error_tracebacks
 
     def stream_messages(
         self,
@@ -241,6 +250,51 @@ class OpenAIResponsesTransport:
         for field in self._omitted_request_fields:
             body.pop(field, None)
         return body
+
+    def _log_terminal_failure_forensics(
+        self,
+        raw_error: Exception,
+        failure: ExecutionFailure,
+        body: JsonObject,
+        *,
+        request_id: str | None,
+    ) -> None:
+        """Log the redacted upstream cause and request body for a terminal failure.
+
+        Upstream 4xx/5xx mapped to client error responses never reach the API
+        exception handlers, so without these lines the provider's rejection
+        reason exists only in the client-visible message. Gated on
+        ``LOG_API_ERROR_TRACEBACKS`` like all other verbose error forensics.
+        """
+        logger.error(
+            "{}_ERROR:{} exc_type={} failure_kind={}\n{}",
+            self._provider_name,
+            request_id,
+            type(raw_error).__name__,
+            failure.kind.value,
+            redacted_exception_traceback(raw_error),
+        )
+        diagnostics = format_upstream_error_diagnostics(raw_error)
+        if diagnostics is not None:
+            logger.error(
+                "{}_UPSTREAM:{} {}",
+                self._provider_name,
+                request_id,
+                diagnostics,
+            )
+        try:
+            serialized = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        except TypeError, ValueError:
+            serialized = None
+        if serialized:
+            redacted, truncated = redact_and_truncate(serialized)
+            logger.error(
+                "{}_REQUEST_BODY:{} truncated={}:\n{}",
+                self._provider_name,
+                request_id,
+                truncated,
+                redacted,
+            )
 
     async def _run_stream(
         self,
@@ -506,6 +560,10 @@ class OpenAIResponsesTransport:
                     status_code=failure.status_code,
                     provider_retryable=failure.retryable,
                 )
+                if self._log_api_error_tracebacks:
+                    self._log_terminal_failure_forensics(
+                        raw_error, failure, body, request_id=request_id
+                    )
                 if not decision.committed:
                     recovery.discard()
                     raise failure from raw_error

@@ -9,6 +9,7 @@ from free_claude_code.core.diagnostics import (
     exception_cause_types,
     extract_upstream_error_detail,
     format_execution_failure_message,
+    format_upstream_error_diagnostics,
     format_user_error_preview,
     redact_sensitive_error_text,
     safe_exception_message,
@@ -121,6 +122,31 @@ def test_cause_chain_is_redacted_capped_and_has_safe_type_metadata() -> None:
     assert f"truncated after {ERROR_DETAIL_DISPLAY_CAP_BYTES} bytes" in (
         detail.cause_chain_text
     )
+
+
+def test_upstream_diagnostics_line_reports_status_body_and_redaction() -> None:
+    response = Response(
+        status_code=400,
+        request=Request("POST", "https://provider.test/v1/responses"),
+        json={"error": {"type": "BadRequest", "message": "bad model api_key=SECRET"}},
+    )
+    error = HTTPStatusError(
+        "Bad Request",
+        request=response.request,
+        response=response,
+    )
+
+    line = format_upstream_error_diagnostics(error)
+
+    assert line is not None
+    assert "upstream_status=400" in line
+    assert "category=BadRequest" in line
+    assert "bad model api_key=<redacted>" in line
+    assert "SECRET" not in line
+
+
+def test_upstream_diagnostics_line_is_none_without_upstream_signal() -> None:
+    assert format_upstream_error_diagnostics(RuntimeError("plain boom")) is None
 
 
 def test_execution_failure_format_uses_semantic_category_and_request_id() -> None:

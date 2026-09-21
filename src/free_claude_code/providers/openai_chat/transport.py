@@ -36,6 +36,7 @@ from free_claude_code.core.anthropic.streaming import (
 )
 from free_claude_code.core.diagnostics import (
     exception_cause_types,
+    format_upstream_error_diagnostics,
     redacted_exception_traceback,
 )
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
@@ -577,6 +578,15 @@ class OpenAIChatTransport:
                 type(error).__name__,
                 redacted_exception_traceback(error),
             )
+            diagnostics = format_upstream_error_diagnostics(error)
+            if diagnostics is not None:
+                logger.error(
+                    "{}_UPSTREAM:{} request_id={} {}",
+                    tag,
+                    req_tag,
+                    request_id,
+                    diagnostics,
+                )
             return
         logger.error(
             "{}_ERROR:{} exc_type={} http_status={} cause_types={}",
