@@ -77,6 +77,21 @@ def redact_sensitive_error_text(text: str) -> str:
     return sanitized
 
 
+def redact_and_truncate(
+    text: str, *, cap_bytes: int = ERROR_DETAIL_DISPLAY_CAP_BYTES
+) -> tuple[str, bool]:
+    """Redact credentials and cap length; return (text, truncated)."""
+    redacted = redact_sensitive_error_text(text)
+    encoded = redacted.encode("utf-8", errors="replace")
+    if len(encoded) <= cap_bytes:
+        return redacted, False
+    capped = encoded[:cap_bytes].decode("utf-8", errors="replace")
+    return (
+        f"{capped}\n... [truncated after {cap_bytes} bytes]",
+        True,
+    )
+
+
 def safe_exception_message(
     exc: BaseException,
     *,
