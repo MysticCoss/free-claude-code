@@ -379,6 +379,14 @@ class ServerSupervisor:
                 asgi_app,
                 host=settings.host,
                 port=port,
+                # The listener shares the main server's runtime, which owns
+                # asyncio locks bound to the main event loop. Running a second
+                # lifespan here would drive runtime.start()/close() from a
+                # second loop, fouling those locks and wedging startup or
+                # shutdown (update-apply full stop never completes and the
+                # guardian rolls back). Serve HTTP only; the main server owns
+                # the whole lifecycle.
+                lifespan="off",
                 log_level="debug",
                 log_config=(
                     uvicorn.config.LOGGING_CONFIG if self._console_logging else None
