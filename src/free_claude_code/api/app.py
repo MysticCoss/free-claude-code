@@ -5,6 +5,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from loguru import logger
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from free_claude_code.application.code_sessions import (
     CodeConflictError,
@@ -15,10 +16,7 @@ from free_claude_code.application.code_sessions import (
 )
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.core.anthropic import anthropic_error_payload
-from free_claude_code.core.diagnostics import (
-    redacted_exception_traceback,
-    safe_exception_message,
-)
+from free_claude_code.core.diagnostics import safe_exception_message
 from free_claude_code.core.openai_responses import openai_error_payload
 from free_claude_code.core.trace import (
     extract_claude_session_id_from_headers,
@@ -30,7 +28,10 @@ from .admin_cache import AdminNoStoreMiddleware, attach_admin_no_store
 from .admin_routes import router as admin_router
 from .code_sessions_routes import router as code_router
 from .ports import ApiServices
-from .request_errors import ordinary_application_error_response
+from .request_errors import (
+    log_api_error_forensics,
+    ordinary_application_error_response,
+)
 from .request_ids import (
     RequestCorrelationMiddleware,
     attach_request_id_headers,
@@ -65,6 +66,13 @@ def create_app(services: ApiServices) -> FastAPI:
             status_code = 503
         else:
             status_code = 500
+        await log_api_error_forensics(
+            request,
+            services.requests.current_settings(),
+            exc,
+            context="Code error",
+            status_code=status_code,
+        )
         response = JSONResponse(
             status_code=status_code,
             content={"detail": str(exc), "code": type(exc).__name__},
@@ -93,11 +101,25 @@ def create_app(services: ApiServices) -> FastAPI:
             message_summary=message_summary,
             tool_names=tool_names,
         )
+        await log_api_error_forensics(
+            request,
+            services.requests.current_settings(),
+            exc,
+            context="Request validation failed",
+            status_code=422,
+        )
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(ApplicationError)
     async def application_error_handler(request: Request, exc: ApplicationError):
         """Serialize defensive application failures in the selected wire protocol."""
+        await log_api_error_forensics(
+            request,
+            services.requests.current_settings(),
+            exc,
+            context="Application error",
+            status_code=exc.status_code,
+        )
         return ordinary_application_error_response(
             exc,
             wire_api=(
@@ -105,6 +127,29 @@ def create_app(services: ApiServices) -> FastAPI:
             ),
             request_id=get_request_id(request),
         )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(request: Request, exc: StarletteHTTPException):
+        """Log deliberate HTTP errors with a one-liner; no traceback needed."""
+        await log_api_error_forensics(
+            request,
+            services.requests.current_settings(),
+            exc,
+            context="HTTP error",
+            status_code=exc.status_code,
+        )
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=exc.headers,
+        )
+        attach_admin_no_store(response, path=request.url.path)
+        attach_request_id_headers(
+            response,
+            request_id=get_request_id(request),
+            path=request.url.path,
+        )
+        return response
 
     @app.exception_handler(Exception)
     async def general_error_handler(request: Request, exc: Exception):
@@ -118,16 +163,13 @@ def create_app(services: ApiServices) -> FastAPI:
             claude_session_id=claude_sid,
             request_id=request_id,
         ):
-            if settings.log_api_error_tracebacks:
-                logger.error("General Error: {}", safe_exception_message(exc))
-                logger.error(redacted_exception_traceback(exc))
-            else:
-                logger.error(
-                    "General Error: path={} method={} exc_type={}",
-                    request.url.path,
-                    request.method,
-                    type(exc).__name__,
-                )
+            await log_api_error_forensics(
+                request,
+                settings,
+                exc,
+                context="General error",
+                status_code=500,
+            )
             message = safe_exception_message(exc)
             if request.url.path == "/v1/responses":
                 content = openai_error_payload(message=message, error_type="api_error")
