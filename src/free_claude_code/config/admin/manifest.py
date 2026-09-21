@@ -162,28 +162,6 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         "so Claude Code grants the 1M-token context window.",
     ),
     ConfigFieldSpec(
-        "ENABLE_CLAUDE_DESKTOP_3P",
-        "Claude Desktop 3P Mode",
-        "models",
-        "boolean",
-        settings_attr="enable_claude_desktop_3p",
-        description="Start a second listener on Claude Desktop Port that advertises "
-        "every model as claude-<provider>-<model> so Claude Desktop's 3P filter "
-        "(claude-* / anthropic/claude-*) accepts it, and route those ids back to "
-        "their provider. The main port is never rewritten.",
-        restart_required=True,
-    ),
-    ConfigFieldSpec(
-        "CLAUDE_DESKTOP_PORT",
-        "Claude Desktop Port",
-        "models",
-        "number",
-        settings_attr="claude_desktop_port",
-        description="Dedicated port for the Claude Desktop 3P listener "
-        "(must differ from PORT). Point Claude Desktop's gateway base URL here.",
-        restart_required=True,
-    ),
-    ConfigFieldSpec(
         "FCC_UPDATE_REPO",
         "Update Repository",
         "updates",
@@ -358,6 +336,28 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         "runtime",
         "number",
         settings_attr="port",
+        restart_required=True,
+    ),
+    ConfigFieldSpec(
+        "ENABLE_CLAUDE_DESKTOP_3P",
+        "Claude Desktop 3P Mode",
+        "runtime",
+        "boolean",
+        settings_attr="enable_claude_desktop_3p",
+        description="Start a second listener on Claude Desktop Port that advertises "
+        "every model as claude-<provider>-<model> so Claude Desktop's 3P filter "
+        "(claude-* / anthropic/claude-*) accepts it, and route those ids back to "
+        "their provider. The main port is never rewritten.",
+        restart_required=True,
+    ),
+    ConfigFieldSpec(
+        "CLAUDE_DESKTOP_PORT",
+        "Claude Desktop Port",
+        "runtime",
+        "number",
+        settings_attr="claude_desktop_port",
+        description="Dedicated port for the Claude Desktop 3P listener "
+        "(must differ from PORT). Point Claude Desktop's gateway base URL here.",
         restart_required=True,
     ),
     ConfigFieldSpec(

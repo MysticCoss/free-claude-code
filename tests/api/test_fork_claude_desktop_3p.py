@@ -723,3 +723,11 @@ def test_desktop_listener_gives_up_gracefully_when_port_held(
         assert (server, thread) == (None, None)
     finally:
         holder.close()
+
+
+def test_desktop_fields_live_in_runtime_section() -> None:
+    # The 3P toggle + port belong with the server-process settings (next to
+    # PORT), not with model routing: they control a second listener, not
+    # which model a route resolves to.
+    assert FIELD_BY_KEY["ENABLE_CLAUDE_DESKTOP_3P"].section_id == "runtime"
+    assert FIELD_BY_KEY["CLAUDE_DESKTOP_PORT"].section_id == "runtime"
