@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from loguru import logger
+from starlette.types import ASGIApp
 
 from free_claude_code.cli.local_http import open_local_request
 from free_claude_code.cli.process_registry import kill_all_best_effort
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 
 SERVER_GRACEFUL_SHUTDOWN_SECONDS = 5
 DESKTOP_LISTENER_JOIN_GRACE_SECONDS = 2
+DESKTOP_LISTENER_BIND_ATTEMPTS = 10
+DESKTOP_LISTENER_BIND_RETRY_SECONDS = 0.5
 _BROWSER_HANDOFF_SECONDS = 5.0
 
 
@@ -349,7 +352,7 @@ class ServerSupervisor:
 
     def _start_desktop_listener(
         self,
-        asgi_app: RuntimeASGIApp,
+        asgi_app: RuntimeASGIApp | ASGIApp,
         settings: Settings,
     ) -> tuple[uvicorn.Server | None, threading.Thread | None]:
         """Run the optional Claude Desktop 3P listener beside the main server.
@@ -362,6 +365,40 @@ class ServerSupervisor:
 
         port = desktop_listener_port(settings)
         if port is None:
+            return None, None
+        # Reserve the port synchronously: the previous generation's listener
+        # thread (or a still-exiting process) may hold it briefly after a
+        # restart, and a blind spawn would die on EADDRINUSE while the "port
+        # starting" log already claimed success. Only advertise once bound.
+        reserved: ServerSockets | None = None
+        for attempt in range(1, DESKTOP_LISTENER_BIND_ATTEMPTS + 1):
+            try:
+                reserved = ServerSockets.reserve(settings.host, port)
+                break
+            except OSError as exc:
+                if (
+                    exc.errno != errno.EADDRINUSE
+                    or attempt == DESKTOP_LISTENER_BIND_ATTEMPTS
+                ):
+                    logger.error(
+                        "Claude Desktop 3P listener cannot bind {}:{} ({}). "
+                        "The main FCC server is unaffected; the listener "
+                        "will be retried on the next restart.",
+                        settings.host,
+                        port,
+                        exc,
+                    )
+                    return None, None
+                logger.warning(
+                    "Claude Desktop 3P listener port {} in use "
+                    "(attempt {}/{}); retrying while the previous "
+                    "listener shuts down.",
+                    port,
+                    attempt,
+                    DESKTOP_LISTENER_BIND_ATTEMPTS,
+                )
+                time.sleep(DESKTOP_LISTENER_BIND_RETRY_SECONDS)
+        if reserved is None:
             return None, None
         server = uvicorn.Server(
             uvicorn.Config(
@@ -377,11 +414,15 @@ class ServerSupervisor:
         )
         thread = threading.Thread(
             target=self._serve_desktop_listener,
-            args=(server, port),
+            args=(server, port, reserved.sockets),
             name="fcc-claude-desktop-3p",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            reserved.close()
+            raise
         logger.info(
             "Claude Desktop 3P listener starting on {}",
             local_claude_desktop_url(settings),
@@ -389,11 +430,13 @@ class ServerSupervisor:
         return server, thread
 
     @staticmethod
-    def _serve_desktop_listener(server: uvicorn.Server, port: int) -> None:
+    def _serve_desktop_listener(
+        server: uvicorn.Server, port: int, sockets: list[socket.socket]
+    ) -> None:
         """Serve the desktop listener; its failure must never kill the main server."""
 
         try:
-            server.run()
+            server.run(sockets=sockets)
         except (SystemExit, Exception) as error:
             logger.error(
                 "Claude Desktop 3P listener on port {} failed or stopped: {}. "

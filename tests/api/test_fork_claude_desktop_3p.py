@@ -7,17 +7,23 @@ the /v1/models desktop view, the supervisor listener plan, and inbound
 routing.
 """
 
+import http.client
 import re
+import socket
+import threading
+import time
 
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.types import Receive, Scope, Send
 
 from free_claude_code.api.dependencies import is_claude_desktop_request
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.application.routing import ModelRouter
-from free_claude_code.cli.commands import desktop_listener_port
+from free_claude_code.cli import commands as cli_commands
+from free_claude_code.cli.commands import ServerSupervisor, desktop_listener_port
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.provider_catalog import SUPPORTED_PROVIDER_IDS
 from free_claude_code.config.reasoning import ReasoningPreference
@@ -592,3 +598,128 @@ def test_desktop_admin_fields_require_restart() -> None:
     # manual process restart.
     assert FIELD_BY_KEY["ENABLE_CLAUDE_DESKTOP_3P"].restart_required is True
     assert FIELD_BY_KEY["CLAUDE_DESKTOP_PORT"].restart_required is True
+
+
+async def _ok_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
+    """Minimal ASGI app with a lifespan handshake for listener-lifecycle tests."""
+
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
+    assert scope["type"] == "http"
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
+    await send({"type": "http.response.body", "body": b"desktop-ok"})
+
+
+def _ephemeral_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _listener_settings(desktop_port: int) -> Settings:
+    return _settings(
+        desktop=True, port=_ephemeral_port(), claude_desktop_port=desktop_port
+    )
+
+
+def _await_http_ok(port: int, timeout_s: float = 10.0) -> None:
+    """Poll until the desktop listener serves HTTP, or fail loudly."""
+
+    deadline = time.monotonic() + timeout_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        try:
+            try:
+                connection.request("GET", "/")
+                response = connection.getresponse()
+                body = response.read()
+            finally:
+                connection.close()
+            if response.status == 200 and body == b"desktop-ok":
+                return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.05)
+    raise AssertionError(f"desktop listener never served on {port}: {last_error!r}")
+
+
+def _hold_port(port: int) -> socket.socket:
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", port))
+    holder.listen(16)
+    return holder
+
+
+def test_desktop_listener_serves_when_port_free() -> None:
+    supervisor = ServerSupervisor(console_logging=False)
+    settings = _listener_settings(_ephemeral_port())
+    server, thread = supervisor._start_desktop_listener(_ok_asgi_app, settings)
+    try:
+        assert server is not None and thread is not None
+        _await_http_ok(settings.claude_desktop_port)
+    finally:
+        supervisor._stop_desktop_listener(server, thread)
+    assert not thread.is_alive()
+
+
+def test_desktop_listener_retries_contended_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repro: the previous generation's listener still holds the desktop port.
+
+    The old code spawned the serving thread without reserving the port, so
+    the bind died on EADDRINUSE while the logs already claimed "starting" —
+    first run with the feature enabled came up with a dead 8083 until the
+    next toggle/restart freed the port.
+    """
+
+    monkeypatch.setattr(cli_commands, "DESKTOP_LISTENER_BIND_ATTEMPTS", 40)
+    monkeypatch.setattr(cli_commands, "DESKTOP_LISTENER_BIND_RETRY_SECONDS", 0.05)
+    port = _ephemeral_port()
+    holder = _hold_port(port)
+    releaser = threading.Timer(0.3, holder.close)
+    releaser.daemon = True
+    releaser.start()
+    supervisor = ServerSupervisor(console_logging=False)
+    server, thread = supervisor._start_desktop_listener(
+        _ok_asgi_app, _listener_settings(port)
+    )
+    try:
+        assert server is not None and thread is not None
+        _await_http_ok(port)
+    finally:
+        supervisor._stop_desktop_listener(server, thread)
+        holder.close()
+
+
+def test_desktop_listener_gives_up_gracefully_when_port_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently-held port must not raise and must not kill the main server."""
+
+    monkeypatch.setattr(cli_commands, "DESKTOP_LISTENER_BIND_ATTEMPTS", 2)
+    monkeypatch.setattr(cli_commands, "DESKTOP_LISTENER_BIND_RETRY_SECONDS", 0.01)
+    holder = _hold_port(_ephemeral_port())
+    try:
+        supervisor = ServerSupervisor(console_logging=False)
+        server, thread = supervisor._start_desktop_listener(
+            _ok_asgi_app, _listener_settings(holder.getsockname()[1])
+        )
+        assert (server, thread) == (None, None)
+    finally:
+        holder.close()
