@@ -122,6 +122,9 @@ class ServerSupervisor:
         self._auto_browser_opened = False
         self._owned_server = False
         self._restart_generation = 0
+        # In-app updates ask the process owner to exit so the guardian can
+        # replace the binary; desktop installs wire their quit controller.
+        self.process_stop_callback: Callable[[], None] | None = None
 
     @property
     def status(self) -> ServerStatus:
@@ -289,6 +292,7 @@ class ServerSupervisor:
         asgi_app = build_asgi_app(
             settings,
             restart_callback=self._request_runtime_restart,
+            process_stop_callback=self.process_stop_callback or self.request_stop,
         )
         config = uvicorn.Config(
             asgi_app,

@@ -10,11 +10,16 @@ from free_claude_code.api.ports import ApiServices
 from free_claude_code.application.code_sessions import CodeApplicationPort
 from free_claude_code.application.connected_accounts import ConnectedAccountPort
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.application.updater import UpdateService
 from free_claude_code.config.loader import ManagedConfigStore
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import BaseProvider
 from free_claude_code.providers.runtime import ProviderRuntime
-from free_claude_code.runtime.application import ApplicationRuntime, RestartCallback
+from free_claude_code.runtime.application import (
+    ApplicationRuntime,
+    ProcessStopCallback,
+    RestartCallback,
+)
 from free_claude_code.runtime.configuration import ConfigurationService
 from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 from tests.web_tools_support import StubWebToolsClient
@@ -45,6 +50,8 @@ def create_test_app(
     restart_callback: RestartCallback | None = None,
     connected_accounts: Mapping[str, ConnectedAccountPort] | None = None,
     code: CodeApplicationPort | None = None,
+    process_stop_callback: ProcessStopCallback | None = None,
+    updates: UpdateService | None = None,
 ) -> FastAPI:
     """Build an API app with explicit in-memory runtime services."""
     store = ManagedConfigStore()
@@ -78,7 +85,9 @@ def create_test_app(
         configuration=ConfigurationService(store),
         transcriber=None,
         restart_callback=restart_callback,
+        process_stop_callback=process_stop_callback,
         connected_accounts=connected_accounts,
+        updates=updates,
     )
     return create_app(
         ApiServices(

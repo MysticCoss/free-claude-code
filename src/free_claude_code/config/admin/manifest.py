@@ -70,6 +70,11 @@ SECTIONS: tuple[ConfigSectionSpec, ...] = (
         "Local Anthropic web_search and web_fetch behavior.",
     ),
     ConfigSectionSpec(
+        "updates",
+        "Update",
+        "Fetch new FCC versions from a GitHub branch, test them, and install.",
+    ),
+    ConfigSectionSpec(
         "diagnostics",
         "Diagnostics",
         "Logging and debugging flags.",

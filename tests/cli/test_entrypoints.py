@@ -290,7 +290,12 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
 
     apps: list[SimpleNamespace] = []
 
-    def build_asgi_app(_settings: Settings, restart_callback: Callable[[], None]):
+    def build_asgi_app(
+        _settings: Settings,
+        restart_callback: Callable[[], None],
+        *,
+        process_stop_callback: Callable[[], None] | None = None,
+    ):
         restart_callbacks.append(restart_callback)
         app = SimpleNamespace(
             runtime=SimpleNamespace(
@@ -351,7 +356,12 @@ def test_serve_supervisor_refuses_restart_after_incomplete_shutdown() -> None:
     servers: list[object] = []
     restart_callbacks: list[Callable[[], None]] = []
 
-    def build_asgi_app(_settings: Settings, restart_callback: Callable[[], None]):
+    def build_asgi_app(
+        _settings: Settings,
+        restart_callback: Callable[[], None],
+        *,
+        process_stop_callback: Callable[[], None] | None = None,
+    ):
         restart_callbacks.append(restart_callback)
         return SimpleNamespace(
             runtime=SimpleNamespace(

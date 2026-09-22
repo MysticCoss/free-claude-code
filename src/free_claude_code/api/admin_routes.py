@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     HTTPException,
     Request,
@@ -22,6 +23,11 @@ from free_claude_code.application.connected_accounts import (
 from free_claude_code.application.errors import ApplicationError
 from free_claude_code.application.model_catalog import read_model_catalog
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.application.updater import (
+    UpdateCheckFailedError,
+    UpdateDisabledError,
+    UpdateInProgressError,
+)
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.provider_catalog import (
     PROVIDER_CATALOG,
@@ -146,6 +152,45 @@ async def admin_status(
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
     return await services.admin.admin_status()
+
+
+@router.get("/admin/api/update")
+async def update_status(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    return services.admin.update_status()
+
+
+@router.post("/admin/api/update/check")
+async def update_check(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    return await services.admin.update_check()
+
+
+@router.post("/admin/api/update/apply")
+async def update_apply(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    try:
+        result = await services.admin.update_apply()
+    except (UpdateDisabledError, UpdateInProgressError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except UpdateCheckFailedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if result.get("scheduled"):
+        # The response must reach the browser before the process exits, so
+        # stopping (which frees the exe that uv tool needs to replace) runs
+        # as a background task after FastAPI sends the body.
+        background_tasks.add_task(services.admin.request_full_stop)
+    return result
 
 
 @router.get("/admin/api/providers/local-status")

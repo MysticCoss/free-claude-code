@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from free_claude_code.providers.admission import ProviderAdmissionController
     from free_claude_code.providers.runtime.factory import ProviderFactory
 
-from .application import ApplicationRuntime, RestartCallback
+from .application import ApplicationRuntime, ProcessStopCallback, RestartCallback
 from .asgi import RuntimeASGIApp
 from .code_sessions_sqlite import SQLiteCodeStore
 from .codex_app_server import CodexHarnessFactory
@@ -40,6 +40,7 @@ from .web_tools.client import HTTPWebToolsClient
 def build_asgi_app(
     settings: Settings,
     restart_callback: RestartCallback | None = None,
+    process_stop_callback: ProcessStopCallback | None = None,
 ) -> RuntimeASGIApp:
     """Construct the complete server application and its resource owner."""
     log_path = Path(os.getenv("LOG_FILE", server_log_path()))
@@ -83,6 +84,7 @@ def build_asgi_app(
         transcriber=None,
         transcriber_factory=_create_transcriber,
         restart_callback=restart_callback,
+        process_stop_callback=process_stop_callback,
         connected_accounts={"openai": openai_auth, "github_copilot": copilot_auth},
     )
     services = ApiServices(

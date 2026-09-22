@@ -19,6 +19,10 @@ const state = {
   codeCatalogRetry: false,
   modelOptionsRequest: 0,
   activeView: viewFromLocation(),
+  update: null,
+  updateTimer: null,
+  updateBusy: false,
+  statusBusy: false,
 };
 
 const MASKED_SECRET = "********";
@@ -44,6 +48,13 @@ const VIEW_GROUPS = [
     title: "Messaging",
     sections: ["messaging", "voice"],
     containerId: "messagingSections",
+  },
+  {
+    id: "updates",
+    label: "Update",
+    title: "Update",
+    sections: ["updates"],
+    containerId: "updateSections",
   },
   {
     id: "integrations",
@@ -222,6 +233,7 @@ async function load({ providersOnly = false } = {}) {
   await Promise.all([
     refreshConnectedAccounts(),
     hydrateModelOptions(),
+    hydrateUpdatePanel(),
     providersOnly ? window.CodeSessions.refresh() : window.CodeSessions.initialize(api),
   ]);
   if (state.config !== config) return;
@@ -290,6 +302,7 @@ function setActiveView(viewId, { scroll = false } = {}) {
     refreshCodexIntegration();
     refreshClaudeDesktopIntegration();
   }
+  syncUpdatePolling();
 }
 
 function navigateToView(viewId) {
@@ -1434,6 +1447,198 @@ function setModelOptions(models) {
   });
 }
 
+function formatStage(stage) {
+  return stage ? stage.charAt(0).toUpperCase() + stage.slice(1) : "Idle";
+}
+
+function updateHintText(data) {
+  if (!data.capable) {
+    return "In-app updates are unavailable when FCC runs from a source checkout; use scripts/install.ps1 or install.sh instead.";
+  }
+  if (data.in_progress) {
+    return `${formatStage(data.stage)}… ${data.message || "The update guardian is working; this page refreshes automatically."}`;
+  }
+  if (data.check_error) {
+    return `Could not check the update source: ${data.check_error}`;
+  }
+  if (data.last_error) {
+    return `The last update attempt failed (${data.last_error}). It was rolled back to ${data.current_version} semantics: fix the cause and try again.`;
+  }
+  if (data.update_available) {
+    return `FCC ${data.latest_version} is available. Update to install and relaunch automatically.`;
+  }
+  if (data.latest_version) {
+    return `FCC ${data.current_version} is up to date with ${data.repo}@${data.branch}.`;
+  }
+  return "Check the configured GitHub source to see whether a newer FCC version exists.";
+}
+
+function renderUpdatePanel(data) {
+  state.update = data;
+  byId("updateCurrent").textContent = data.current_version || "—";
+  byId("updateLatest").textContent =
+    data.capable && data.latest_version ? data.latest_version : "—";
+  byId("updateSource").textContent = `${data.repo}@${data.branch}`;
+  byId("updateStage").textContent = data.in_progress
+    ? formatStage(data.stage)
+    : data.last_error
+      ? "failed"
+      : "idle";
+  byId("updateHint").textContent = updateHintText(data);
+  const busy = state.updateBusy || state.statusBusy;
+  byId("updateCheckButton").disabled = !data.capable || data.in_progress || busy;
+  const applyButton = byId("updateApplyButton");
+  applyButton.disabled =
+    !data.capable || !data.update_available || data.in_progress || busy;
+  applyButton.textContent =
+    data.update_available && !state.updateBusy
+      ? `Update to ${data.latest_version}`
+      : state.updateBusy
+        ? "Updating…"
+        : "Update";
+}
+
+async function hydrateUpdatePanel() {
+  try {
+    renderUpdatePanel(await api("/admin/api/update"));
+  } catch {
+    // The panel keeps its placeholders when the update snapshot is unavailable.
+  }
+}
+
+function syncUpdatePolling() {
+  const active = state.activeView === "updates";
+  if (active && !state.updateTimer && !state.statusBusy) {
+    hydrateUpdatePanel();
+    state.updateTimer = setInterval(hydrateUpdatePanel, 2000);
+  } else if ((!active || state.statusBusy) && state.updateTimer) {
+    clearInterval(state.updateTimer);
+    state.updateTimer = null;
+  }
+}
+
+async function checkForUpdates() {
+  if (state.updateBusy) return;
+  state.updateBusy = true;
+  if (state.update) renderUpdatePanel(state.update);
+  try {
+    renderUpdatePanel(await api("/admin/api/update/check", { method: "POST" }));
+  } catch (error) {
+    showMessage(`Could not check for updates: ${error.message}`, "error");
+    await hydrateUpdatePanel();
+  } finally {
+    state.updateBusy = false;
+    syncUpdatePolling();
+  }
+}
+
+async function fetchAdminStatus() {
+  const response = await fetch("/admin/api/status", {
+    cache: "no-store",
+    credentials: "omit",
+    signal: AbortSignal.timeout(1500),
+  });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+async function waitForUpdateShutdown(instanceId) {
+  // Confirm this process really went down before trusting a later instance.
+  const deadline = performance.now() + 180_000;
+  while (performance.now() < deadline) {
+    try {
+      const status = await fetchAdminStatus();
+      if (
+        status === null ||
+        status.status !== "running" ||
+        status.instance_id !== instanceId
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+async function waitForUpdateRestart(instanceId) {
+  await waitForUpdateShutdown(instanceId);
+  const deadline = performance.now() + 20 * 60_000;
+  while (performance.now() < deadline) {
+    try {
+      const status = await fetchAdminStatus();
+      if (
+        status &&
+        status.status === "running" &&
+        typeof status.instance_id === "string" &&
+        status.instance_id !== instanceId
+      ) {
+        // Assets are version-pinned, so a full reload pulls the new UI too.
+        window.location.reload();
+        return;
+      }
+    } catch {
+      // The server is expected to be down while the guardian installs.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("The updated server has not come back yet. Reload this page once it is running.");
+}
+
+async function applyUpdate() {
+  const data = state.update;
+  if (state.updateBusy || !data || !data.capable || data.in_progress) return;
+  if (!window.confirm(`Update FCC ${data.current_version} → ${data.latest_version}?\n\nThe server will stop, test the new version, install it, and relaunch automatically. This can take several minutes.`)) {
+    return;
+  }
+  state.updateBusy = true;
+  state.statusBusy = true;
+  syncUpdatePolling();
+  renderUpdatePanel(data);
+  try {
+    let instanceId = "";
+    for (let attempt = 0; attempt < 5 && !instanceId; attempt += 1) {
+      try {
+        const status = await api("/admin/api/status", { method: "GET" });
+        if (typeof status.instance_id === "string") instanceId = status.instance_id;
+      } catch {
+        // Retry a transient loopback hiccup; the baseline must be trustworthy.
+      }
+    }
+    const result = await api("/admin/api/update/apply", { method: "POST" });
+    if (!result.scheduled) {
+      showMessage(result.message || "Already up to date.", "ok");
+      releaseUpdateBusy();
+      await hydrateUpdatePanel();
+      return;
+    }
+    if (!instanceId) {
+      showMessage(
+        "Update started, but the server instance baseline could not be read. Reload this page in a few minutes to reconnect.",
+        "warn",
+      );
+      releaseUpdateBusy();
+      return;
+    }
+    showMessage(
+      "Update started. The server will stop, test the new version, install it, and relaunch; this page reloads when it is back.",
+      "ok",
+    );
+    await waitForUpdateRestart(instanceId);
+  } catch (error) {
+    releaseUpdateBusy();
+    showMessage(`Could not start the update: ${error.message}`, "error");
+    await hydrateUpdatePanel();
+  }
+}
+
+function releaseUpdateBusy() {
+  state.updateBusy = false;
+  state.statusBusy = false;
+  syncUpdatePolling();
+}
+
 function showMessage(message, kind = "") {
   const area = byId("messageArea");
   area.textContent = message;
@@ -1445,6 +1650,8 @@ function showMessage(message, kind = "") {
 }
 
 byId("applyButton").addEventListener("click", () => apply());
+byId("updateCheckButton").addEventListener("click", checkForUpdates);
+byId("updateApplyButton").addEventListener("click", applyUpdate);
 byId("saveProvider").addEventListener("click", () => apply(state.providerId));
 byId("closeProviderDialog").addEventListener("click", () => byId("providerDialog").close());
 byId("cancelProviderDialog").addEventListener("click", () => byId("providerDialog").close());
