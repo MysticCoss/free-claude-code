@@ -1558,9 +1558,12 @@ async def test_terminal_400_logs_upstream_body_and_request_when_verbose() -> Non
     """
     client = _client(_terminal_400_handler)
     try:
-        with patch(
-            "free_claude_code.providers.openai_responses.transport.logger.error"
-        ) as log_error, pytest.raises(ExecutionFailure):
+        with (
+            patch(
+                "free_claude_code.providers.openai_responses.transport.logger.error"
+            ) as log_error,
+            pytest.raises(ExecutionFailure),
+        ):
             await _collect(_verbose_transport(client))
     finally:
         await client.close()
@@ -1577,9 +1580,12 @@ async def test_terminal_400_logs_upstream_body_and_request_when_verbose() -> Non
 async def test_terminal_400_stays_quiet_without_verbose_flag() -> None:
     client = _client(_terminal_400_handler)
     try:
-        with patch(
-            "free_claude_code.providers.openai_responses.transport.logger.error"
-        ) as log_error, pytest.raises(ExecutionFailure):
+        with (
+            patch(
+                "free_claude_code.providers.openai_responses.transport.logger.error"
+            ) as log_error,
+            pytest.raises(ExecutionFailure),
+        ):
             await _collect(_transport(client, max_attempts=1))
     finally:
         await client.close()

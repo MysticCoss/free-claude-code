@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from free_claude_code.application.model_catalog import ModelCatalog, read_model_catalog
 from free_claude_code.application.ports import ModelCatalogPort
+from free_claude_code.application.routing import ONE_M_CONTEXT_SUFFIX
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
     desktop_model_id,
@@ -150,7 +151,9 @@ def build_models_list_response(
     catalog = read_model_catalog(runtime, settings)
     if view in {ModelCatalogView.CLAUDE, ModelCatalogView.CLAUDE_DESKTOP}:
         return _build_claude_models_response(
-            catalog, desktop=view is ModelCatalogView.CLAUDE_DESKTOP
+            catalog,
+            desktop=view is ModelCatalogView.CLAUDE_DESKTOP,
+            one_m_refs=settings.one_m_model_refs(),
         )
     return _build_direct_models_response(settings, catalog, view=view)
 
@@ -183,9 +186,17 @@ def build_muse_models_list_response(
 
 
 def _build_claude_models_response(
-    catalog: ModelCatalog, *, desktop: bool = False
+    catalog: ModelCatalog,
+    *,
+    desktop: bool = False,
+    one_m_refs: frozenset[str] = frozenset(),
 ) -> ModelsListResponse:
-    """Keep shortcuts first and provider variants together in catalog order."""
+    """Keep shortcuts first and provider variants together in catalog order.
+
+    Catalog members listed in ``one_m_refs`` additionally get
+    ``[1m]``-suffixed variants so Claude Code grants the full 1M-token
+    context window for those upstreams.
+    """
     models = list(SUPPORTED_CLAUDE_MODELS)
     for model in catalog.models:
         ref = model.provider_model_ref
@@ -204,6 +215,26 @@ def _build_claude_models_response(
                 display_name=f"{ref} (no thinking)",
             )
         )
+
+    if one_m_refs:
+        for model in catalog.models:
+            if model.provider_model_ref in one_m_refs:
+                ref = f"{model.provider_model_ref}{ONE_M_CONTEXT_SUFFIX}"
+                if model.supports_reasoning is not False:
+                    models.append(
+                        _discovered_model_response(
+                            desktop_model_id(ref) if desktop else gateway_model_id(ref),
+                            display_name=ref,
+                        )
+                    )
+                models.append(
+                    _discovered_model_response(
+                        desktop_model_id(ref, no_thinking=True)
+                        if desktop
+                        else no_thinking_gateway_model_id(ref),
+                        display_name=f"{ref} (no thinking)",
+                    )
+                )
     return ModelsListResponse(
         data=models,
         first_id=models[0].id if models else None,

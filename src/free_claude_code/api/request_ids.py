@@ -10,9 +10,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from free_claude_code.core.diagnostics import ERROR_DETAIL_DISPLAY_CAP_BYTES
 from free_claude_code.core.trace import (
     extract_claude_session_id_from_headers,
-    trace_event,
 )
-
 
 REQUEST_ID_HEADER = "request-id"
 OPENAI_REQUEST_ID_HEADER = "x-request-id"

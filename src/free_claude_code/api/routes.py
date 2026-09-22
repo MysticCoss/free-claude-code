@@ -15,11 +15,15 @@ from free_claude_code.core.anthropic import (
     get_token_count,
 )
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
-from free_claude_code.core.trace import trace_event
+from free_claude_code.core.trace import (
+    extract_claude_session_id_from_headers,
+    trace_event,
+)
 
 from .dependencies import (
     get_services,
     get_settings,
+    is_claude_desktop_request,
     require_anthropic_proxy_auth,
     require_proxy_auth,
     resolve_provider,
@@ -126,6 +130,9 @@ async def create_message(
     _auth=Depends(require_anthropic_proxy_auth),
 ):
     """Create a message (JSON by default; stream=true returns Anthropic SSE)."""
+    session_id = extract_claude_session_id_from_headers(request.headers)
+    if session_id:
+        request_data.fcc_session_id = session_id
     return await _create_messages_response(
         services,
         request_data,
@@ -215,18 +222,30 @@ async def probe_health():
     response_model_exclude_none=True,
 )
 async def list_models(
+    request: Request,
     view: ModelCatalogView | None = None,
     x_fcc_model_view: ModelCatalogView | None = Header(default=None),
     services: ApiServices = Depends(get_services),
+    settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
-    """List the model ids this proxy advertises to compatible clients."""
+    """List the model ids this proxy advertises to compatible clients.
+
+    Requests accepted on the dedicated Claude Desktop 3P listener default
+    to the desktop view; explicit query/header selections still win.
+    """
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")
     snapshot = await services.requests.wait_for_catalog()
+    resolved_view = view or x_fcc_model_view
+    if resolved_view is None:
+        if is_claude_desktop_request(request, settings):
+            resolved_view = ModelCatalogView.CLAUDE_DESKTOP
+        else:
+            resolved_view = ModelCatalogView.CLAUDE
     return build_models_list_response(
         snapshot.settings,
         snapshot,
-        view=view or x_fcc_model_view or ModelCatalogView.CLAUDE,
+        view=resolved_view,
     )
 
 

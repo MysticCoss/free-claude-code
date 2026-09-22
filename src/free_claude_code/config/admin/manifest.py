@@ -198,7 +198,6 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         advanced=True,
     ),
     ConfigFieldSpec(
-
         "REASONING_POLICY",
         "Reasoning Policy",
         "reasoning",

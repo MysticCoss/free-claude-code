@@ -1,5 +1,6 @@
 """OpenCode provider with catalog-driven Chat/Responses dispatch."""
 
+import json
 import sys
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from free_claude_code.core.openai_responses import (
     ResponsesToolPolicy,
 )
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.core.session_id import conversation_seed, opencode_request_headers
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.endpoint_types import EndpointContext
@@ -144,8 +146,23 @@ class OpenCodeProvider(BaseProvider):
         return snapshot.model_infos
 
     def _upstream_headers(
-        self, request_headers: Mapping[str, str]
+        self,
+        request_headers: Mapping[str, str],
+        request: MessagesRequest | OpenAIResponsesRequest | None = None,
+        request_id: str | None = None,
     ) -> Mapping[str, str]:
+        """Build the x-opencode-* header trio for one upstream request.
+
+        A session value the client already addressed to opencode (or that a
+        harness such as Pi forwarded) goes out verbatim — the client owns
+        that identity. Otherwise the ``fcc_session_id`` the API layer
+        extracted from Claude-shaped headers is mapped to opencode shape.
+        Console Go answers 400 MissingSessionID unless the header carries a
+        value, so Go requests whose client sent no session fall back to a
+        deterministic seed of the conversation's opening; Zen omits the
+        header and lets the gateway report the absence.
+        """
+
         headers = {name.lower(): value for name, value in request_headers.items()}
         user_agent = headers.get("user-agent")
         if not (user_agent and user_agent.isascii() and user_agent.strip()):
@@ -247,7 +264,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, request, request_id
+                    ),
                     model_info=route.model_info,
                 )
             else:
@@ -258,7 +277,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, request, request_id
+                    ),
                     model_info=route.model_info,
                 )
             async for event in selected_stream:
@@ -317,7 +338,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, request, request_id
+                    ),
                 )
             else:
                 selected_stream = self._chat.stream_responses(
@@ -327,7 +350,9 @@ class OpenCodeProvider(BaseProvider):
                     response_model=response_model,
                     reasoning=reasoning,
                     endpoint_context=endpoint_context,
-                    extra_headers=self._upstream_headers(request_headers or {}),
+                    extra_headers=self._upstream_headers(
+                        request_headers or {}, request, request_id
+                    ),
                 )
             async for event in selected_stream:
                 yield event

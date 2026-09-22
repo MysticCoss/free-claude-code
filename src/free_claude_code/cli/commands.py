@@ -23,7 +23,11 @@ from free_claude_code.config.loader import (
     get_settings,
 )
 from free_claude_code.config.paths import managed_env_path
-from free_claude_code.config.server_urls import local_admin_url, local_proxy_root_url
+from free_claude_code.config.server_urls import (
+    local_admin_url,
+    local_claude_desktop_url,
+    local_proxy_root_url,
+)
 from free_claude_code.config.settings import Settings
 
 from .server_socket import ServerSockets
@@ -31,12 +35,28 @@ from .server_socket import ServerSockets
 if TYPE_CHECKING:
     import uvicorn
 
+    from free_claude_code.runtime.bootstrap import RuntimeASGIApp
+
 SERVER_GRACEFUL_SHUTDOWN_SECONDS = 5
 DESKTOP_LISTENER_JOIN_GRACE_SECONDS = 2
 DESKTOP_LISTENER_BIND_ATTEMPTS = 10
 DESKTOP_LISTENER_BIND_RETRY_SECONDS = 0.5
-
 _BROWSER_HANDOFF_SECONDS = 5.0
+
+
+def desktop_listener_port(settings: Settings) -> int | None:
+    """Return the dedicated Claude Desktop 3P listener port, or None if unneeded.
+
+    The listener is only planned when the feature is on and its port differs
+    from the main port; equality is rejected by settings validation but is
+    also refused here so a bad snapshot can never produce a duplicate bind.
+    """
+
+    if not settings.enable_claude_desktop_3p:
+        return None
+    if settings.claude_desktop_port == settings.port:
+        return None
+    return settings.claude_desktop_port
 
 
 def _start_admin_browser(
@@ -311,6 +331,9 @@ class ServerSupervisor:
             ):
                 server.should_exit = True
 
+        desktop_server, desktop_thread = self._start_desktop_listener(
+            asgi_app, settings
+        )
         try:
             server.run(sockets=sockets)
         finally:
@@ -318,6 +341,7 @@ class ServerSupervisor:
                 if self._server is server:
                     self._server = None
                     self._ready_settings = None
+            self._stop_desktop_listener(desktop_server, desktop_thread)
 
         with self._lock:
             restart_requested = self._restart_generation != restart_generation
@@ -447,7 +471,6 @@ class ServerSupervisor:
                 "leaving the daemon thread to exit on its own."
             )
 
-
     def _request_runtime_restart(self) -> None:
         self.request_restart()
 
@@ -500,9 +523,9 @@ def open_admin_when_ready(
                     if remaining <= 0 or completed.wait(min(0.05, remaining)):
                         break
                 return True
-        except (HTTPError, ValueError, UnicodeError):
+        except HTTPError, ValueError, UnicodeError:
             return False
-        except (URLError, OSError):
+        except URLError, OSError:
             pass
         stop.wait(0.15)
     return False

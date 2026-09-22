@@ -338,6 +338,55 @@ class Settings(BaseModel):
         default=1.0, validation_alias="MESSAGING_RATE_WINDOW"
     )
 
+    # ==================== Claude Desktop 3P ====================
+    # Claude Desktop's 3P model mode only lists ids matching claude-* /
+    # anthropic/claude-*. When enabled, FCC starts a dedicated second
+    # listener (see CLAUDE_DESKTOP_PORT) whose /v1/models advertises each
+    # configured/discovered model in the desktop-safe encoded form. The
+    # main PORT stays untouched.
+    enable_claude_desktop_3p: bool = Field(
+        default=False, validation_alias="ENABLE_CLAUDE_DESKTOP_3P"
+    )
+    claude_desktop_port: int = Field(
+        default=8083, validation_alias="CLAUDE_DESKTOP_PORT"
+    )
+
+    # Optional override for compaction/summarization requests.
+    # Detected when the system prompt contains "summarizing conversations" or
+    # the last user message starts with "CRITICAL: Respond with TEXT ONLY".
+    # Falls back to normal model resolution when unset.
+    model_compact: OptionalNonEmptyString = Field(
+        default=None, validation_alias="MODEL_COMPACT"
+    )
+
+    # Comma-separated provider/model refs whose upstream supports >= 1M tokens.
+    # Each matching ref also gets a [1m]-suffixed variant in /v1/models so
+    # Claude Code grants the 1M-token context window.
+    # Example: opencode_go/deepseek-v4-pro,opencode_go/deepseek-v4-flash
+    fcc_1m_models: OptionalNonEmptyString = Field(
+        default=None, validation_alias="FCC_1M_MODELS"
+    )
+
+    # ==================== In-App Updates ====================
+    # One GitHub branch is the update source (default: this fork). The Admin
+    # UI exposes editable repo/branch plus an opt-in automatic update loop.
+    fcc_update_repo: NonEmptyString = Field(
+        default="MysticCoss/free-claude-code",
+        validation_alias="FCC_UPDATE_REPO",
+    )
+    fcc_update_branch: NonEmptyString = Field(
+        default="main",
+        validation_alias="FCC_UPDATE_BRANCH",
+    )
+    fcc_update_auto: bool = Field(
+        default=False,
+        validation_alias="FCC_UPDATE_AUTO",
+    )
+    fcc_update_poll_hours: float = Field(
+        default=24.0,
+        validation_alias="FCC_UPDATE_POLL_HOURS",
+    )
+
     # ==================== NVIDIA NIM Config ====================
     nvidia_nim_api_key: OptionalNonEmptyString = Field(
         default=None,
@@ -790,7 +839,12 @@ class Settings(BaseModel):
         return ",".join(schemes)
 
     @field_validator(
-        "model", "model_fable", "model_opus", "model_sonnet", "model_haiku"
+        "model",
+        "model_fable",
+        "model_opus",
+        "model_sonnet",
+        "model_haiku",
+        "model_compact",
     )
     @classmethod
     def validate_model_format(cls, v: str | None) -> str | None:
@@ -809,6 +863,30 @@ class Settings(BaseModel):
         if len(validated) != len(set(validated)):
             raise ValueError("MODEL_FALLBACKS must not contain duplicate model refs.")
         return validated
+
+    def one_m_model_refs(self) -> frozenset[str]:
+        """Return provider/model refs tagged for [1m] context variants.
+
+        Parses ``fcc_1m_models`` (comma-separated). Whitespace around each
+        entry is trimmed, empty entries are skipped, and any existing
+        ``[1m]`` suffix is stripped so the config is idempotent.
+        """
+        refs: set[str] = set()
+        for part in (self.fcc_1m_models or "").split(","):
+            stripped = part.strip()
+            if stripped:
+                refs.add(stripped.removesuffix("[1m]"))
+        return frozenset(refs)
+
+    @model_validator(mode="after")
+    def check_claude_desktop_port_isolation(self) -> Settings:
+        if self.enable_claude_desktop_3p and self.claude_desktop_port == self.port:
+            raise ValueError(
+                "CLAUDE_DESKTOP_PORT must differ from PORT: the Claude "
+                "Desktop 3P listener exists to serve claude-* ids on a "
+                "separate port while the main port stays untouched."
+            )
+        return self
 
     @model_validator(mode="after")
     def check_nvidia_nim_api_key(self) -> Settings:
