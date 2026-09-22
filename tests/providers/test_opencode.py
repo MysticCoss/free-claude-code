@@ -406,6 +406,35 @@ def test_catalog_resolves_package_precedence_status_alias_and_reasoning() -> Non
     )
 
 
+def test_catalog_flags_muse_spark_as_no_encrypted_reasoning_roundtrip() -> None:
+    # The muse-spark lane (Meta-proxied through the opencode gateways)
+    # issues encrypted reasoning bound to the gateway's own caller and
+    # answers 400 on replay (can1357/oh-my-pi#11928), so catalog routes for
+    # that family declare no encrypted-reasoning round-trip.
+    snapshot = parse_open_code_catalog(
+        _catalog_payload(
+            {
+                "muse": {
+                    "id": "meta/muse-spark-1.3-contributor-free",
+                    "reasoning": True,
+                },
+                "other": {"id": "regular-upstream", "reasoning": True},
+            }
+        ),
+        provider_key="opencode",
+        provider_name="OPENCODE_GO",
+    )
+
+    muse = snapshot.route("muse")
+    assert muse is not None
+    assert muse.supports_encrypted_reasoning is False
+    other = snapshot.route("other")
+    assert other is not None
+    assert other.supports_encrypted_reasoning is True
+    assert muse.model_info.supports_encrypted_reasoning is False
+    assert other.model_info.supports_encrypted_reasoning is True
+
+
 def test_catalog_defaults_missing_package_to_chat_completions() -> None:
     snapshot = parse_open_code_catalog(
         _catalog_payload(

@@ -40,6 +40,7 @@ from free_claude_code.core.openai_responses import (
     build_native_responses_request,
     build_responses_provider_request,
     responses_stream_failure_from_event,
+    strip_encrypted_reasoning_request,
 )
 from free_claude_code.core.openai_tool_names import OpenAIToolNameCodec
 from free_claude_code.core.reasoning import ReasoningControl, ReasoningPolicy
@@ -142,7 +143,9 @@ class OpenAIResponsesTransport:
             can_disable=can_disable_reasoning,
             normal_max_tokens=None,
         )
-        body = self._build_messages_body(prepared, reasoning=wire_reasoning)
+        body = self._build_messages_body(
+            prepared, reasoning=wire_reasoning, model_info=model_info
+        )
         correction = (
             ReasoningCorrection((("reasoning",),), "max_output_tokens", None)
             if reasoning.control is ReasoningControl.PREFER_OFF
@@ -179,9 +182,12 @@ class OpenAIResponsesTransport:
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
         extra_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens
-        body, tools = self._build_native_body(request, reasoning=reasoning)
+        body, tools = self._build_native_body(
+            request, reasoning=reasoning, model_info=model_info
+        )
         return self._run_stream(
             body,
             endpoint_context=endpoint_context,
@@ -210,23 +216,25 @@ class OpenAIResponsesTransport:
             normal_max_tokens=None,
         )
         try:
-            return self._prepare_body(
+            body = cast(
+                JsonObject,
                 cast(
-                    JsonObject,
-                    cast(
-                        ResponseCreateParamsStreaming,
-                        build_responses_provider_request(request, reasoning=reasoning),
-                    ),
-                )
+                    ResponseCreateParamsStreaming,
+                    build_responses_provider_request(request, reasoning=reasoning),
+                ),
             )
         except ResponsesConversionError as exc:
             raise InvalidRequestError(str(exc)) from exc
+        if model_info is not None and not model_info.supports_encrypted_reasoning:
+            strip_encrypted_reasoning_request(body)
+        return self._prepare_body(body)
 
     def _build_native_body(
         self,
         request: OpenAIResponsesRequest,
         *,
         reasoning: ReasoningPolicy,
+        model_info: ProviderModelInfo | None = None,
     ) -> tuple[JsonObject, ResponsesToolAdapter]:
         validate_history(request.model_dump(mode="json"))
         if not request.model.strip():
@@ -237,13 +245,14 @@ class OpenAIResponsesTransport:
             tools = ResponsesToolAdapter(request, self._tool_policy)
         except ResponsesConversionError as error:
             raise InvalidRequestError(str(error)) from error
-        body = self._prepare_body(
-            build_native_responses_request(
-                tools.request,
-                model=request.model,
-                reasoning=reasoning,
-            )
+        body = build_native_responses_request(
+            tools.request,
+            model=request.model,
+            reasoning=reasoning,
         )
+        if model_info is not None and not model_info.supports_encrypted_reasoning:
+            strip_encrypted_reasoning_request(body)
+        body = self._prepare_body(body)
         return body, tools
 
     def _prepare_body(self, body: JsonObject) -> JsonObject:

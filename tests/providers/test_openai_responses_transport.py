@@ -14,6 +14,7 @@ import pytest
 from openai import AsyncOpenAI
 
 from free_claude_code.application.errors import InvalidRequestError
+from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic import ReasoningReplayMode
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.anthropic.stream_contracts import (
@@ -233,6 +234,7 @@ async def _collect_native(
     request: OpenAIResponsesRequest,
     *,
     reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+    model_info: ProviderModelInfo | None = None,
 ) -> list[str]:
     return [
         chunk
@@ -242,6 +244,7 @@ async def _collect_native(
             request_id="req_native_responses",
             response_model="public-model",
             reasoning=reasoning,
+            model_info=model_info,
         )
     ]
 
@@ -1591,3 +1594,103 @@ async def test_terminal_400_stays_quiet_without_verbose_flag() -> None:
         await client.close()
 
     assert "upstream-marker-400" not in _rendered_log_blob(log_error)
+
+
+@pytest.mark.asyncio
+async def test_no_encrypted_reasoning_roundtrip_drops_include_and_replays() -> None:
+    # Gateways that issue encrypted reasoning bound to their own caller 400
+    # on replay (can1357/oh-my-pi#11928): a capability-declared model must
+    # not request reasoning.encrypted_content nor replay reasoning items
+    # that carry it.
+    wire_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        wire_bodies.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=_sse(_completed_event()),
+        )
+
+    request = _request(
+        messages=[
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "prior step",
+                        "signature": "opaque-sig",
+                    },
+                    {"type": "text", "text": "answer"},
+                ],
+            },
+            {"role": "user", "content": "continue"},
+        ],
+    )
+    client = _client(handler)
+    try:
+        [
+            chunk
+            async for chunk in _transport(client).stream_messages(
+                request,
+                input_tokens=11,
+                request_id="req_responses",
+                response_model="public-model",
+                reasoning=REASONING_ON,
+                model_info=ProviderModelInfo(
+                    "muse", supports_encrypted_reasoning=False
+                ),
+            )
+        ]
+    finally:
+        await client.close()
+
+    body = wire_bodies[0]
+    assert "include" not in body
+    input_items = body["input"]
+    assert isinstance(input_items, list)
+    assert not isinstance(input_items, str)
+    encrypted_replays = [
+        item
+        for item in input_items
+        if isinstance(item, dict)
+        and item.get("type") == "reasoning"
+        and item.get("encrypted_content")
+    ]
+    assert encrypted_replays == []
+
+
+@pytest.mark.asyncio
+async def test_native_lane_also_applies_no_encrypted_roundtrip_rule() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        wire = json.loads(request.content)
+        assert "include" not in wire
+        assert not any(
+            item.get("type") == "reasoning" and item.get("encrypted_content")
+            for item in wire["input"]
+        )
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=_sse(_completed_event()),
+        )
+
+    history = [
+        {"type": "reasoning", "summary": [], "encrypted_content": "opaque-2"},
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        },
+    ]
+    client = _client(handler)
+    try:
+        await _collect_native(
+            _transport(client),
+            OpenAIResponsesRequest(model="example", input=history),
+            model_info=ProviderModelInfo("muse", supports_encrypted_reasoning=False),
+        )
+    finally:
+        await client.close()

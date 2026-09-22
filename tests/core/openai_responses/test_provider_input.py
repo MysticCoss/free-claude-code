@@ -6,6 +6,7 @@ from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.openai_responses.errors import ResponsesConversionError
 from free_claude_code.core.openai_responses.provider_input import (
     build_responses_provider_request,
+    strip_encrypted_reasoning_request,
 )
 from free_claude_code.core.reasoning import ReasoningEffort, ReasoningPolicy
 
@@ -608,3 +609,61 @@ def test_build_responses_provider_request_rejects_unknown_request_fields() -> No
             request,
             reasoning=ReasoningPolicy.provider_default(),
         )
+
+
+def test_strip_encrypted_reasoning_request_drops_encrypted_replays() -> None:
+    # Gateways that issue encrypted reasoning bound to their own caller 400
+    # on replay (can1357/oh-my-pi#11928): the compat rule must omit the
+    # include field and drop reasoning items carrying encrypted_content,
+    # while readable reasoning-text items and every other item survive.
+    body = {
+        "model": "muse",
+        "stream": True,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+        "input": [
+            {"type": "reasoning", "summary": [], "encrypted_content": "opaque-1"},
+            {
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "readable"}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            },
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+        ],
+    }
+
+    strip_encrypted_reasoning_request(body)
+
+    assert "include" not in body
+    assert body["input"] == [
+        {
+            "type": "reasoning",
+            "summary": [],
+            "content": [{"type": "reasoning_text", "text": "readable"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        },
+        {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+    ]
+
+
+def test_strip_encrypted_reasoning_request_tolerates_non_list_input() -> None:
+    # Native lanes may carry string or empty input; only the include field
+    # needs removal in those shapes.
+    body: dict[str, object] = {
+        "include": ["reasoning.encrypted_content"],
+        "input": "hello",
+    }
+
+    strip_encrypted_reasoning_request(body)
+
+    assert "include" not in body
+    assert body["input"] == "hello"

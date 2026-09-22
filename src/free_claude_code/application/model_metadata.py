@@ -16,6 +16,12 @@ class ProviderModelInfo:
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
     reasoning_capability: ReasoningCapability = ReasoningCapability.UNKNOWN
+    # Whether the provider accepts Requests that include
+    # ``reasoning.encrypted_content`` and tolerates replaying reasoning items
+    # carrying it back on later turns. Models whose upstream issues
+    # encrypted reasoning bound to its own caller (and 400s on replay, e.g.
+    # opencode gateways' muse-spark lane) must set this to False.
+    supports_encrypted_reasoning: bool = True
 
 
 @dataclass(frozen=True, slots=True)

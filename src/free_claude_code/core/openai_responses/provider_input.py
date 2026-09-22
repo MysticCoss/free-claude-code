@@ -407,3 +407,29 @@ def _tool_choice(
             raise ResponsesConversionError("Forced tool choice requires a tool name.")
         return {"type": "function", "name": tool_names.encode(name)}
     raise ResponsesConversionError(f"Unsupported tool_choice type {choice_type!r}.")
+
+
+def strip_encrypted_reasoning_request(body: dict[str, Any]) -> None:
+    """Apply a provider's no-encrypted-reasoning compat rule to a built body.
+
+    Some upstream gateways issue ``reasoning.encrypted_content`` bound to
+    their own caller and answer 400 ``reasoning 'encrypted_content' was not
+    issued to this caller`` when a later turn replays it
+    (see can1357/oh-my-pi#11928; opencode muse-spark lanes). Such models
+    must neither request the encrypted content nor replay reasoning items
+    that carry it; readable reasoning-text items survive the filter.
+    """
+
+    body.pop("include", None)
+    input_items = body.get("input")
+    if not isinstance(input_items, list):
+        return
+    body["input"] = [
+        item
+        for item in input_items
+        if not (
+            isinstance(item, dict)
+            and item.get("type") == "reasoning"
+            and item.get("encrypted_content")
+        )
+    ]

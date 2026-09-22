@@ -48,6 +48,7 @@ class OpenCodeModelRoute:
     input_modalities: frozenset[ModelInputModality] | None
     context_window_tokens: int | None
     max_output_tokens: int | None
+    supports_encrypted_reasoning: bool = True
 
     @property
     def model_info(self) -> ProviderModelInfo:
@@ -60,6 +61,7 @@ class OpenCodeModelRoute:
             reasoning_capability=ReasoningCapability.NONE
             if self.supports_thinking is False
             else ReasoningCapability.UNKNOWN,
+            supports_encrypted_reasoning=self.supports_encrypted_reasoning,
         )
 
 
@@ -168,6 +170,12 @@ def parse_open_code_catalog(
             input_modalities=input_modalities,
             context_window_tokens=context_window_tokens,
             max_output_tokens=max_output_tokens,
+            # The muse-spark lane proxied to Meta issues encrypted reasoning
+            # bound to the gateway's own caller; replaying it on a later turn
+            # answers 400 "reasoning 'encrypted_content' was not issued to
+            # this caller" (can1357/oh-my-pi#11928). Such routes must not
+            # request or replay encrypted reasoning.
+            supports_encrypted_reasoning="muse-spark" not in upstream_model_id,
         )
         routes[selector_id] = route
 

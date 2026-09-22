@@ -341,6 +341,7 @@ class OpenCodeProvider(BaseProvider):
                     extra_headers=self._upstream_headers(
                         request_headers or {}, request, request_id
                     ),
+                    model_info=route.model_info,
                 )
             else:
                 selected_stream = self._chat.stream_responses(

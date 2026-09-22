@@ -19,7 +19,10 @@ from .messages_request import ResponsesMessagesRequest, build_responses_messages
 from .messages_stream import AnthropicToResponsesStream
 from .models import OpenAIResponsesRequest
 from .native import NativeResponsesRelay, build_native_responses_request
-from .provider_input import build_responses_provider_request
+from .provider_input import (
+    build_responses_provider_request,
+    strip_encrypted_reasoning_request,
+)
 from .provider_stream import (
     ResponsesProviderStream,
     ResponsesStreamFailure,
@@ -86,5 +89,6 @@ __all__ = [
     "responses_reasoning_config",
     "responses_reasoning_policy",
     "responses_stream_failure_from_event",
+    "strip_encrypted_reasoning_request",
     "tool_item",
 ]
