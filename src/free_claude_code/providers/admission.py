@@ -29,6 +29,10 @@ UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS = 5
 DEFAULT_UPSTREAM_BASE_DELAY = 2.0
 DEFAULT_UPSTREAM_MAX_DELAY = 60.0
 DEFAULT_UPSTREAM_JITTER = 1.0
+# Cap on how long one request may queue behind a shared recovery episode
+# (a Retry-After of hours must not hold client connections until they time
+# out; waiters instead surface the episode's real upstream error).
+DEFAULT_GATE_WAIT_LIMIT_SECONDS = 120.0
 
 
 class ProviderOperationKind(StrEnum):
@@ -415,6 +419,7 @@ class ProviderAdmissionController:
         base_delay: float = DEFAULT_UPSTREAM_BASE_DELAY,
         max_delay: float = DEFAULT_UPSTREAM_MAX_DELAY,
         jitter: float = DEFAULT_UPSTREAM_JITTER,
+        gate_wait_limit: float = DEFAULT_GATE_WAIT_LIMIT_SECONDS,
     ) -> None:
         if rate_limit <= 0:
             raise ValueError("rate_limit must be > 0")
@@ -430,12 +435,15 @@ class ProviderAdmissionController:
             raise ValueError("max_delay must be >= base_delay")
         if jitter < 0:
             raise ValueError("jitter must be >= 0")
+        if gate_wait_limit <= 0:
+            raise ValueError("gate_wait_limit must be > 0")
 
         self._provider_name = provider_name
         self._max_attempts = max_attempts
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._jitter = jitter
+        self._gate_wait_limit = gate_wait_limit
         self._proactive_limiter = StrictSlidingWindowLimiter(
             rate_limit, float(rate_window)
         )
@@ -528,6 +536,7 @@ class ProviderAdmissionController:
                 raise ProviderRecoveryExhausted(terminal_error)
             sleep_delay: float | None = None
             claimed_generation: int | None = None
+            episode_error: Exception | None = None
             async with self._condition:
                 episode = self._episode
                 if episode is None:
@@ -543,6 +552,7 @@ class ProviderAdmissionController:
                         last_error=episode.last_error,
                     )
 
+                episode_error = episode.last_error
                 if episode.leader is None:
                     episode.leader = execution
                     episode.waiters.discard(execution)
@@ -556,6 +566,19 @@ class ProviderAdmissionController:
                         episode.probe_active = True
                         return self._probe_permit(execution, episode)
                 else:
+                    wait_remaining = max(0.0, episode.ready_at - time.monotonic())
+                    if wait_remaining > self._gate_wait_limit:
+                        # A cooldown this long would hold the client past its
+                        # own timeout while another request owns the probe.
+                        # Fail immediately with the episode's real error.
+                        logger.warning(
+                            "Provider {} recovery waits {:.1f}s, over the {:.1f}s "
+                            "admission wait limit; reporting the upstream error now",
+                            self._provider_name,
+                            wait_remaining,
+                            self._gate_wait_limit,
+                        )
+                        raise ProviderRecoveryExhausted(episode.last_error)
                     episode.waiters.add(execution)
                     try:
                         await self._condition.wait()
@@ -573,12 +596,46 @@ class ProviderAdmissionController:
                 continue
             try:
                 if sleep_delay > 0:
-                    logger.warning(
-                        "Provider {} recovery active, waiting {:.1f}s for one probe",
-                        self._provider_name,
-                        sleep_delay,
-                    )
-                    await asyncio.sleep(sleep_delay)
+                    wait_limit = self._gate_wait_limit
+                    if sleep_delay <= wait_limit:
+                        logger.warning(
+                            "Provider {} recovery active, waiting {:.1f}s for one probe",
+                            self._provider_name,
+                            sleep_delay,
+                        )
+                        await asyncio.sleep(sleep_delay)
+                    else:
+                        # A cooldown this long would hold the client past its
+                        # own timeout while the probe is still pending. Fail
+                        # immediately with the episode's real upstream error.
+                        async with self._condition:
+                            episode = self._episode
+                            episode_current = (
+                                episode is not None
+                                and episode.generation == claimed_generation
+                                and episode.terminal_until is None
+                            )
+                            if episode_current and episode.leader is execution:
+                                # Hand leadership back so the probe stays
+                                # schedulable for a later caller.
+                                episode.leader = None
+                                self._condition.notify_all()
+                        if not episode_current:
+                            # Episode advanced while deciding; re-evaluate.
+                            continue
+                        logger.warning(
+                            "Provider {} recovery waits {:.1f}s, over the {:.1f}s "
+                            "admission wait limit; reporting the upstream error now",
+                            self._provider_name,
+                            sleep_delay,
+                            wait_limit,
+                        )
+                        reported = execution.last_failure or episode_error
+                        if (
+                            reported is None
+                        ):  # pragma: no cover - episode always carries one
+                            raise RuntimeError("recovery episode lost its error")
+                        raise ProviderRecoveryExhausted(reported) from reported
                 async with self._condition:
                     episode = self._episode
                     if (

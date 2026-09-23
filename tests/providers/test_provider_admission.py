@@ -15,6 +15,7 @@ import pytest
 
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.providers.admission import (
+    DEFAULT_GATE_WAIT_LIMIT_SECONDS,
     UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
     ProviderAdmissionController,
     ProviderAttempt,
@@ -37,6 +38,7 @@ def _controller(
     max_attempts: int = UPSTREAM_TRANSIENT_TOTAL_ATTEMPTS,
     base_delay: float = 0.0,
     max_delay: float = 0.0,
+    gate_wait_limit: float = DEFAULT_GATE_WAIT_LIMIT_SECONDS,
 ) -> ProviderAdmissionController:
     return ProviderAdmissionController(
         provider_name=provider_name,
@@ -47,6 +49,7 @@ def _controller(
         base_delay=base_delay,
         max_delay=max_delay,
         jitter=0.0,
+        gate_wait_limit=gate_wait_limit,
     )
 
 
@@ -983,6 +986,73 @@ def test_retry_after_accepts_http_date_and_rejects_invalid_values() -> None:
     assert _retry_after_seconds(_status_error(429, retry_after="invalid")) is None
     assert _retry_after_seconds(_status_error(429, retry_after="nan")) is None
     assert _retry_after_seconds(_status_error(429, retry_after="inf")) is None
+
+
+@pytest.mark.asyncio
+async def test_long_recovery_cooldown_fails_leader_with_upstream_error() -> None:
+    controller = _controller()
+    error = _status_error(429, retry_after="7200")
+    leader_execution = controller.start_execution()
+    leader = await _open(leader_execution)
+    assert (await leader.fail(error)).retry_allowed
+    await leader.aclose()
+
+    with pytest.raises(ProviderRecoveryExhausted) as exc_info:
+        await asyncio.wait_for(_open(leader_execution), timeout=1)
+    assert exc_info.value.last_error is error
+
+
+@pytest.mark.asyncio
+async def test_long_recovery_cooldown_keeps_probe_schedulable() -> None:
+    controller = _controller()
+    error = _status_error(429, retry_after="7200")
+    leader_execution = controller.start_execution()
+    leader = await _open(leader_execution)
+    assert (await leader.fail(error)).retry_allowed
+    await leader.aclose()
+
+    with pytest.raises(ProviderRecoveryExhausted):
+        await asyncio.wait_for(_open(leader_execution), timeout=1)
+
+    episode = controller._episode
+    assert episode is not None
+    assert episode.leader is None
+    assert not episode.probe_active
+    assert episode.ready_at > time.monotonic()
+
+
+@pytest.mark.asyncio
+async def test_long_recovery_cooldown_fails_new_waiter_with_upstream_error() -> None:
+    controller = _controller()
+    error = _status_error(429, retry_after="7200")
+    leader_execution = controller.start_execution()
+    leader = await _open(leader_execution)
+    assert (await leader.fail(error)).retry_allowed
+    await leader.aclose()
+
+    with pytest.raises(ProviderRecoveryExhausted) as exc_info:
+        await asyncio.wait_for(_open(controller.start_execution()), timeout=1)
+    assert exc_info.value.last_error is error
+
+
+@pytest.mark.asyncio
+async def test_short_recovery_cooldown_still_waits_for_probe() -> None:
+    controller = _controller(gate_wait_limit=30.0, base_delay=0.0, max_delay=0.0)
+    error = _status_error(429, retry_after="0.05")
+    leader_execution = controller.start_execution()
+    leader = await _open(leader_execution)
+    assert (await leader.fail(error)).retry_allowed
+    await leader.aclose()
+
+    probe = await asyncio.wait_for(_open(leader_execution), timeout=1)
+    await probe.accept()
+    await probe.aclose()
+    assert controller._episode is None
+
+
+def test_gate_wait_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="gate_wait_limit"):
+        ProviderAdmissionController(provider_name="TEST", gate_wait_limit=0)
 
 
 @pytest.mark.asyncio
