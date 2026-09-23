@@ -43,6 +43,12 @@ def decode_gateway_model_id(model_name: str) -> DecodedGatewayModelId | None:
         return None
 
     if prefix in {DESKTOP_MODEL_PREFIX, DESKTOP_NO_THINKING_PREFIX}:
+        # Desktop synthesizes its `[1m]` picker row by appending a literal
+        # suffix to the discovered base hex id (see api/model_catalog), so
+        # strip it before hex-decoding; the router's own suffix strip then
+        # sees the bare ref. A `[` byte is never valid hex, so this only
+        # ever strips a genuine Desktop-appended suffix.
+        remainder = remainder.removesuffix("[1m]")
         try:
             decoded = bytes.fromhex(remainder).decode("utf-8")
         except ValueError, UnicodeError:
