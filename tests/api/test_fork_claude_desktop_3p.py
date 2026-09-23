@@ -339,14 +339,58 @@ def test_desktop_listener_advertises_claude_prefixed_ids() -> None:
     assert "claude-sonnet-4-20250514" in ids
 
 
-def test_desktop_listener_prefixes_1m_variants() -> None:
+def test_desktop_listener_annotates_1m_base_entries() -> None:
+    # Desktop synthesizes the `[1m]` picker row itself from an annotated
+    # base entry (gateway contract): the desktop view carries no separate
+    # hex-`[1m]` id (a suffix hidden in the hex payload never pairs), and
+    # the base entry advertises `supports_1m` (+ `max_input_tokens` when
+    # the provider catalog reports a context window).
+    app = create_test_app(
+        _settings(desktop=True, fcc_1m_models="deepseek/deepseek-chat")
+    )
+    provider_manager_for_app(app).cache_model_infos(
+        "deepseek",
+        {
+            ProviderModelInfo("deepseek-chat", context_window_tokens=1_000_000),
+            ProviderModelInfo("other-model"),
+        },
+    )
+    entries = {
+        str(entry["id"]): entry
+        for entry in TestClient(app, base_url=_DESKTOP_BASE_URL)
+        .get("/v1/models")
+        .json()["data"]
+    }
+
+    assert desktop_model_id("deepseek/deepseek-chat[1m]") not in entries
+    base = entries[desktop_model_id("deepseek/deepseek-chat")]
+    assert base["supports_1m"] is True
+    assert base["max_input_tokens"] == 1_000_000
+    other = entries[desktop_model_id("deepseek/other-model")]
+    assert "supports_1m" not in other
+    assert "max_input_tokens" not in other
+
+
+def test_desktop_listener_emits_no_standalone_hex_1m_ids() -> None:
     ids = _get_model_ids(
         _settings(desktop=True, fcc_1m_models="deepseek/deepseek-chat"),
         {},
         base_url=_DESKTOP_BASE_URL,
     )
 
-    assert desktop_model_id("deepseek/deepseek-chat[1m]") in ids
+    assert desktop_model_id("deepseek/deepseek-chat") in ids
+    assert not any(model_id.endswith("[1m]") for model_id in ids)
+
+
+def test_main_port_keeps_literal_1m_variants() -> None:
+    # Claude Code's own discovery contract reads the literal `[1m]`
+    # suffix on the main port, unchanged by the desktop annotation.
+    ids = _get_model_ids(
+        _settings(desktop=True, fcc_1m_models="deepseek/deepseek-chat"),
+        {},
+    )
+
+    assert "anthropic/deepseek/deepseek-chat[1m]" in ids
 
 
 def test_main_port_stays_normal_while_desktop_enabled() -> None:
@@ -386,6 +430,24 @@ def test_router_strips_1m_suffix_from_desktop_id() -> None:
     resolved = router.resolve(desktop_model_id("deepseek/deepseek-v4-flash[1m]"))
 
     assert resolved.primary.provider_model == "deepseek-v4-flash"
+
+
+@pytest.mark.parametrize("no_thinking", [False, True])
+def test_router_routes_desktop_synthesized_1m_id(no_thinking: bool) -> None:
+    # Desktop appends a literal `[1m]` to the discovered base hex id when
+    # it synthesizes the 1M picker row; decode must tolerate the suffix
+    # so the router still reaches the bare upstream model.
+    router = ModelRouter(_settings(desktop=True))
+
+    synthesized = desktop_model_id(
+        "deepseek/deepseek-v4-flash", no_thinking=no_thinking
+    )
+    resolved = router.resolve(f"{synthesized}[1m]")
+
+    assert resolved.original_model == f"{synthesized}[1m]"
+    assert resolved.primary.provider_id == "deepseek"
+    assert resolved.primary.provider_model == "deepseek-v4-flash"
+    assert (resolved.reasoning_preference is ReasoningPreference.OFF) is no_thinking
 
 
 def test_router_strips_1m_suffix_from_plain_ref() -> None:

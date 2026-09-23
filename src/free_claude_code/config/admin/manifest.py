@@ -159,7 +159,9 @@ _NON_PROVIDER_FIELDS: tuple[ConfigFieldSpec, ...] = (
         settings_attr="fcc_1m_models",
         description="Comma-separated provider/model refs (e.g. opencode_go/deepseek-v4-pro). "
         "Each matching model gets a [1m]-suffixed variant in /v1/models "
-        "so Claude Code grants the 1M-token context window.",
+        "so Claude Code grants the 1M-token context window; on the Claude "
+        "Desktop port the base entry is annotated instead and Desktop "
+        "synthesizes the [1m] picker row itself.",
     ),
     ConfigFieldSpec(
         "FCC_UPDATE_REPO",

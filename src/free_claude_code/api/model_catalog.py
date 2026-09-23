@@ -79,6 +79,14 @@ class ModelResponse(BaseModel):
     max_output_tokens: int | None = Field(
         default=None, serialization_alias="maxCompletionTokens"
     )
+    # Desktop gateway discovery contract: `supports_1m` (boolean wins) or
+    # `max_input_tokens >= 1e6` marks the entry for Desktop's client-side
+    # `[1m]` picker synthesis. Only set on desktop-view 1M base entries;
+    # omitted everywhere else via response_model_exclude_none.
+    supports_1m: bool | None = Field(default=None, serialization_alias="supports_1m")
+    max_input_tokens: int | None = Field(
+        default=None, serialization_alias="max_input_tokens"
+    )
     reasoning_efforts: tuple[str, ...] | None = Field(
         default=None, serialization_alias="reasoningEfforts"
     )
@@ -195,16 +203,26 @@ def _build_claude_models_response(
 
     Catalog members listed in ``one_m_refs`` additionally get
     ``[1m]``-suffixed variants so Claude Code grants the full 1M-token
-    context window for those upstreams.
+    context window for those upstreams. On the desktop view the suffix
+    stays literal (Claude Code's discovery contract): the base hex entry
+    is annotated instead, and Desktop synthesizes the ``[1m]`` picker
+    row itself — a suffix hidden inside the hex payload never pairs.
     """
     models = list(SUPPORTED_CLAUDE_MODELS)
     for model in catalog.models:
         ref = model.provider_model_ref
+        # Desktop view: annotate the base hex entry and let Desktop
+        # synthesize the `[1m]` picker row itself (gateway contract).
+        in_one_m = desktop and ref in one_m_refs
         if model.supports_reasoning is not False:
             models.append(
                 _discovered_model_response(
                     desktop_model_id(ref) if desktop else gateway_model_id(ref),
                     display_name=ref,
+                    supports_1m=True if in_one_m else None,
+                    max_input_tokens=(
+                        model.context_window_tokens if in_one_m else None
+                    ),
                 )
             )
         models.append(
@@ -213,25 +231,27 @@ def _build_claude_models_response(
                 if desktop
                 else no_thinking_gateway_model_id(ref),
                 display_name=f"{ref} (no thinking)",
+                supports_1m=True if in_one_m else None,
+                max_input_tokens=(model.context_window_tokens if in_one_m else None),
             )
         )
 
-    if one_m_refs:
+    # Main-port (Claude Code) view keeps the literal `[1m]`-suffixed
+    # variants, which Claude Code's own discovery contract reads.
+    if not desktop and one_m_refs:
         for model in catalog.models:
             if model.provider_model_ref in one_m_refs:
                 ref = f"{model.provider_model_ref}{ONE_M_CONTEXT_SUFFIX}"
                 if model.supports_reasoning is not False:
                     models.append(
                         _discovered_model_response(
-                            desktop_model_id(ref) if desktop else gateway_model_id(ref),
+                            gateway_model_id(ref),
                             display_name=ref,
                         )
                     )
                 models.append(
                     _discovered_model_response(
-                        desktop_model_id(ref, no_thinking=True)
-                        if desktop
-                        else no_thinking_gateway_model_id(ref),
+                        no_thinking_gateway_model_id(ref),
                         display_name=f"{ref} (no thinking)",
                     )
                 )
@@ -305,9 +325,17 @@ def _responses_inference_idle_timeout_seconds(provider_progress_timeout: float) 
     return math.ceil(provider_progress_timeout) + _INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS
 
 
-def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResponse:
+def _discovered_model_response(
+    model_id: str,
+    *,
+    display_name: str,
+    supports_1m: bool | None = None,
+    max_input_tokens: int | None = None,
+) -> ModelResponse:
     return ModelResponse(
         id=model_id,
         display_name=display_name,
         created_at=DISCOVERED_MODEL_CREATED_AT,
+        supports_1m=supports_1m,
+        max_input_tokens=max_input_tokens,
     )
