@@ -126,7 +126,7 @@ def opencode_request_headers(
         session_id = claude_to_opencode_session_id(claude_session_id)
         if not session_id:
             session_id = claude_to_opencode_session_id(fallback_seed)
-    headers = {"x-opencode-client": "fcc"}
+    headers = {"x-opencode-client": "desktop"}
     if session_id:
         headers["x-opencode-session"] = session_id
     if request_id:
