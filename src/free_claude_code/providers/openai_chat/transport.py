@@ -85,6 +85,10 @@ from free_claude_code.providers.http import (
 )
 from free_claude_code.providers.openai_client import OpenAIRequestClient
 from free_claude_code.providers.openai_stream import OpenAIStreamAdapter
+from free_claude_code.providers.output_floor import (
+    parse_output_token_floor,
+    raise_output_tokens,
+)
 from free_claude_code.providers.reasoning_compatibility import (
     ReasoningCorrection,
     prepare_messages_reasoning,
@@ -784,6 +788,10 @@ class OpenAIChatTransport:
         if retry_body is not None:
             return retry_body
 
+        retry_body = self._retry_body_for_output_floor(error, body)
+        if retry_body is not None:
+            return retry_body
+
         if "stream_usage" not in used_retry_kinds and is_stream_usage_rejection(error):
             retry_body = clone_without_stream_usage(body)
             if retry_body is not None:
@@ -837,6 +845,21 @@ class OpenAIChatTransport:
             cap,
         )
         return clamped
+
+    def _retry_body_for_output_floor(self, error: Exception, body: dict) -> dict | None:
+        """Raise output tokens to an upstream-required minimum for one retry."""
+        floor = parse_output_token_floor(error)
+        if floor is None:
+            return None
+        raised = raise_output_tokens(body, floor)
+        if raised is None:
+            return None
+        logger.warning(
+            "{}_STREAM: raising output tokens to {} after upstream minimum rejection",
+            self._provider_name,
+            floor,
+        )
+        return raised
 
     def stream_messages(
         self,

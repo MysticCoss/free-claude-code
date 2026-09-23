@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import replace
 from functools import partial
-from typing import cast
+from typing import Any, cast
 
 import httpx2
 from loguru import logger
@@ -68,6 +68,10 @@ from free_claude_code.providers.history_replay import (
 from free_claude_code.providers.http import ProviderAttemptScope, maybe_await_aclose
 from free_claude_code.providers.openai_client import OpenAIRequestClient
 from free_claude_code.providers.openai_stream import OpenAIStreamAdapter
+from free_claude_code.providers.output_floor import (
+    parse_output_token_floor,
+    raise_output_tokens,
+)
 from free_claude_code.providers.reasoning_compatibility import (
     ReasoningCorrection,
     prepare_messages_reasoning,
@@ -512,6 +516,12 @@ class OpenAIResponsesTransport:
                             body,
                             sent_body=sent_body,
                             reasoning_error=raw_error,
+                            reasoning_sent_body=sent_body,
+                            after_common=partial(
+                                self._next_responses_retry_body,
+                                error,
+                                body,
+                            ),
                         ),
                     )
                     if corrected_body is not None:
@@ -589,6 +599,32 @@ class OpenAIResponsesTransport:
         if execution.last_failure is not None:
             raise execution.last_failure
         raise RuntimeError("Responses execution ended without a terminal result.")
+
+    def _next_responses_retry_body(
+        self,
+        error: Exception,
+        body: JsonObject,
+        used_retry_kinds: set[str],
+        *,
+        sent_body: Mapping[str, Any] | None = None,
+    ) -> JsonObject | None:
+        """Raise output tokens to an upstream-required minimum for one retry."""
+        del sent_body
+        if "output_floor" in used_retry_kinds:
+            return None
+        floor = parse_output_token_floor(error)
+        if floor is None:
+            return None
+        raised = raise_output_tokens(body, floor)
+        if raised is None:
+            return None
+        used_retry_kinds.add("output_floor")
+        logger.warning(
+            "{}_RESPONSES: raising output tokens to {} after upstream minimum rejection",
+            self._provider_name,
+            floor,
+        )
+        return raised
 
     async def _create_sdk_stream(
         self,
