@@ -153,6 +153,41 @@ def test_model_router_resolves_route_reasoning_preferences(settings):
     assert router.resolve("claude-2.1").reasoning_preference is ReasoningPreference.OFF
 
 
+def test_model_router_applies_distinct_sonnet_reasoning_override(settings):
+    # No existing test ever set reasoning_sonnet apart from the root policy,
+    # so a broken sonnet wiring would still pass the shared preferences test.
+    settings.reasoning_policy = ReasoningPreference.OFF
+    settings.reasoning_sonnet = ReasoningPreference.HIGH
+
+    router = ModelRouter(settings)
+
+    assert (
+        router.resolve("claude-sonnet-4-20250514").reasoning_preference
+        is ReasoningPreference.HIGH
+    )
+    assert (
+        router.resolve("claude-opus-4-20250514").reasoning_preference
+        is ReasoningPreference.OFF
+    )
+
+
+def test_model_router_applies_distinct_haiku_reasoning_override(settings):
+    # The shared preferences test sets haiku=OFF against a root of OFF, which
+    # also passes via inherit-fallback; use a distinguishing value instead.
+    settings.reasoning_policy = ReasoningPreference.OFF
+    settings.reasoning_haiku = ReasoningPreference.HIGH
+
+    router = ModelRouter(settings)
+
+    assert (
+        router.resolve("claude-3-haiku-20240307").reasoning_preference
+        is ReasoningPreference.HIGH
+    )
+    assert (
+        router.resolve("claude-fable-5").reasoning_preference is ReasoningPreference.OFF
+    )
+
+
 def test_model_router_applies_haiku_override(settings):
     settings.model_haiku = "lmstudio/qwen2.5-7b"
 
