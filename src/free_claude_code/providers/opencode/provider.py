@@ -4,18 +4,23 @@ import json
 import sys
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.anthropic import ReasoningReplayMode
-from free_claude_code.core.anthropic.models import MessagesRequest
+from free_claude_code.core.anthropic.models import MessagesRequest, Tool
 from free_claude_code.core.openai_responses import (
     OpenAIResponsesRequest,
     ResponsesToolPolicy,
 )
-from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
+from free_claude_code.core.reasoning import (
+    DEFAULT_REASONING_POLICY,
+    ReasoningControl,
+    ReasoningPolicy,
+)
 from free_claude_code.core.session_id import conversation_seed, opencode_request_headers
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
@@ -36,6 +41,59 @@ from .catalog import (
     OpenCodeCatalogSnapshot,
     OpenCodeModelRoute,
     OpenCodeUpstreamTransport,
+)
+from .user_agent import ensure_opencode_version, opencode_user_agent
+
+_MINIMAL_TOOLS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    (
+        "bash",
+        "Run a bash command",
+        {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    ),
+    (
+        "edit",
+        "Edit a file by replacing text",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+            },
+            "required": ["path", "old", "new"],
+        },
+    ),
+    (
+        "glob",
+        "Find files by glob pattern",
+        {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}},
+            "required": ["pattern"],
+        },
+    ),
+    (
+        "grep",
+        "Search file contents with a regex",
+        {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}},
+            "required": ["pattern"],
+        },
+    ),
+    (
+        "read",
+        "Read a file",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    ),
 )
 
 
@@ -91,7 +149,7 @@ class OpenCodeProvider(BaseProvider):
             config,
             base_url=profile.chat_profile.base_url(config.base_url).rstrip("/"),
             provider_name=profile.provider_name,
-            default_headers={"User-Agent": "opencode"},
+            default_headers={"User-Agent": opencode_user_agent()},
         )
         self._chat = OpenAIChatTransport(
             client=self._client,
@@ -153,20 +211,20 @@ class OpenCodeProvider(BaseProvider):
     ) -> Mapping[str, str]:
         """Build the x-opencode-* header trio for one upstream request.
 
-        A session value the client already addressed to opencode (or that a
-        harness such as Pi forwarded) goes out verbatim — the client owns
-        that identity. Otherwise the ``fcc_session_id`` the API layer
-        extracted from Claude-shaped headers is mapped to opencode shape.
-        Console Go answers 400 MissingSessionID unless the header carries a
-        value, so Go requests whose client sent no session fall back to a
-        deterministic seed of the conversation's opening; Zen omits the
-        header and lets the gateway report the absence.
+        A session value the client already addressed to opencode in the
+        Identifier shape (or that a harness such as Pi forwarded in that
+        shape) goes out verbatim — the client owns that identity. Anything
+        else is mapped to opencode shape so the free-tier gateway never sees
+        a non-conforming id. Console Go answers 400 MissingSessionID unless
+        the header carries a value, so requests whose client sent no session
+        fall back to a deterministic seed of the conversation's opening for
+        both Go and Zen — the free-tier gateway answers 403 FreeTierError
+        without the header. The upstream User-Agent is always the first-party
+        ``opencode/<version>`` string — the incoming client UA (claude-cli,
+        codex, …) is never forwarded.
         """
 
         headers = {name.lower(): value for name, value in request_headers.items()}
-        user_agent = headers.get("user-agent")
-        if not (user_agent and user_agent.isascii() and user_agent.strip()):
-            user_agent = None
         if request_id is None and request is not None:
             request_id = getattr(request, "fcc_request_id", None) or None
 
@@ -188,18 +246,13 @@ class OpenCodeProvider(BaseProvider):
                     request_id=request_id,
                     verbatim_session=True,
                 )
-                if user_agent:
-                    upstream_headers["User-Agent"] = user_agent
+                upstream_headers["User-Agent"] = opencode_user_agent()
                 return upstream_headers
         session_id: str | None = None
         if request is not None:
             session_id = getattr(request, "fcc_session_id", None) or None
         fallback_seed: str | None = None
-        if (
-            session_id is None
-            and request is not None
-            and self._opencode_profile.provider_id == "opencode_go"
-        ):
+        if session_id is None and request is not None:
             if isinstance(request, MessagesRequest):
                 fallback_seed = conversation_seed(request)
             else:
@@ -213,8 +266,7 @@ class OpenCodeProvider(BaseProvider):
             request_id=request_id,
             fallback_seed=fallback_seed,
         )
-        if user_agent:
-            upstream_headers["User-Agent"] = user_agent
+        upstream_headers["User-Agent"] = opencode_user_agent()
 
         return upstream_headers
 
@@ -251,9 +303,10 @@ class OpenCodeProvider(BaseProvider):
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
+        await ensure_opencode_version(proxy=self._config.proxy)
         snapshot = await self._catalog.snapshot(request_id=request_id)
         route = self._require_route(snapshot, request.model)
-        routed = _routed_messages_request(request, route)
+        routed = _ensure_messages_tools(_routed_messages_request(request, route))
         selected_stream: AsyncIterator[str] | None = None
         try:
             if route.transport is OpenCodeUpstreamTransport.RESPONSES:
@@ -262,7 +315,7 @@ class OpenCodeProvider(BaseProvider):
                     input_tokens=input_tokens,
                     request_id=request_id,
                     response_model=response_model,
-                    reasoning=reasoning,
+                    reasoning=_wire_reasoning(reasoning),
                     endpoint_context=endpoint_context,
                     extra_headers=self._upstream_headers(
                         request_headers or {}, request, request_id
@@ -325,9 +378,10 @@ class OpenCodeProvider(BaseProvider):
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str]:
+        await ensure_opencode_version(proxy=self._config.proxy)
         snapshot = await self._catalog.snapshot(request_id=request_id)
         route = self._require_route(snapshot, request.model)
-        routed = _routed_responses_request(request, route)
+        routed = _ensure_responses_tools(_routed_responses_request(request, route))
         selected_stream: AsyncIterator[str] | None = None
         try:
             if route.transport is OpenCodeUpstreamTransport.RESPONSES:
@@ -336,7 +390,7 @@ class OpenCodeProvider(BaseProvider):
                     input_tokens=input_tokens,
                     request_id=request_id,
                     response_model=response_model,
-                    reasoning=reasoning,
+                    reasoning=_wire_reasoning(reasoning),
                     endpoint_context=endpoint_context,
                     extra_headers=self._upstream_headers(
                         request_headers or {}, request, request_id
@@ -417,3 +471,79 @@ def _routed_responses_request(
         update={"model": route.upstream_model_id},
         deep=True,
     )
+
+
+def _missing_minimal_tools(
+    existing_names: set[str],
+    *,
+    empty: bool = False,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Return free-tier tool definitions whose exact lowercase names are absent.
+
+    Zen free tier requires both lowercase ``bash`` and ``read`` on the wire
+    (capitalized Claude Code names do not count; ``bash``+``edit`` alone also
+    403s). When the client sent no tools at all, the full minimal set is
+    injected; when tools already exist only the two gate names are ensured so
+    custom tool sets stay intact.
+    """
+    if empty:
+        return list(_MINIMAL_TOOLS)
+    required = {"bash", "read"}
+    return [
+        (name, description, schema)
+        for name, description, schema in _MINIMAL_TOOLS
+        if name in required and name not in existing_names
+    ]
+
+
+def _ensure_messages_tools(request: MessagesRequest) -> MessagesRequest:
+    existing_names = {tool.name for tool in request.tools or ()}
+    missing = _missing_minimal_tools(existing_names, empty=not request.tools)
+    if not missing:
+        return request
+    tools = list(request.tools or ())
+    tools.extend(
+        Tool(name=name, description=description, input_schema=schema)
+        for name, description, schema in missing
+    )
+    return request.model_copy(update={"tools": tools}, deep=True)
+
+
+def _ensure_responses_tools(request: OpenAIResponsesRequest) -> OpenAIResponsesRequest:
+    existing_names: set[str] = set()
+    for tool in request.tools or ():
+        if isinstance(tool, Mapping):
+            name = tool.get("name")
+            if not isinstance(name, str):
+                function = tool.get("function")
+                if isinstance(function, Mapping):
+                    name = function.get("name")
+            if isinstance(name, str):
+                existing_names.add(name)
+    missing = _missing_minimal_tools(existing_names, empty=not request.tools)
+    if not missing:
+        return request
+    tools: list[dict[str, Any]] = list(request.tools or ())
+    tools.extend(
+        {
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": schema,
+        }
+        for name, description, schema in missing
+    )
+    return request.model_copy(update={"tools": tools}, deep=True)
+
+
+def _wire_reasoning(reasoning: ReasoningPolicy) -> ReasoningPolicy:
+    """Omit ``effort: none`` on OpenCode Responses upstreams.
+
+    Zen free-tier models such as muse-spark answer 400 for
+    ``reasoning_effort 'none'`` (supported values start at ``minimal``).
+    Dropping the field lets the upstream use its default and keeps the
+    free-tier gate green; OFF intent still filters reasoning on egress.
+    """
+    if reasoning.control is ReasoningControl.OFF:
+        return ReasoningPolicy.provider_default()
+    return reasoning

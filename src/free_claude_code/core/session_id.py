@@ -12,12 +12,14 @@ dashboard next to native opencode sessions.
 
 This module provides a **pure deterministic** mapping so the same Claude
 session id always produces the same opencode-shape id — across processes,
-restarts, and machines — with no cache, no RNG, no clock dependency.
+restarts, and machines — with no RNG and no clock dependency. Short inputs
+(session headers) are memoized; long inputs (conversation seeds) are not, so
+the cache cannot grow with prompt size.
 
 Algorithm:
-    digest   = sha256(input.encode("utf-8"))       # 32 bytes
+    digest    = sha256(input.encode("utf-8"))      # 32 bytes
     hex_part  = digest[:6].hex()                   # 12 lowercase hex chars
-    b62_part  = "".join(BASE62[b % 62] for b in digest[6:20])  # 14 base62 chars
+    b62_part  = digest[6:20].translate(B62_TABLE)  # 14 base62 chars
     return f"ses_{hex_part}{b62_part}"             # 30 chars, opencode-shaped
 
 If the input is ``None`` or empty, the function returns the empty string.
@@ -28,14 +30,16 @@ Also provides :func:`conversation_seed`, a deterministic snapshot of a
 conversation's opening (system prompt + first user message) used as a fallback
 session identity for clients that send no session header. OpenCode Go
 ("Console Go") rejects requests that carry no ``x-opencode-session`` value
-with HTTP 400 ``MissingSessionID``, so a fallback is mandatory there; Zen
-sends no session header at all and lets the gateway report the absence.
+with HTTP 400 ``MissingSessionID``, and the free-tier Zen gateway answers
+403 ``FreeTierError`` without it, so a fallback is mandatory on both lanes.
 
 And :func:`opencode_request_headers`, the single builder for the
 ``x-opencode-*`` header trio so the chat and responses transports cannot drift.
 """
 
 import hashlib
+import re
+from functools import lru_cache
 
 from free_claude_code.core.anthropic.models import MessagesRequest
 
@@ -43,13 +47,31 @@ _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _PREFIX = "ses_"
 _HEX_LEN = 6  # 6 bytes → 12 hex chars (time-shape portion of opencode id)
 _RANDOM_LEN = 14  # 14 base62 chars (random-shape suffix of opencode id)
+_B62_TABLE = bytes(ord(_BASE62[b % 62]) for b in range(256))
+_OPENCODE_SESSION_RE = re.compile(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}\Z")
+_MAX_CACHED_INPUT = 256  # session headers are short; conversation seeds are not
+
+
+def _convert(claude_session_id: str) -> str:
+    digest = hashlib.sha256(claude_session_id.encode("utf-8")).digest()
+    hex_part = digest[:_HEX_LEN].hex()
+    base62_part = (
+        digest[_HEX_LEN : _HEX_LEN + _RANDOM_LEN].translate(_B62_TABLE).decode("ascii")
+    )
+    return f"{_PREFIX}{hex_part}{base62_part}"
+
+
+@lru_cache(maxsize=1024)
+def _convert_cached(claude_session_id: str) -> str:
+    return _convert(claude_session_id)
 
 
 def claude_to_opencode_session_id(claude_session_id: str | None) -> str:
     """Map a Claude/Anthropic session id to an opencode-shaped session id.
 
     Pure function: same input always yields the same output, no I/O, no RNG,
-    no module state, no cache. Safe to call on every request.
+    no clock dependency. Safe to call on every request; short inputs are
+    memoized.
 
     Args:
         claude_session_id: The session id forwarded by Claude Code / SDK
@@ -62,12 +84,9 @@ def claude_to_opencode_session_id(claude_session_id: str | None) -> str:
     """
     if not claude_session_id:
         return ""
-    digest = hashlib.sha256(claude_session_id.encode("utf-8")).digest()
-    hex_part = digest[:_HEX_LEN].hex()
-    base62_part = "".join(
-        _BASE62[b % 62] for b in digest[_HEX_LEN : _HEX_LEN + _RANDOM_LEN]
-    )
-    return f"{_PREFIX}{hex_part}{base62_part}"
+    if len(claude_session_id) <= _MAX_CACHED_INPUT:
+        return _convert_cached(claude_session_id)
+    return _convert(claude_session_id)
 
 
 def _block_text(block: object) -> str:
@@ -112,16 +131,20 @@ def opencode_request_headers(
     """Build the ``x-opencode-*`` header trio for one upstream request.
 
     ``fallback_seed`` (e.g. :func:`conversation_seed`) is mapped only when no
-    client-forwarded session id exists. ``verbatim_session`` forwards an
-    already-opencode-shaped client value (``x-opencode-session`` from Pi, a
-    harness, or a native opencode client) untouched instead of mapping it;
-    mapping stays for Claude-shaped ids extracted into ``fcc_session_id``.
-    When no session identity exists at all the session header is omitted
-    entirely — an empty value is wire-equivalent to absent for gateways but
-    breaks the "no invented identity" contract.
+    client-forwarded session id exists. ``verbatim_session`` forwards a client
+    value only when it already matches the opencode ``Identifier`` shape
+    (``ses_<12hex><14alnum>``); anything else is mapped so the gateway never
+    sees a non-conforming id. Mapping always applies to Claude-shaped ids
+    extracted into ``fcc_session_id``. When no session identity exists at all
+    the session header is omitted entirely — an empty value is
+    wire-equivalent to absent for gateways but breaks the "no invented
+    identity" contract.
     """
     if verbatim_session and claude_session_id:
-        session_id = claude_session_id
+        if _OPENCODE_SESSION_RE.match(claude_session_id):
+            session_id = claude_session_id
+        else:
+            session_id = claude_to_opencode_session_id(claude_session_id)
     else:
         session_id = claude_to_opencode_session_id(claude_session_id)
         if not session_id:

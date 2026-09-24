@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,6 +27,20 @@ os.environ.setdefault("MODEL", "nvidia_nim/test-model")
 os.environ["PTB_TIMEDELTA"] = "1"
 # Tests keep proxy authentication disabled unless a case enables it explicitly.
 os.environ["ANTHROPIC_AUTH_TOKEN"] = ""
+
+
+@pytest.fixture(autouse=True)
+def _seed_opencode_user_agent():
+    """Pin the opencode UA version so tests never hit GitHub or npm."""
+    from free_claude_code.providers.opencode import user_agent as ua
+
+    ua._version = ua.FALLBACK_VERSION
+    ua._refreshed_at = time.monotonic()
+    yield
+    # Leave a fresh stamp without calling time.monotonic(): a prior test may
+    # have patched it with a finite side_effect that is now exhausted.
+    ua._version = ua.FALLBACK_VERSION
+    ua._refreshed_at = float("inf")
 
 
 @pytest.fixture(autouse=True)

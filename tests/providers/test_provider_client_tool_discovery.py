@@ -57,15 +57,25 @@ async def test_provider_discovery_call_and_result_round_trip(
         messages = body["input"] if native else body["messages"]
         result_field = "output" if native else "content"
         step = len(requests)
+        # OpenCode free tier always injects lowercase bash+read alongside
+        # client tools; discovery itself only owns fcc_tool_search on wire.
+        free_tier = {"bash", "read"} if native else set()
         if step == 1:
-            assert len(functions) == 1
-            name = next(iter(functions))
+            discovery = {
+                name: tool for name, tool in functions.items() if name not in free_tier
+            }
+            assert len(discovery) == 1
+            name = next(iter(discovery))
             assert (
-                functions[name]["parameters"]["properties"]["query"]["type"] == "string"
+                discovery[name]["parameters"]["properties"]["query"]["type"] == "string"
             )
             args = '{"query":"agent"}'
         elif step == 2:
-            name = next(name for name in functions if name != "fcc_tool_search")
+            name = next(
+                name
+                for name in functions
+                if name != "fcc_tool_search" and name not in free_tier
+            )
             if not native:
                 assert len(name) <= 64
                 assert all(

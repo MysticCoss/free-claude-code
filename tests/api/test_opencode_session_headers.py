@@ -1,6 +1,7 @@
 """Session identity across real ingress, routing, provider, and SDK boundaries."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from unittest.mock import patch
 
@@ -10,7 +11,9 @@ import pytest
 from openai import AsyncOpenAI
 
 from free_claude_code.config.settings import Settings
+from free_claude_code.core.session_id import claude_to_opencode_session_id
 from free_claude_code.providers.opencode import create_opencode_provider
+from free_claude_code.providers.opencode.user_agent import opencode_user_agent
 from tests.api.support import create_test_app, provider_manager_for_app
 from tests.providers.support import immediate_admission, make_provider_config
 from tests.providers.test_opencode import (
@@ -21,7 +24,15 @@ from tests.providers.test_opencode import (
 
 pytestmark = pytest.mark.asyncio
 
-OPENCODE_USER_AGENT = "opencode/1.18.25 ai-sdk/provider-utils/4.0.38 runtime/bun/1.3.14"
+VALID_SESSION = "ses_98cd96b77333egPHPVV7mm2Css"
+NATIVE_SESSION = claude_to_opencode_session_id("native-session")
+CONVERSATION_A = claude_to_opencode_session_id("conversation-a")
+CONVERSATION_B = claude_to_opencode_session_id("conversation-b")
+CONVERSATION_C = claude_to_opencode_session_id("conversation-c")
+
+
+def _ua() -> str:
+    return opencode_user_agent()
 
 
 def successful_response(request):
@@ -117,13 +128,19 @@ def payload(ingress, provider_id, selector):
 @pytest.mark.parametrize("ingress", ["responses", "messages"])
 @pytest.mark.parametrize(
     "header_name,user_agent",
-    [("User-Agent", OPENCODE_USER_AGENT), ("uSeR-aGeNt", "claude-cli/2.1.0")],
+    [
+        ("User-Agent", _ua()),
+        ("uSeR-aGeNt", "claude-cli/2.1.0"),
+        ("User-Agent", "codex-cli/1.0"),
+    ],
 )
-async def test_upstream_receives_one_original_client_user_agent(
+async def test_upstream_always_receives_first_party_versioned_user_agent(
     provider_id, selector, ingress, header_name, user_agent
 ):
+    assert opencode_user_agent() == "opencode/1.18.32"
+
     async def upstream(request):
-        if request.headers.get_list("user-agent") != [user_agent]:
+        if request.headers.get_list("user-agent") != [_ua()]:
             return httpx2.Response(
                 403,
                 json={
@@ -145,20 +162,19 @@ async def test_upstream_receives_one_original_client_user_agent(
             headers={header_name: user_agent, "X-Session-Id": "native-session"},
         )
         assert response.status_code == 200, response.text
-        assert requests[-1].headers.get_list("user-agent") == [user_agent]
-        assert requests[-1].headers["x-opencode-session"] == "native-session"
+        assert requests[-1].headers.get_list("user-agent") == [_ua()]
+        assert requests[-1].headers["x-opencode-session"] == NATIVE_SESSION
         assert requests[-1].headers["authorization"] == "Bearer test_opencode_key"
-        assert provider._client.default_headers["User-Agent"] == "opencode"
+        assert provider._client.default_headers["User-Agent"] == _ua()
         assert all(
-            request.headers.get_list("user-agent") == ["opencode"]
-            for request in catalogs
+            request.headers.get_list("user-agent") == [_ua()] for request in catalogs
         )
 
 
 @pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
 @pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
 @pytest.mark.parametrize("user_agent", [None, b"", b" \t ", b"client/caf\xe9"])
-async def test_unusable_user_agent_keeps_fallback_after_another_client_request(
+async def test_unusable_client_user_agent_still_sends_first_party_value(
     provider_id, selector, user_agent
 ):
     async with wire_client(provider_id) as (client, provider, requests, _catalogs):
@@ -166,7 +182,7 @@ async def test_unusable_user_agent_keeps_fallback_after_another_client_request(
         previous = await client.post(
             "/v1/responses",
             json=request,
-            headers={"User-Agent": OPENCODE_USER_AGENT, "session-id": "previous"},
+            headers={"User-Agent": "claude-cli/2.1.0", "session-id": "previous"},
         )
         assert previous.status_code == 200, previous.text
         headers = [
@@ -182,9 +198,11 @@ async def test_unusable_user_agent_keeps_fallback_after_another_client_request(
             )
         )
         assert response.status_code == 200, response.text
-        assert requests[-1].headers.get_list("user-agent") == ["opencode"]
-        assert requests[-1].headers["x-opencode-session"] == "current"
-        assert provider._client.default_headers["User-Agent"] == "opencode"
+        assert requests[-1].headers.get_list("user-agent") == [_ua()]
+        assert requests[-1].headers["x-opencode-session"] == (
+            claude_to_opencode_session_id("current")
+        )
+        assert provider._client.default_headers["User-Agent"] == _ua()
 
 
 @pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
@@ -222,7 +240,9 @@ async def test_existing_session_id_reaches_opencode_without_forwarding_other_hea
                 )
                 assert response.status_code == 200, response.text
                 upstream = requests[-1]
-                assert upstream.headers["x-opencode-session"] == conversation
+                assert upstream.headers["x-opencode-session"] == (
+                    claude_to_opencode_session_id(conversation)
+                )
                 assert upstream.headers["authorization"] == "Bearer test_opencode_key"
                 assert "cookie" not in upstream.headers
                 assert "x-private" not in upstream.headers
@@ -236,7 +256,7 @@ async def test_existing_session_id_reaches_opencode_without_forwarding_other_hea
 
 
 @pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
-async def test_session_header_precedence_and_absence_do_not_invent_or_reuse_identity(
+async def test_session_header_precedence_and_absence_fall_back_to_conversation_seed(
     selector,
 ):
     async with wire_client() as (client, _provider, requests, _catalogs):
@@ -245,27 +265,154 @@ async def test_session_header_precedence_and_absence_do_not_invent_or_reuse_iden
             "/v1/responses",
             json=request,
             headers={
-                "x-opencode-session": "explicit-session",
+                "x-opencode-session": VALID_SESSION,
                 "session-id": "native-session",
                 "X-Claude-Code-Session-Id": "claude-session",
                 "session_id": "dsh-session",
                 "x-grok-session-id": "grok-session",
                 "x-meta-ai-gateway-session-id": "muse-session",
                 "x-fcc-launch-id": "launcher-fallback",
-                "User-Agent": OPENCODE_USER_AGENT,
+                "User-Agent": "claude-cli/2.1.0",
             },
         )
         assert response.status_code == 200, response.text
-        assert requests[-1].headers["x-opencode-session"] == "explicit-session"
+        assert requests[-1].headers["x-opencode-session"] == VALID_SESSION
+        assert requests[-1].headers.get_list("user-agent") == [_ua()]
         response = await client.post(
             "/v1/responses",
             json={**request, "prompt_cache_key": "not-a-conversation"},
-            headers={"User-Agent": OPENCODE_USER_AGENT},
+            headers={"User-Agent": _ua()},
         )
-        assert response.status_code == 400
-        assert "MissingSessionID" in response.text
-        assert "x-opencode-session" not in requests[-1].headers
-        assert requests[-1].headers.get_list("user-agent") == [OPENCODE_USER_AGENT]
+        assert response.status_code == 200, response.text
+        assert "x-opencode-session" in requests[-1].headers
+        assert requests[-1].headers["x-opencode-session"].startswith("ses_")
+        assert requests[-1].headers.get_list("user-agent") == [_ua()]
+        first_seed = requests[-1].headers["x-opencode-session"]
+        response = await client.post(
+            "/v1/responses",
+            json={**request, "prompt_cache_key": "not-a-conversation"},
+            headers={"User-Agent": _ua()},
+        )
+        assert response.status_code == 200, response.text
+        assert requests[-1].headers["x-opencode-session"] == first_seed
+
+
+@pytest.mark.parametrize("provider_id", ["opencode_zen", "opencode_go"])
+@pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
+@pytest.mark.parametrize("ingress", ["responses", "messages"])
+async def test_client_without_any_session_header_still_sends_conversation_seed(
+    provider_id, selector, ingress
+):
+    async with wire_client(provider_id) as (client, _provider, requests, _catalogs):
+        for _ in range(2):
+            response = await client.post(
+                f"/v1/{ingress}",
+                json=payload(ingress, provider_id, selector),
+                headers={"User-Agent": _ua()},
+            )
+            assert response.status_code == 200, response.text
+        assert "x-opencode-session" in requests[-1].headers
+        assert requests[-1].headers["x-opencode-session"].startswith("ses_")
+        assert (
+            requests[-1].headers["x-opencode-session"]
+            == requests[-2].headers["x-opencode-session"]
+        )
+
+
+@pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
+@pytest.mark.parametrize("ingress", ["responses", "messages"])
+async def test_minimal_tools_are_injected_when_client_sends_none(selector, ingress):
+    async with wire_client() as (client, _provider, requests, _catalogs):
+        response = await client.post(
+            f"/v1/{ingress}",
+            json=payload(ingress, "opencode_zen", selector),
+            headers={"User-Agent": _ua()},
+        )
+        assert response.status_code == 200, response.text
+        body = json.loads(requests[-1].content)
+        tools = body.get("tools") or []
+        names = set()
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if isinstance(tool.get("name"), str):
+                names.add(tool["name"])
+            function = tool.get("function")
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                names.add(function["name"])
+        assert {"bash", "edit", "glob", "grep", "read"} <= names
+
+
+@pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
+@pytest.mark.parametrize("ingress", ["responses", "messages"])
+async def test_capitalized_client_tools_gain_lowercase_free_tier_names(
+    selector, ingress
+):
+    async with wire_client() as (client, _provider, requests, _catalogs):
+        request = payload(ingress, "opencode_zen", selector)
+        if ingress == "responses":
+            request["tools"] = [
+                {
+                    "type": "function",
+                    "name": "Bash",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                {
+                    "type": "function",
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            ]
+        else:
+            request["tools"] = [
+                {
+                    "name": "Bash",
+                    "description": "Run a command",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+            ]
+        response = await client.post(
+            f"/v1/{ingress}",
+            json=request,
+            headers={"User-Agent": _ua()},
+        )
+        assert response.status_code == 200, response.text
+        body = json.loads(requests[-1].content)
+        names = set()
+        for tool in body.get("tools") or []:
+            if not isinstance(tool, dict):
+                continue
+            if isinstance(tool.get("name"), str):
+                names.add(tool["name"])
+            function = tool.get("function")
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                names.add(function["name"])
+        assert "Bash" in names
+        assert "Read" in names
+        assert {"bash", "read"} <= names
+
+
+@pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
+@pytest.mark.parametrize("ingress", ["responses", "messages"])
+async def test_non_conforming_session_values_map_deterministically(selector, ingress):
+    async with wire_client() as (client, _provider, requests, _catalogs):
+        for conversation in ("explicit-session", "explicit-session", "other-value"):
+            response = await client.post(
+                f"/v1/{ingress}",
+                json=payload(ingress, "opencode_zen", selector),
+                headers={"x-opencode-session": conversation},
+            )
+            assert response.status_code == 200, response.text
+            assert requests[-1].headers["x-opencode-session"] == (
+                claude_to_opencode_session_id(conversation)
+            )
 
 
 @pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
@@ -286,8 +433,9 @@ async def test_launch_fallback_is_stable_until_a_native_conversation_id_is_avail
                 headers={"x-fcc-launch-id": launch_id, "session-id": native_id},
             )
             assert response.status_code == 200, response.text
+            expected_source = native_id or launch_id
             assert requests[-1].headers["x-opencode-session"] == (
-                native_id or launch_id
+                claude_to_opencode_session_id(expected_source)
             )
             assert "x-fcc-launch-id" not in requests[-1].headers
 
@@ -317,11 +465,11 @@ async def test_concurrent_conversations_keep_their_session_ids_during_retry(
         session = request.headers.get("x-opencode-session")
         attempts.append(session)
         user_agents.append(request.headers.get_list("user-agent"))
-        if session == "conversation-a" and attempts.count(session) == 1:
+        if session == CONVERSATION_A and attempts.count(session) == 1:
             first_arrived.set()
             await second_arrived.wait()
             return httpx2.Response(503, json={"error": {"message": "Try again"}})
-        if session == "conversation-b":
+        if session == CONVERSATION_B:
             second_arrived.set()
         return successful_response(request)
 
@@ -339,7 +487,7 @@ async def test_concurrent_conversations_keep_their_session_ids_during_retry(
                     json=request,
                     headers={
                         session_header: "conversation-a",
-                        "User-Agent": OPENCODE_USER_AGENT,
+                        "User-Agent": _ua(),
                     },
                 )
             )
@@ -359,12 +507,12 @@ async def test_concurrent_conversations_keep_their_session_ids_during_retry(
             finally:
                 first.cancel()
                 await asyncio.gather(first, return_exceptions=True)
-        assert attempts == ["conversation-a", "conversation-b", "conversation-a"]
+        assert attempts == [CONVERSATION_A, CONVERSATION_B, CONVERSATION_A]
         assert len(requests) == 3
         assert user_agents == [
-            [OPENCODE_USER_AGENT],
-            ["codex-cli/1.0"],
-            [OPENCODE_USER_AGENT],
+            [_ua()],
+            [_ua()],
+            [_ua()],
         ]
         response = await client.post(
             "/v1/responses",
@@ -372,5 +520,6 @@ async def test_concurrent_conversations_keep_their_session_ids_during_retry(
             headers={session_header: "conversation-c", "User-Agent": ""},
         )
         assert response.status_code == 200, response.text
-        assert requests[-1].headers.get_list("user-agent") == ["opencode"]
-        assert provider._client.default_headers["User-Agent"] == "opencode"
+        assert requests[-1].headers.get_list("user-agent") == [_ua()]
+        assert requests[-1].headers["x-opencode-session"] == CONVERSATION_C
+        assert provider._client.default_headers["User-Agent"] == _ua()

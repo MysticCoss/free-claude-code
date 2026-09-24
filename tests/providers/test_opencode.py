@@ -34,6 +34,7 @@ from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import (
     DEFAULT_REASONING_POLICY,
     ReasoningCapability,
+    ReasoningPolicy,
 )
 from free_claude_code.providers.model_listing import ModelListResponseError
 from free_claude_code.providers.opencode import (
@@ -46,6 +47,7 @@ from free_claude_code.providers.opencode.catalog import (
     OpenCodeUpstreamTransport,
     parse_open_code_catalog,
 )
+from free_claude_code.providers.opencode.user_agent import opencode_user_agent
 from tests.providers.support import (
     capture_openai_chat_wire_body,
     immediate_admission,
@@ -277,7 +279,13 @@ def _provider_with_wire_transports(
     return provider, generation_requests, catalog_requests
 
 
-async def _collect(provider: OpenCodeProvider, model: str, **overrides: object) -> str:
+async def _collect(
+    provider: OpenCodeProvider,
+    model: str,
+    *,
+    _reasoning: ReasoningPolicy | None = None,
+    **overrides: object,
+) -> str:
     return "".join(
         [
             chunk
@@ -285,6 +293,9 @@ async def _collect(provider: OpenCodeProvider, model: str, **overrides: object) 
                 _request(model, **overrides),
                 input_tokens=2,
                 request_id="req_opencode",
+                reasoning=(
+                    _reasoning if _reasoning is not None else DEFAULT_REASONING_POLICY
+                ),
             )
         ]
     )
@@ -323,7 +334,9 @@ def test_client_identifies_as_first_party_opencode_user_agent(
             immediate_admission(provider_name=provider_id),
         )
 
-    assert mock_openai.call_args.kwargs["default_headers"] == {"User-Agent": "opencode"}
+    assert mock_openai.call_args.kwargs["default_headers"] == {
+        "User-Agent": opencode_user_agent()
+    }
 
 
 def test_catalog_resolves_package_precedence_status_alias_and_reasoning() -> None:
@@ -559,7 +572,7 @@ async def test_cold_catalog_load_is_coalesced_and_never_sends_api_key() -> None:
     assert first is second
     assert len(requests) == 1
     assert str(requests[0].url) == OPENCODE_CATALOG_URL
-    assert requests[0].headers["user-agent"] == "opencode"
+    assert requests[0].headers["user-agent"] == opencode_user_agent()
     assert "authorization" not in requests[0].headers
     assert "test_opencode_key" not in repr(requests[0].headers)
 
@@ -698,6 +711,96 @@ async def test_responses_ingress_uses_catalog_responses_transport_natively() -> 
     ]
     assert events[0].data["response"]["id"] == "resp_1"
     assert events[-1].data["response"]["model"] == "responses-selector"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector", ["responses-selector", "chat-selector"])
+@pytest.mark.parametrize("ingress", ["responses", "messages"])
+async def test_toolless_requests_receive_minimal_free_tier_tools(
+    selector: str, ingress: str
+) -> None:
+    provider, generation_requests, _catalog = _provider_with_wire_transports(
+        _catalog_payload()
+    )
+    try:
+        if ingress == "responses":
+            await _collect_responses(provider, selector)
+        else:
+            await _collect(provider, selector)
+    finally:
+        await provider.cleanup()
+
+    payload = json.loads(generation_requests[0].content)
+    tools = payload.get("tools") or []
+    names = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if isinstance(tool.get("name"), str):
+            names.add(tool["name"])
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            names.add(function["name"])
+    assert {"bash", "edit", "glob", "grep", "read"} <= names
+
+
+@pytest.mark.asyncio
+async def test_existing_client_tools_are_kept_and_free_tier_names_are_added() -> None:
+    provider, generation_requests, _catalog = _provider_with_wire_transports(
+        _catalog_payload()
+    )
+    try:
+        await _collect(
+            provider,
+            "responses-selector",
+            tools=[
+                {
+                    "name": "custom_lookup",
+                    "description": "Custom",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "Bash",
+                    "description": "Claude Code bash",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+            ],
+        )
+    finally:
+        await provider.cleanup()
+
+    payload = json.loads(generation_requests[0].content)
+    names = set()
+    for tool in payload.get("tools") or []:
+        if isinstance(tool, dict):
+            if isinstance(tool.get("name"), str):
+                names.add(tool["name"])
+            function = tool.get("function")
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                names.add(function["name"])
+    assert "custom_lookup" in names
+    assert "Bash" in names
+    assert {"bash", "read"} <= names
+
+
+@pytest.mark.asyncio
+async def test_opencode_responses_omits_reasoning_effort_none() -> None:
+    provider, generation_requests, _catalog = _provider_with_wire_transports(
+        _catalog_payload()
+    )
+    try:
+        await _collect(
+            provider,
+            "responses-selector",
+            thinking={"type": "disabled"},
+            _reasoning=ReasoningPolicy.off(),
+        )
+    finally:
+        await provider.cleanup()
+
+    payload = json.loads(generation_requests[0].content)
+    reasoning = payload.get("reasoning")
+    assert reasoning is None or reasoning.get("effort") != "none"
 
 
 @pytest.mark.asyncio

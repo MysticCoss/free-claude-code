@@ -318,7 +318,9 @@ def admin_base_url(
         yield f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
-        thread.join(timeout=5.0)
+        # Generous join: under full-suite xdist load uvicorn lifespan shutdown
+        # can exceed 5s even when the server is healthy.
+        thread.join(timeout=15.0)
         listener.close()
         clear_settings_cache()
         if thread.is_alive():

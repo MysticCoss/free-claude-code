@@ -22,6 +22,7 @@ from free_claude_code.providers.model_listing import (
     optional_input_modalities,
     optional_positive_int,
 )
+from free_claude_code.providers.opencode.user_agent import opencode_user_agent
 
 OPENCODE_CATALOG_URL = "https://models.opencode.ai/api.json"
 _DEFAULT_PACKAGE = "@ai-sdk/openai-compatible"
@@ -253,7 +254,10 @@ class OpenCodeCatalog:
         async def request() -> OpenCodeCatalogSnapshot:
             response = await self._client.get(
                 OPENCODE_CATALOG_URL,
-                headers={"Accept": "application/json", "User-Agent": "opencode"},
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": opencode_user_agent(),
+                },
             )
             try:
                 response.raise_for_status()
