@@ -4,8 +4,9 @@ Kept in its own file so upstream rewrites of ``test_model_listing.py`` or
 ``test_routing.py`` cannot drop it. Covers the desktop-safe id codec
 interop with every catalog provider, the dedicated-port request detection,
 the /v1/models desktop view, the supervisor listener plan, and inbound
-routing. The hex id scheme itself is upstream's; this file pins the fork's
-integration of it (second listener, port default view, [1m] variants).
+routing. The readable munging scheme (hyphen + first-vowel rotation) is
+the fork's own; this file pins its integration (second listener, port
+default view, [1m] variants).
 """
 
 import http.client
@@ -75,9 +76,9 @@ def _settings(
 
 @pytest.mark.parametrize("provider_id", sorted(_PROVIDER_IDS))
 def test_every_catalog_provider_round_trips(provider_id: str) -> None:
-    # The hex desktop ids must decode cleanly for every catalog provider and
-    # pass Desktop's discovery name filter — the fork's desktop view serves
-    # exactly these ids on the dedicated port.
+    # The munged desktop ids must decode cleanly for every catalog provider
+    # and pass Desktop's discovery name filter — the fork's desktop view
+    # serves exactly these ids on the dedicated port.
     ref = f"{provider_id}/some-model"
     model_id = desktop_model_id(ref)
     assert _desktop_name_filter_passes(model_id)
@@ -259,7 +260,7 @@ def test_desktop_catalog_entries_all_survive_desktop_discovery_filter() -> None:
 def test_desktop_ids_encode_blacklisted_vendor_names() -> None:
     # Desktop's blacklist wins over the claude-substring pass, so raw
     # vendor-carrying ids would be filtered out — the desktop view must
-    # serve the encoded hex ids instead, which pass on the name alone.
+    # serve the munged ids instead, which pass on the name alone.
     assert not _desktop_name_filter_passes("claude-deepseek-deepseek-chat")
     assert not _desktop_name_filter_passes(
         "claude-3-freecc-no-thinking/open_router/qwen/qwen3.8-flash"
@@ -342,9 +343,9 @@ def test_desktop_listener_advertises_claude_prefixed_ids() -> None:
 def test_desktop_listener_annotates_1m_base_entries() -> None:
     # Desktop synthesizes the `[1m]` picker row itself from an annotated
     # base entry (gateway contract): the desktop view carries no separate
-    # hex-`[1m]` id (a suffix hidden in the hex payload never pairs), and
-    # the base entry advertises `supports_1m` (+ `max_input_tokens` when
-    # the provider catalog reports a context window).
+    # munged-`[1m]` id (a suffix folded into the munged id never pairs),
+    # and the base entry advertises `supports_1m` (+ `max_input_tokens`
+    # when the provider catalog reports a context window).
     app = create_test_app(
         _settings(desktop=True, fcc_1m_models="deepseek/deepseek-chat")
     )
@@ -371,7 +372,7 @@ def test_desktop_listener_annotates_1m_base_entries() -> None:
     assert "max_input_tokens" not in other
 
 
-def test_desktop_listener_emits_no_standalone_hex_1m_ids() -> None:
+def test_desktop_listener_emits_no_standalone_munged_1m_ids() -> None:
     ids = _get_model_ids(
         _settings(desktop=True, fcc_1m_models="deepseek/deepseek-chat"),
         {},
@@ -412,7 +413,7 @@ def test_desktop_port_normal_when_feature_disabled() -> None:
     assert "claude-deepseek-deepseek-chat" not in ids
 
 
-def test_router_routes_desktop_hex_id() -> None:
+def test_router_routes_desktop_munged_id() -> None:
     router = ModelRouter(_settings(desktop=False, model="groq/llama-3.3-70b"))
 
     model_id = desktop_model_id("deepseek/deepseek-v4-flash")
@@ -434,9 +435,9 @@ def test_router_strips_1m_suffix_from_desktop_id() -> None:
 
 @pytest.mark.parametrize("no_thinking", [False, True])
 def test_router_routes_desktop_synthesized_1m_id(no_thinking: bool) -> None:
-    # Desktop appends a literal `[1m]` to the discovered base hex id when
-    # it synthesizes the 1M picker row; decode must tolerate the suffix
-    # so the router still reaches the bare upstream model.
+    # Desktop appends a literal `[1m]` to the discovered base munged id
+    # when it synthesizes the 1M picker row; decode must tolerate the
+    # suffix so the router still reaches the bare upstream model.
     router = ModelRouter(_settings(desktop=True))
 
     synthesized = desktop_model_id(

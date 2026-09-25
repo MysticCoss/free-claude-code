@@ -204,14 +204,14 @@ def _build_claude_models_response(
     Catalog members listed in ``one_m_refs`` additionally get
     ``[1m]``-suffixed variants so Claude Code grants the full 1M-token
     context window for those upstreams. On the desktop view the suffix
-    stays literal (Claude Code's discovery contract): the base hex entry
-    is annotated instead, and Desktop synthesizes the ``[1m]`` picker
-    row itself — a suffix hidden inside the hex payload never pairs.
+    stays literal (Claude Code's discovery contract): the base readable
+    entry is annotated instead, and Desktop synthesizes the ``[1m]``
+    picker row itself — a suffix folded into the munged id never pairs.
     """
     models = list(SUPPORTED_CLAUDE_MODELS)
     for model in catalog.models:
         ref = model.provider_model_ref
-        # Desktop view: annotate the base hex entry and let Desktop
+        # Desktop view: annotate the base readable entry and let Desktop
         # synthesize the `[1m]` picker row itself (gateway contract).
         in_one_m = desktop and ref in one_m_refs
         if model.supports_reasoning is not False:
