@@ -147,7 +147,12 @@ def test_desktop_model_view_preserves_labels_and_query_precedence():
 
 @pytest.mark.parametrize(
     "model",
-    ["claude-fcc/", "claude-fcc/zz", "claude-fcc", desktop_model_id("unknown/model")],
+    [
+        "claude-fcc/",
+        "claude-fcc/z+z",
+        "claude-fcc",
+        desktop_model_id("unknown/model"),
+    ],
 )
 def test_invalid_desktop_model_never_routes_to_default(model):
     with pytest.raises(InvalidRequestError):

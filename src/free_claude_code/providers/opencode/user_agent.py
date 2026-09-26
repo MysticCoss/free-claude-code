@@ -27,7 +27,12 @@ _VERSION_RE = re.compile(r"\d+\.\d+")
 
 _version = FALLBACK_VERSION
 # Stale at import so the first dispatch refreshes; tests re-seed freshness.
-_refreshed_at = 0.0
+# This must not be 0.0: time.monotonic() counts from boot, so on a machine
+# with less uptime than _TTL_S (every fresh CI runner, any rebooted host)
+# 0.0 reads as "refreshed just now" and the first dispatch would serve the
+# fallback version without ever trying the network. -inf is stale on every
+# clock.
+_refreshed_at = float("-inf")
 
 
 def opencode_user_agent() -> str:
