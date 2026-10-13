@@ -77,6 +77,18 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
         async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
             status_url = f"http://127.0.0.1:{port}/admin/api/status"
             old_instance = (await client.get(status_url)).json()["instance_id"]
+            # HTTP startup precedes background Code storage initialization.
+            bootstrap_url = f"http://127.0.0.1:{port}/admin/api/code/bootstrap"
+            async with asyncio.timeout(30):
+                while True:
+                    response = await client.get(bootstrap_url)
+                    assert response.status_code == 200, response.text
+                    storage = response.json()["storage"]
+                    if storage["state"] == "ready":
+                        break
+                    assert storage["state"] == "starting", storage
+                    assert thread.is_alive()
+                    await asyncio.sleep(0.01)
             events_url = f"http://127.0.0.1:{port}/admin/api/code/events"
             async with (
                 client.stream("GET", events_url) as first,
@@ -117,3 +129,14 @@ async def test_supervisor_drains_admin_event_feed_without_forced_cancellation(
     assert "timeout graceful shutdown exceeded" not in caplog.text
     assert all(app.runtime.is_closed for app in apps)
     assert len(apps) == (2 if restart else 1)
+    starts = [
+        extra
+        for record in caplog.records
+        if (extra := getattr(record, "extra", {})).get("event") == "server.starting"
+    ]
+    assert [extra["instance_id"] for extra in starts] == [
+        app.runtime.instance_id for app in apps
+    ]
+    assert starts[0]["instance_id"] == old_instance
+    if restart:
+        assert starts[1]["instance_id"] == new_status["instance_id"]

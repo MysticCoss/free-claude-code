@@ -2,14 +2,8 @@
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
-from typing import cast
+from dataclasses import dataclass, field
 
-from free_claude_code.core.history_replay import (
-    ReplayOrigin,
-    ReplayRecord,
-    encode_replay,
-)
 from free_claude_code.core.json_types import JsonObject, JsonValue
 
 from .native import NativeMessagesError
@@ -32,6 +26,14 @@ class _Block:
     fragments: dict[str, list[str]] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class CompletedMessagesBlock:
+    """Completed metadata and opaque streamed tool input, kept off the wire."""
+
+    body: JsonObject
+    tool_arguments: str | None = None
+
+
 class NativeMessagesStreamState:
     """Validate one upstream lifecycle without rewriting protocol identities."""
 
@@ -45,7 +47,7 @@ class NativeMessagesStreamState:
 
     def accept(
         self, event_type: str, payload: Mapping[str, JsonValue]
-    ) -> JsonObject | None:
+    ) -> CompletedMessagesBlock | None:
         if self.completed:
             raise NativeMessagesError("Messages event arrived after message_stop.")
         try:
@@ -216,31 +218,24 @@ class NativeMessagesStreamState:
             raise NativeMessagesError(
                 "Completed native thinking requires its signature."
             )
-        if block.body["type"] == "tool_use" and block.parts:
-            try:
-                value = cast(JsonValue, json.loads("".join(block.parts)))
-                if not isinstance(value, Mapping):
-                    raise NativeMessagesError(
-                        "Native tool arguments must decode to an object."
-                    )
-                json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            except (ValueError, UnicodeError, RecursionError) as exc:
-                raise NativeMessagesError(
-                    "Native tool arguments are incomplete or invalid JSON."
-                ) from exc
-            block.body["input"] = dict(value)
+        arguments = None
+        if block.body["type"] == "tool_use":
+            arguments = (
+                "".join(block.parts)
+                if block.parts
+                else json.dumps(
+                    block.body["input"], ensure_ascii=False, separators=(",", ":")
+                )
+            )
         self._blocks.pop(index)
-        return block.body
+        return CompletedMessagesBlock(block.body, arguments)
 
 
 class NativeMessagesRelay:
     """Preserve upstream IDs, indexes, fields and event order for Messages clients."""
 
-    def __init__(
-        self, *, public_model: str, replay_origin: ReplayOrigin | None = None
-    ) -> None:
+    def __init__(self, *, public_model: str) -> None:
         self._public_model = public_model
-        self._replay_origin = replay_origin
         self._state = NativeMessagesStreamState()
 
     @property
@@ -252,54 +247,14 @@ class NativeMessagesRelay:
         return self._state.stop_reason
 
     def feed(self, event_type: str, payload: Mapping[str, JsonValue]) -> str:
-        completed = self._state.accept(event_type, payload)
+        self._state.accept(event_type, payload)
         body = dict(payload)
         if event_type == "message_start":
             message = body.get("message")
             if not isinstance(message, dict):
                 raise AssertionError("Validated message_start must contain a message.")
             body["message"] = {**message, "model": self._public_model}
-            if (
-                self._replay_origin is not None
-                and isinstance(message.get("model"), str)
-                and message["model"]
-            ):
-                self._replay_origin = replace(
-                    self._replay_origin, model=message["model"]
-                )
-        prefix = ""
-        if self._replay_origin is not None:
-            block = body.get("content_block")
-            if event_type == "content_block_start" and isinstance(block, dict):
-                if block.get("type") == "thinking":
-                    body["content_block"] = {**block, "signature": ""}
-                elif block.get("type") == "redacted_thinking":
-                    body["content_block"] = {
-                        **block,
-                        "data": encode_replay(ReplayRecord(self._replay_origin, block)),
-                    }
-            delta = body.get("delta")
-            if (
-                event_type == "content_block_delta"
-                and isinstance(delta, dict)
-                and delta.get("type") == "signature_delta"
-            ):
-                return ""
-            if (
-                completed is not None
-                and completed.get("type") == "thinking"
-                and completed.get("signature")
-            ):
-                signature = encode_replay(ReplayRecord(self._replay_origin, completed))
-                prefix = _event(
-                    "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": body["index"],
-                        "delta": {"type": "signature_delta", "signature": signature},
-                    },
-                )
-        return prefix + _event(event_type, body)
+        return _event(event_type, body)
 
 
 def _event(kind: str, payload: JsonObject) -> str:

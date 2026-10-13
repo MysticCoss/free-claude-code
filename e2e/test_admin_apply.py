@@ -3,7 +3,7 @@
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from e2e.provider_support import close_provider, open_provider
+from e2e.provider_support import api_key_input, close_provider, open_provider
 
 
 def test_apply_is_the_only_config_action_and_retains_invalid_edits(
@@ -47,8 +47,36 @@ def test_apply_is_the_only_config_action_and_retains_invalid_edits(
 def test_key_rejection_retains_edits_and_restores_focus(
     page: Page, admin_base_url: str
 ):
-    pending: list[Route] = []
-    page.route("**/admin/api/config/apply", lambda route: pending.append(route))
+    request_count = 0
+
+    def reject_key(route: Route) -> None:
+        nonlocal request_count
+        request_count += 1
+        expect(page.locator("#messageArea")).to_have_text("Checking API keys…")
+        expect(page.locator("#view-providers")).to_have_attribute("inert", "")
+        expect(page.locator("#applyButton")).to_be_disabled()
+        submitted = route.request.post_data_json
+        assert isinstance(submitted, dict)
+        assert set(submitted["values"]) == {"MISTRAL_API_KEY"}
+        assert submitted["values"]["MISTRAL_API_KEY"]["entries"] == [
+            {"value": "bad-key"}
+        ]
+        route.fulfill(
+            json={
+                "applied": False,
+                "errors": ["Rejected key"],
+                "credential_checks": [
+                    {
+                        "index": 0,
+                        "key": "MISTRAL_API_KEY",
+                        "status": "rejected",
+                        "message": "Check this API key.",
+                    }
+                ],
+            }
+        )
+
+    page.route("**/admin/api/config/apply", reject_key)
     page.goto(f"{admin_base_url}/admin")
     expect(page.locator("#messageArea")).to_have_text("")
     page.get_by_role("button", name="Model Config", exact=True).click()
@@ -56,41 +84,21 @@ def test_key_rejection_retains_edits_and_restores_focus(
     other.fill("open_router/other-edit")
     page.get_by_role("button", name="Providers", exact=True).click()
     open_provider(page, "mistral")
-    key = page.locator("#field-MISTRAL_API_KEY")
+    key = api_key_input(page, "MISTRAL_API_KEY")
     key.fill("bad-key")
-    page.get_by_role("button", name="Save", exact=True).click()
-    expect(page.locator("#messageArea")).to_have_text("Checking API keys…")
-    expect(page.locator("#view-providers")).to_have_attribute("inert", "")
-    expect(page.locator("#applyButton")).to_be_disabled()
-    assert len(pending) == 1
-    submitted = pending[0].request.post_data_json
-    assert isinstance(submitted, dict)
-    assert submitted["values"] == {
-        "MISTRAL_API_KEY": "bad-key",
-    }
-    pending.pop().fulfill(
-        json={
-            "applied": False,
-            "errors": ["Rejected key"],
-            "credential_checks": [
-                {
-                    "key": "MISTRAL_API_KEY",
-                    "status": "rejected",
-                    "message": "Check this API key.",
-                }
-            ],
-        }
-    )
+    with page.expect_response("**/admin/api/config/apply"):
+        page.get_by_role("button", name="Save", exact=True).click()
     expect(key).to_be_focused()
     expect(key).to_have_attribute("aria-invalid", "true")
-    expect(page.locator("#field-MISTRAL_API_KEY-error")).to_have_text(
+    expect(page.locator("#field-MISTRAL_API_KEY-1-result")).to_have_text(
         "Check this API key."
     )
+    assert request_count == 1
     expect(key).to_have_value("bad-key")
     expect(other).to_have_value("open_router/other-edit")
     expect(page.locator("#dirtyState")).to_have_text("1 unsaved change")
     key.fill("corrected")
-    expect(page.locator("#field-MISTRAL_API_KEY-error")).to_have_count(0)
+    expect(page.locator("#field-MISTRAL_API_KEY-1-result")).to_be_hidden()
     expect(page.locator("#saveProvider")).to_be_enabled()
     close_provider(page)
     open_provider(page, "open_router")
@@ -103,7 +111,8 @@ def test_unverified_warning_survives_apply(
 ):
     availability: list[Route] = []
     page.route(
-        "**/admin/api/providers/local-status", lambda route: availability.append(route)
+        "**/admin/api/providers/lmstudio/local-status",
+        lambda route: availability.append(route),
     )
     page.route(
         "**/admin/api/config/apply",
@@ -118,6 +127,7 @@ def test_unverified_warning_survives_apply(
                 },
                 "credential_checks": [
                     {
+                        "index": 0,
                         "key": "NVIDIA_NIM_API_KEY",
                         "status": "unverified",
                         "message": "Verification unavailable.",
@@ -135,7 +145,7 @@ def test_unverified_warning_survives_apply(
     page.goto(f"{admin_base_url}/admin")
     expect(page.locator("#messageArea")).to_have_text("")
     open_provider(page, "nvidia_nim")
-    page.locator("#field-NVIDIA_NIM_API_KEY").fill("new-key")
+    api_key_input(page, "NVIDIA_NIM_API_KEY").fill("new-key")
     page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#messageArea")).to_contain_text("Verification unavailable.")
     expect(page.locator("#dirtyState")).to_have_text("No changes")
@@ -144,16 +154,17 @@ def test_unverified_warning_survives_apply(
     expect(page.locator("#messageArea")).to_contain_text("Verification unavailable.")
 
     current = page.locator('[data-provider-check-result="lmstudio"]')
-    with page.expect_response("**/admin/api/providers/local-status") as response:
+    with page.expect_response(
+        "**/admin/api/providers/lmstudio/local-status"
+    ) as response:
         old = availability.pop(0)
         if restart:
             old.fulfill(status=503, json={"detail": "Old check failed"})
         else:
             payload = old.fetch().json()
-            for provider in payload["providers"]:
-                provider.update(
-                    status="offline", label="Offline", message="Old availability result"
-                )
+            payload.update(
+                status="offline", label="Offline", message="Old availability result"
+            )
             old.fulfill(json=payload)
     response.value.finished()
     page.evaluate("() => new Promise(requestAnimationFrame)")
@@ -176,17 +187,18 @@ def test_apply_network_error_unlocks_form_and_keeps_edits(
     page.goto(f"{admin_base_url}/admin")
     expect(page.locator("#messageArea")).to_have_text("")
     open_provider(page, "nvidia_nim")
-    key = page.locator("#field-NVIDIA_NIM_API_KEY")
+    key = api_key_input(page, "NVIDIA_NIM_API_KEY")
     key.fill("unsaved-key")
     page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#messageArea")).to_contain_text("Could not apply settings")
     expect(key).to_have_value("unsaved-key")
     expect(key).to_be_editable()
-    expect(page.locator("#saveProvider")).to_be_enabled()
+    expect(page.locator("#saveProvider")).to_be_disabled()
 
 
 def test_restart_waits_for_a_new_running_server(page: Page, admin_base_url: str):
-    pending: list[Route] = []
+    status = {"status": "running", "instance_id": "old-server"}
+    status_url = f"{admin_base_url}/admin/api/status"
     page.route(
         "**/admin/api/config/apply",
         lambda route: route.fulfill(
@@ -206,21 +218,25 @@ def test_restart_waits_for_a_new_running_server(page: Page, admin_base_url: str)
     page.goto(f"{admin_base_url}/admin")
     expect(page.locator("#messageArea")).to_have_text("")
     page.wait_for_function("!state.startupRequest && !state.startupTimer")
-    page.route("**/admin/api/status", lambda route: pending.append(route))
+    page.route(status_url, lambda route: route.fulfill(json=status))
     open_provider(page, "nvidia_nim")
-    page.locator("#field-NVIDIA_NIM_API_KEY").fill("new-key")
+    api_key_input(page, "NVIDIA_NIM_API_KEY").fill("new-key")
     with page.expect_request("**/admin/api/status"):
         page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#applyButton")).to_have_text("Reconnecting…")
-    for status in (
+    for next_status in (
         {"status": "running", "instance_id": "old-server"},
         {"status": "stopping", "instance_id": "new-server"},
     ):
-        with page.expect_request("**/admin/api/status"):
-            pending.pop(0).fulfill(json=status)
+        with page.expect_response(
+            lambda response, expected=next_status: (
+                response.url == status_url and response.json() == expected
+            )
+        ):
+            status = next_status
         expect(page.locator("#view-providers")).to_have_attribute("inert", "")
         expect(page.locator("#dirtyState")).to_have_text("Changes saved")
-    pending.pop(0).fulfill(json={"status": "running", "instance_id": "new-server"})
+    status = {"status": "running", "instance_id": "new-server"}
     expect(page.locator('[data-provider="nvidia_nim"]')).to_be_enabled()
     expect(page.locator("#dirtyState")).to_have_text("No changes")
     expect(page.locator("#messageArea")).to_have_text("Applied")
@@ -230,10 +246,12 @@ def test_restart_timeout_can_reconnect_without_resubmitting_keys(
     page: Page, admin_base_url: str
 ):
     ready = False
-    submissions: list[object] = []
+    submissions: list[dict] = []
 
     def apply_result(route: Route):
-        submissions.append(route.request.post_data_json)
+        payload = route.request.post_data_json
+        assert isinstance(payload, dict)
+        submissions.append(payload)
         route.fulfill(
             json={
                 "applied": True,
@@ -246,6 +264,7 @@ def test_restart_timeout_can_reconnect_without_resubmitting_keys(
                 },
                 "credential_checks": [
                     {
+                        "index": 0,
                         "key": "NVIDIA_NIM_API_KEY",
                         "status": "unverified",
                         "message": "Verification unavailable.",
@@ -266,7 +285,7 @@ def test_restart_timeout_can_reconnect_without_resubmitting_keys(
     expect(page.locator("#messageArea")).to_have_text("")
     page.clock.install()
     open_provider(page, "nvidia_nim")
-    page.locator("#field-NVIDIA_NIM_API_KEY").fill("new-key")
+    api_key_input(page, "NVIDIA_NIM_API_KEY").fill("new-key")
     with page.expect_request("**/admin/api/status"):
         page.get_by_role("button", name="Save", exact=True).click()
     expect(page.locator("#applyButton")).to_have_text("Reconnecting…")
@@ -284,7 +303,11 @@ def test_restart_timeout_can_reconnect_without_resubmitting_keys(
     reconnect.click()
     expect(page.locator('[data-provider="nvidia_nim"]')).to_be_enabled()
     expect(page.locator("#messageArea")).to_contain_text("Verification unavailable.")
-    assert submissions == [{"values": {"NVIDIA_NIM_API_KEY": "new-key"}}]
+    assert len(submissions) == 1
+    assert set(submissions[0]["values"]) == {"NVIDIA_NIM_API_KEY"}
+    assert submissions[0]["values"]["NVIDIA_NIM_API_KEY"]["entries"] == [
+        {"value": "new-key"}
+    ]
 
 
 def test_restart_to_another_local_origin_keeps_the_warning(
@@ -305,6 +328,7 @@ def test_restart_to_another_local_origin_keeps_the_warning(
                 },
                 "credential_checks": [
                     {
+                        "index": 0,
                         "key": "NVIDIA_NIM_API_KEY",
                         "status": "unverified",
                         "message": "Verification unavailable.",
@@ -323,7 +347,7 @@ def test_restart_to_another_local_origin_keeps_the_warning(
     page.goto(f"{admin_base_url}/admin")
     expect(page.locator("#messageArea")).to_have_text("")
     open_provider(page, "nvidia_nim")
-    page.locator("#field-NVIDIA_NIM_API_KEY").fill("new-key")
+    api_key_input(page, "NVIDIA_NIM_API_KEY").fill("new-key")
     page.get_by_role("button", name="Save", exact=True).click()
     page.wait_for_url(target)
     expect(page.locator('[data-provider="nvidia_nim"]')).to_be_enabled()

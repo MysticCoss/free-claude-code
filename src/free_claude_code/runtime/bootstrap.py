@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 from free_claude_code.api.app import create_app
 from free_claude_code.api.ports import ApiServices
 from free_claude_code.application.code_sessions import CodeService
+from free_claude_code.config.api_keys import first_api_key
 from free_claude_code.config.loader import ManagedConfigStore
 from free_claude_code.config.logging_config import configure_logging
 from free_claude_code.config.paths import (
-    code_database_path,
     code_lock_path,
+    fcc_database_path,
+    legacy_code_database_path,
     server_log_path,
 )
 from free_claude_code.config.settings import Settings
@@ -34,6 +36,7 @@ from .codex_app_server import CodexHarnessFactory
 from .codex_catalog import CodexModelCatalogPublisher
 from .configuration import ConfigurationService
 from .provider_manager import ProviderRuntimeManager
+from .sqlite_database import SQLiteDatabase
 from .web_tools.client import HTTPWebToolsClient
 
 
@@ -73,14 +76,18 @@ def build_asgi_app(
         ),
         model_catalog_publisher=CodexModelCatalogPublisher(),
     )
+    database = SQLiteDatabase(
+        fcc_database_path(), code_lock_path(), legacy_path=legacy_code_database_path()
+    )
     code_service = CodeService(
-        SQLiteCodeStore(code_database_path(), code_lock_path()),
+        SQLiteCodeStore(database),
         CodexHarnessFactory(provider_manager),
     )
     runtime = ApplicationRuntime(
         provider_manager,
         configuration=ConfigurationService(ManagedConfigStore()),
         code_service=code_service,
+        database=database,
         transcriber=None,
         transcriber_factory=_create_transcriber,
         restart_callback=restart_callback,
@@ -134,7 +141,9 @@ async def _create_transcriber(settings: Settings) -> Transcriber | None:
             return partial(
                 NvidiaNimTranscriber,
                 model=settings.whisper_model,
-                api_key=_required_voice_key(settings.nvidia_nim_api_key),
+                api_key=_required_voice_key(
+                    first_api_key(settings.nvidia_nim_api_keys)
+                ),
             )
         from free_claude_code.messaging.transcription import TranscriptionService
 
@@ -142,7 +151,7 @@ async def _create_transcriber(settings: Settings) -> Transcriber | None:
             TranscriptionService,
             model=settings.whisper_model,
             device=settings.whisper_device,
-            huggingface_api_key=settings.huggingface_api_key,
+            huggingface_api_key=first_api_key(settings.huggingface_api_keys),
         )
 
     constructor = await run_sync_owned(load)

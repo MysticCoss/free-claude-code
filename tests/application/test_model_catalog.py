@@ -7,7 +7,44 @@ from free_claude_code.application.model_catalog import (
 )
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.application.ports import ModelCatalogSnapshot
+from free_claude_code.config.custom_providers import CustomProviderDefinition
+from free_claude_code.config.model_refs import ModelFallback
 from free_claude_code.config.settings import Settings
+
+
+def test_custom_display_names_sort_as_labels_without_changing_model_identity():
+    names = ["Team/West", "/Gateway", "Team", "z"]
+    definitions = tuple(
+        CustomProviderDefinition(
+            provider_id=f"custom_{index:032x}",
+            display_name=name,
+            base_url="https://gateway.example/v1",
+        )
+        for index, name in enumerate(names)
+    )
+    settings = Settings(
+        custom_providers=definitions, model=f"{definitions[0].provider_id}/Z"
+    )
+    infos = tuple(
+        ProviderModelInfo(f"{definition.provider_id}/{model}")
+        for definition in definitions
+        for model in ("Z", "org/m")
+    )
+    snapshot = ModelCatalogSnapshot(settings, infos)
+    catalog = read_model_catalog(snapshot)
+    assert [model.display_name for model in catalog.models] == [
+        f"{name}/{model}"
+        for name in ("/Gateway", "Team", "Team/West", "z")
+        for model in ("org/m", "Z")
+    ]
+    assert {model.provider_model_ref for model in catalog.models} == {
+        info.model_id for info in infos
+    }
+    assert catalog.default_model_id == settings.model
+    assert (
+        read_model_catalog(replace(snapshot, model_infos=tuple(reversed(infos))))
+        == catalog
+    )
 
 
 def test_catalog_sorts_components_and_preserves_exact_identity_and_default():
@@ -17,7 +54,10 @@ def test_catalog_sorts_components_and_preserves_exact_identity_and_default():
         model_opus=None,
         model_sonnet=None,
         model_haiku=None,
-        model_fallbacks=("wafer/z", "deepseek/a"),
+        model_fallbacks=(
+            ModelFallback(model="wafer/z"),
+            ModelFallback(model="deepseek/a"),
+        ),
     )
     infos = (
         ProviderModelInfo("alpha-2/model"),
@@ -54,7 +94,10 @@ def test_catalog_sorts_components_and_preserves_exact_identity_and_default():
         model for model in catalog.models if model.wire_slug == catalog.default_model_id
     )
     assert selected.context_window_tokens == 32000
-    assert settings.model_fallbacks == ("wafer/z", "deepseek/a")
+    assert settings.model_fallbacks == (
+        ModelFallback(model="wafer/z"),
+        ModelFallback(model="deepseek/a"),
+    )
 
 
 def test_catalog_retains_configured_models_and_enriches_each_reference_once():
@@ -64,7 +107,7 @@ def test_catalog_retains_configured_models_and_enriches_each_reference_once():
         model_fable=None,
         model_sonnet=None,
         model_haiku="deepseek/undiscovered",
-        model_fallbacks=("open_router/shared",),
+        model_fallbacks=(ModelFallback(model="open_router/shared"),),
     )
     info = ProviderModelInfo("open_router/shared", context_window_tokens=65536)
     catalog = read_model_catalog(ModelCatalogSnapshot(settings, (info,)))

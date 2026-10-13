@@ -1,6 +1,6 @@
 from playwright.sync_api import expect
 
-from e2e.provider_support import close_provider, open_provider
+from e2e.provider_support import api_key_input, close_provider, open_provider
 from e2e.test_code_sessions import create_session
 
 
@@ -42,7 +42,7 @@ def test_provider_and_messaging_progress_preserve_settings(page, admin_base_url)
     )
     page.get_by_role("button", name="Providers", exact=True).click()
     open_provider(page, "nvidia_nim")
-    key = page.locator("#field-NVIDIA_NIM_API_KEY")
+    key = api_key_input(page, "NVIDIA_NIM_API_KEY")
     key.fill("unsaved-key")
     starting = False
     page.wait_for_function("state.startup?.startup?.providers?.open_router === 'ready'")
@@ -73,7 +73,16 @@ def test_codex_connect_waits_for_catalog_and_recovers_from_publication_error(
         route.fulfill(json=data)
 
     page.route("**/admin/api/status", status)
-    page.goto(f"{admin_base_url}/admin/integrations")
+    with (
+        page.expect_response(
+            "**/admin/api/integrations/claude-vscode"
+        ) as claude_status,
+        page.expect_response("**/admin/api/integrations/codex") as codex_status,
+    ):
+        page.goto(f"{admin_base_url}/admin/integrations")
+    claude_status.value.finished()
+    codex_status.value.finished()
+    page.wait_for_function("state.startup?.startup?.catalog_file === 'starting'")
     connect = page.locator("#openCodexIntegration")
     expect(connect).to_be_disabled()
     expect(connect).to_have_attribute("aria-busy", "true")

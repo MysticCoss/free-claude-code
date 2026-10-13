@@ -38,6 +38,7 @@ from .request_ids import (
     get_request_id,
 )
 from .request_lifetime import ClientRequestLifetimeMiddleware
+from .request_outcomes import RequestOutcomeMiddleware
 from .routes import router
 from .validation_log import summarize_request_validation_body
 
@@ -48,6 +49,7 @@ def create_app(services: ApiServices) -> FastAPI:
     app.state.services = services
     app.add_middleware(AdminNoStoreMiddleware)
     app.add_middleware(ClientRequestLifetimeMiddleware)
+    app.add_middleware(RequestOutcomeMiddleware)
     app.add_middleware(RequestCorrelationMiddleware)
 
     app.include_router(admin_router)
@@ -108,6 +110,16 @@ def create_app(services: ApiServices) -> FastAPI:
             context="Request validation failed",
             status_code=422,
         )
+        if request.url.path == "/admin/api/config/apply":
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [
+                        {key: error[key] for key in ("loc", "msg", "type")}
+                        for error in exc.errors()
+                    ]
+                },
+            )
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(ApplicationError)

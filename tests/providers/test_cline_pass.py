@@ -17,7 +17,6 @@ from free_claude_code.core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
-from free_claude_code.core.history_replay import decode_replay
 from free_claude_code.core.json_types import JsonObject, JsonValue
 from free_claude_code.core.reasoning import ReasoningPolicy
 from free_claude_code.providers.model_listing import ModelListResponseError
@@ -40,8 +39,6 @@ def cline_pass_provider() -> OpenAIChatProvider:
         make_provider_config(
             api_key="test-cline-key",
             base_url=CLINE_DEFAULT_BASE,
-            rate_limit=10,
-            rate_window=60,
         ),
         admission=immediate_admission(provider_name="cline_pass"),
     )
@@ -67,8 +64,6 @@ def _provider_with_transport(
             make_provider_config(
                 api_key=api_key,
                 base_url=CLINE_DEFAULT_BASE,
-                rate_limit=10,
-                rate_window=60,
             ),
             admission=immediate_admission(provider_name="cline_pass"),
         )
@@ -278,10 +273,7 @@ def test_build_request_body_replays_only_opaque_reasoning_details(
         message for message in body["messages"] if message["role"] == "assistant"
     )
 
-    assert (
-        assistant["content"]
-        == "[Earlier reasoning]\nNeed a tool.\n\nI will inspect it."
-    )
+    assert assistant["content"] == "Need a tool.\n\nI will inspect it."
     assert assistant["reasoning_details"] == [detail]
     assert "reasoning" not in assistant
     assert "reasoning_content" not in assistant
@@ -334,12 +326,11 @@ async def test_stream_uses_upstream_sse_and_preserves_reasoning_details(
     assert thinking_content(events) == "plan "
     assert text_content(events) == "done"
     records = [
-        decode_replay(event.data["delta"]["signature"]).native
+        event.data["delta"]["signature"]
         for event in events
         if event.data.get("delta", {}).get("type") == "signature_delta"
     ]
-    assert len(records) == 1
-    assert records[0]["reasoning_details"] == [detail]
+    assert records == [detail["signature"]]
     assert stream.closed
 
 

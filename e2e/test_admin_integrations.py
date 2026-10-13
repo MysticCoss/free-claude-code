@@ -5,7 +5,7 @@ from itertools import groupby, pairwise
 import pytest
 from playwright.sync_api import expect
 
-from free_claude_code.harnesses import claude_integration
+from free_claude_code.harnesses import claude_integration, claude_onboarding
 
 
 @pytest.mark.parametrize(
@@ -22,9 +22,12 @@ def test_connection_check_uses_disabled_loading_button(
     page, admin_base_url, integration, button_id, connected
 ):
     pending = []
-    page.route(
-        f"**/admin/api/integrations/{integration}", lambda route: pending.append(route)
-    )
+
+    def hold_check(route):
+        pending.append(route)
+        page.evaluate("window.integrationChecks = (window.integrationChecks || 0) + 1")
+
+    page.route(f"**/admin/api/integrations/{integration}", hold_check)
     page.goto(f"{admin_base_url}/admin/integrations")
     button = page.locator(f"#{button_id}")
     for visit in range(2):
@@ -42,8 +45,17 @@ def test_connection_check_uses_disabled_loading_button(
             == "integration-spinner"
         )
         expect(page.locator("#view-integrations .status-pill")).to_have_count(0)
+        page.wait_for_function(
+            "count => window.integrationChecks >= count", arg=visit + 1
+        )
         assert len(pending) == 1
-        pending.pop().fulfill(json={"connected": connected, "paths": None})
+        pending.pop().fulfill(
+            json={
+                "connected": connected,
+                "paths": None,
+                "update": {"state": "ready", "changed": False, "message": None},
+            }
+        )
         expect(button).to_be_enabled()
         expect(button).to_have_text("Disconnect" if connected else "Connect")
         expect(button).to_have_attribute("aria-busy", "false")
@@ -58,13 +70,10 @@ def test_codex_connect_disconnect_and_modal_paths(
     expect(page.locator("#openClaudeIntegration")).to_be_enabled()
     expect(page.locator("#messageArea")).to_have_text("")
     cards = page.locator("#view-integrations > article")
-    expect(cards).to_have_count(4)
+    expect(cards.first).to_be_visible()
     expect(page.locator("#claudeIntegrationStatus")).to_have_count(0)
     expect(page.locator("#openCodexIntegration")).to_be_enabled()
     expect(page.locator("#codexIntegrationStatus")).to_have_count(0)
-    expect(cards.nth(1)).to_contain_text(
-        "Use FCC's models in the Codex VS Code extension and desktop app."
-    )
     bounds = [card.bounding_box() for card in cards.all()]
     if width >= 1200:
         descriptions = [
@@ -119,8 +128,7 @@ def test_codex_connect_disconnect_and_modal_paths(
     expect(opener).to_have_css("color", "rgb(239, 68, 68)")
     if width >= 1200:
         buttons = [
-            button.bounding_box()
-            for button in page.locator(".integration-card > button").all()
+            card.get_by_role("button").first.bounding_box() for card in cards.all()
         ]
         for _, row in groupby(range(len(bounds)), key=lambda index: bounds[index]["y"]):
             assert len({buttons[index]["y"] for index in row}) == 1
@@ -202,6 +210,7 @@ def test_connect_disconnect_and_modal_dismissal(page, admin_base_url, tmp_path):
     assert json.loads(path.read_text())["claudeCode.disableLoginPrompt"] is True
     state_path = tmp_path / ".claude.json"
     assert json.loads(state_path.read_text())["hasCompletedOnboarding"] is True
+    expect(page.locator("#openClaudeOnboarding")).to_have_text("Completed")
     page.reload()
     expect(card_button).to_have_text("Disconnect")
     card_button.click()
@@ -224,19 +233,18 @@ def test_manual_setup_and_revisit_read_the_file(page, admin_base_url, tmp_path):
     status = page.request.get(f"{admin_base_url}/admin/api/status").json()
     claude_integration.configure(
         path,
-        tmp_path / ".claude.json",
         f"http://localhost:{status['port']}/",
         "e2e-proxy-token",
         True,
     )
+    claude_onboarding.complete(tmp_path / ".claude.json")
     page.goto(f"{admin_base_url}/admin/integrations")
     expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
     (tmp_path / ".claude.json").unlink()
     page.reload()
-    expect(page.locator("#openClaudeIntegration")).to_have_text("Connect")
-    page.locator("#openClaudeIntegration").click()
-    expect(page.locator("#claudeIntegrationDescription")).to_contain_text("onboarding")
-    page.locator("#confirmClaudeIntegration").click()
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
+    page.locator("#openClaudeOnboarding").click()
+    page.locator("#confirmClaudeOnboarding").click()
     expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
     page.get_by_role("button", name="Providers", exact=True).click()
     path.write_text("{}")
@@ -269,14 +277,20 @@ def test_save_pending_and_failure_stay_in_modal(page, admin_base_url):
     page.goto(f"{admin_base_url}/admin/integrations")
     page.locator("#openClaudeIntegration").click()
     requests = []
+
+    def hold_save(route):
+        requests.append(route)
+        page.evaluate("window.integrationSaveIntercepted = true")
+
     page.route(
         "**/admin/api/integrations/claude-vscode/connect",
-        lambda route: requests.append(route),
+        hold_save,
     )
     action = page.locator("#confirmClaudeIntegration")
     action.click()
     expect(action).to_be_disabled()
     expect(action).to_have_text("Saving…")
+    page.wait_for_function("window.integrationSaveIntercepted === true")
     requests[0].fulfill(status=503, json={"detail": "Could not save settings."})
     expect(action).to_be_enabled()
     expect(page.locator("#claudeIntegrationDialog")).to_be_visible()
@@ -371,8 +385,11 @@ def test_background_update_spinner_failure_retry_and_completion(
     expect(button).to_have_text("Retry")
     expect(button).to_be_enabled()
     expect(message).to_have_text(progress["message"])
-    button.click()
-    expect(button).to_be_disabled()
+    with page.expect_response(
+        f"{admin_base_url}/admin/api/integrations/{integration}/refresh"
+    ):
+        button.click()
+        expect(button).to_be_disabled()
     assert retries == ["POST"]
     page.wait_for_function(
         "id => state.startup?.startup?.integrations[id]?.state === 'starting'",
@@ -418,7 +435,11 @@ def admin_client_files(request, tmp_path):
 def test_startup_updates_before_opening_integrations(
     admin_client_files, admin_base_url, page, tmp_path
 ):
-    page.goto(f"{admin_base_url}/admin/integrations")
+    page.goto(f"{admin_base_url}/admin")
+    page.wait_for_function(
+        "state.startup?.startup?.integrations['claude-vscode']?.state === 'ready'"
+    )
+    page.get_by_role("button", name="Integrations", exact=True).click()
     button = page.locator("#openClaudeIntegration")
     expect(button).to_have_text("Disconnect")
     expect(page.locator("#claudeIntegrationMessage")).to_be_hidden()
@@ -428,10 +449,8 @@ def test_startup_updates_before_opening_integrations(
         entry == {"name": "CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "value": "1"}
         for entry in saved["claudeCode.environmentVariables"]
     )
-    assert (
-        json.loads((tmp_path / ".claude.json").read_text())["hasCompletedOnboarding"]
-        is True
-    )
+    assert not (tmp_path / ".claude.json").exists()
+    expect(page.locator("#openClaudeOnboarding")).to_have_text("Complete onboarding")
     page.screenshot(path=str(tmp_path / "integration-updated.png"), full_page=True)
     button.click()
     page.locator("#confirmClaudeIntegration").click()
@@ -439,3 +458,223 @@ def test_startup_updates_before_opening_integrations(
     page.reload()
     expect(button).to_have_text("Connect")
     expect(page.locator("#claudeIntegrationMessage")).to_be_hidden()
+
+
+def test_independent_onboarding_modal_and_completion(page, admin_base_url, tmp_path):
+    state = tmp_path / ".claude.json"
+    settings = tmp_path / "vscode" / "settings.json"
+    page.goto(f"{admin_base_url}/admin/integrations")
+    button = page.locator("#openClaudeOnboarding")
+    dialog = page.locator("#claudeOnboardingDialog")
+    expect(button).to_have_text("Complete onboarding")
+    for dismiss in ("close", "escape", "outside"):
+        button.click()
+        expect(dialog).to_be_visible()
+        expect(page.locator("#claudeOnboardingFiles li")).to_have_text(
+            [str(state.resolve())]
+        )
+        if dismiss == "close":
+            dialog.get_by_role("button", name="Close", exact=True).click()
+        elif dismiss == "escape":
+            page.keyboard.press("Escape")
+        else:
+            page.mouse.click(1, 1)
+        expect(dialog).not_to_be_visible()
+        assert not state.exists() and not settings.exists()
+    button.click()
+    page.locator("#confirmClaudeOnboarding").click()
+    expect(dialog).not_to_be_visible()
+    expect(button).to_have_text("Completed")
+    expect(button).to_be_disabled()
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Connect")
+    assert json.loads(state.read_text())["hasCompletedOnboarding"] is True
+    assert not settings.exists()
+    state.write_text('{"hasCompletedOnboarding":false}')
+    page.get_by_role("button", name="Providers", exact=True).click()
+    page.get_by_role("button", name="Integrations", exact=True).click()
+    expect(button).to_have_text("Complete onboarding")
+    assert state.read_text() == '{"hasCompletedOnboarding":false}'
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_onboarding_status_uses_loading_and_completed_button(
+    page, admin_base_url, tmp_path, completed
+):
+    pending = []
+
+    def hold(route):
+        pending.append(route)
+        page.evaluate("window.onboardingStatusIntercepted = true")
+
+    page.route("**/admin/api/integrations/claude-onboarding", hold)
+    page.goto(f"{admin_base_url}/admin/integrations")
+    button = page.locator("#openClaudeOnboarding")
+    expect(button).to_have_text("Loading…")
+    expect(button).to_be_disabled()
+    expect(button).to_have_attribute("aria-busy", "true")
+    expect(button).to_have_css("background-color", "rgb(23, 27, 38)")
+    assert (
+        button.evaluate(
+            "element => getComputedStyle(element, '::before').animationName"
+        )
+        == "integration-spinner"
+    )
+    page.wait_for_function("window.onboardingStatusIntercepted === true")
+    pending.pop().fulfill(
+        json={
+            "completed": completed,
+            "paths": {"claude_state": str(tmp_path / ".claude.json")},
+        }
+    )
+    expect(button).to_have_text("Completed" if completed else "Complete onboarding")
+    expect(button).to_have_attribute("aria-busy", "false")
+    if completed:
+        expect(button).to_be_disabled()
+        expect(button).to_have_css("background-color", "rgb(23, 27, 38)")
+    else:
+        expect(button).to_be_enabled()
+
+
+def test_onboarding_errors_retry_independently(page, admin_base_url, tmp_path):
+    assert page.request.post(
+        f"{admin_base_url}/admin/api/integrations/claude-vscode/connect"
+    ).ok
+    state = tmp_path / ".claude.json"
+    state.write_text('{"secret-state":invalid}')
+    page.goto(f"{admin_base_url}/admin/integrations")
+    button = page.locator("#openClaudeOnboarding")
+    expect(button).to_have_text("Retry")
+    expect(page.locator("#claudeOnboardingMessage")).to_contain_text(".claude.json")
+    expect(page.locator("#claudeOnboardingMessage")).not_to_contain_text("secret-state")
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
+    state.write_text('{"hasCompletedOnboarding":false}')
+    button.click()
+    expect(button).to_have_text("Complete onboarding")
+    assert state.read_text() == '{"hasCompletedOnboarding":false}'
+
+    def reject(route):
+        route.fulfill(status=503, json={"detail": "Could not access .claude.json."})
+
+    endpoint = "**/admin/api/integrations/claude-onboarding/complete"
+    page.route(endpoint, reject)
+    button.click()
+    action = page.locator("#confirmClaudeOnboarding")
+    action.click()
+    expect(page.locator("#claudeOnboardingDialogMessage")).to_contain_text(
+        "Could not access"
+    )
+    expect(action).to_be_enabled()
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
+    page.unroute(endpoint, reject)
+    action.click()
+    expect(button).to_have_text("Completed")
+
+
+def test_failed_connect_updates_independent_onboarding_card(
+    page, admin_base_url, tmp_path, monkeypatch
+):
+    settings = tmp_path / "vscode" / "settings.json"
+    write = claude_integration.atomic_write_text
+
+    def fail_settings(path, content):
+        if path == settings:
+            raise PermissionError("denied")
+        write(path, content)
+
+    monkeypatch.setattr(claude_integration, "atomic_write_text", fail_settings)
+    page.goto(f"{admin_base_url}/admin/integrations")
+    expect(page.locator("#openClaudeOnboarding")).to_have_text("Complete onboarding")
+    page.locator("#openClaudeIntegration").click()
+    page.locator("#confirmClaudeIntegration").click()
+    expect(page.locator("#claudeIntegrationDialogMessage")).to_contain_text(
+        "Could not access"
+    )
+    expect(page.locator("#openClaudeOnboarding")).to_have_text("Completed")
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Connect")
+    assert not settings.exists()
+    assert (
+        json.loads((tmp_path / ".claude.json").read_text())["hasCompletedOnboarding"]
+        is True
+    )
+
+
+def test_late_onboarding_status_cannot_undo_connect_result(
+    page, admin_base_url, tmp_path
+):
+    pending = []
+    checks = 0
+
+    def hold_first(route):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            pending.append(route)
+        else:
+            route.continue_()
+
+    endpoint = "**/admin/api/integrations/claude-onboarding"
+    page.route(endpoint, hold_first)
+    page.goto(f"{admin_base_url}/admin/integrations")
+    button = page.locator("#openClaudeOnboarding")
+    expect(button).to_have_text("Loading…")
+    page.locator("#openClaudeIntegration").click()
+    page.locator("#confirmClaudeIntegration").click()
+    expect(button).to_have_text("Completed")
+    assert checks == 2
+    with page.expect_response(
+        lambda response: response.url.endswith("/claude-onboarding")
+    ):
+        pending.pop().fulfill(
+            json={
+                "completed": False,
+                "paths": {"claude_state": str(tmp_path / ".claude.json")},
+            }
+        )
+    page.evaluate(
+        "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+    )
+    expect(button).to_have_text("Completed")
+    expect(button).to_be_disabled()
+
+
+@pytest.mark.parametrize("save_failed", [False, True])
+def test_connect_reconciles_after_pending_onboarding_save(
+    page, admin_base_url, tmp_path, save_failed
+):
+    pending = []
+
+    def hold(route):
+        pending.append(route)
+
+    endpoint = "**/admin/api/integrations/claude-onboarding/complete"
+    page.route(endpoint, hold)
+    page.goto(f"{admin_base_url}/admin/integrations")
+    button = page.locator("#openClaudeOnboarding")
+    expect(button).to_have_text("Complete onboarding")
+    button.click()
+    page.locator("#confirmClaudeOnboarding").click()
+    expect(button).to_have_text("Saving…")
+    page.keyboard.press("Escape")
+    expect(page.locator("#claudeOnboardingDialog")).not_to_be_visible()
+    page.locator("#openClaudeIntegration").click()
+    page.locator("#confirmClaudeIntegration").click()
+    expect(page.locator("#openClaudeIntegration")).to_have_text("Disconnect")
+    assert (
+        json.loads((tmp_path / ".claude.json").read_text())["hasCompletedOnboarding"]
+        is True
+    )
+    assert len(pending) == 1
+    with page.expect_response(
+        lambda response: response.url.endswith("/claude-onboarding")
+    ):
+        pending.pop().fulfill(
+            status=503 if save_failed else 200,
+            json=(
+                {"detail": "Temporary completion error"}
+                if save_failed
+                else {"completed": True, "changed": False}
+            ),
+        )
+    expect(button).to_have_text("Completed")
+    expect(button).to_be_disabled()
+    expect(page.locator("#claudeOnboardingMessage")).to_be_hidden()

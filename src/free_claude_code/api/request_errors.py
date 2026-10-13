@@ -24,6 +24,10 @@ from free_claude_code.core.openai_responses import (
     openai_error_payload,
     openai_error_type_for_failure,
 )
+from free_claude_code.core.request_outcomes import (
+    record_request_exception,
+    record_request_failure,
+)
 
 from .request_ids import get_request_body_snapshot, get_request_id
 
@@ -42,6 +46,7 @@ def ordinary_application_error_response(
     request_id: str,
 ) -> JSONResponse:
     """Serialize a deterministic application error without terminal headers."""
+    record_request_failure(error.kind.value)
     if wire_api == "responses":
         return JSONResponse(
             status_code=error.status_code,
@@ -72,6 +77,7 @@ def log_unexpected_api_exception(
     request_id: str | None = None,
 ) -> None:
     """Log API failures without echoing exception text unless opted in."""
+    record_request_exception(exc)
     if settings.log_api_error_tracebacks:
         if request_id is not None:
             logger.error(
