@@ -17,6 +17,7 @@ Ownership split (avoids any read-modify-write races):
 import base64
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from free_claude_code.core.json_types import JsonObject
 from free_claude_code.core.updates import (
     build_archive_url,
     is_newer_version,
+    parse_pyproject_python,
     parse_pyproject_version,
     raw_pyproject_url,
     update_capable,
@@ -54,7 +56,8 @@ ACTIVE_STAGES = frozenset({"scheduled", "downloading", "testing", "installing"})
 # still has to be green before anything is installed.
 PYTEST_GATE_EXCLUDE = (
     "not test_admin_versioned_assets_serve_packaged_files "
-    "and not test_launcher_config_composes_with_persistent_codex_config"
+    "and not test_launcher_config_composes_with_persistent_codex_config "
+    "and not test_ci_python_identity_parses_toml"
 )
 # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW (win32 only, by value so the
 # module imports cleanly on every platform). DETACHED_PROCESS must NOT be
@@ -64,6 +67,9 @@ PYTEST_GATE_EXCLUDE = (
 # while leaving the redirected log/progress handles working.
 _WIN32_SPAWN_FLAGS = 0x00000200 | 0x08000000
 _GUARDIAN_TIMEOUT_SECONDS = 20.0
+# Guardian relaunch payload meaning "relaunch nothing": a lone newline, since
+# PowerShell rejects an empty string for the mandatory -RelaunchB64.
+_NO_RELAUNCH_B64 = base64.b64encode(b"\n").decode("ascii")
 
 
 class UpdateDisabledError(Exception):
@@ -103,6 +109,10 @@ def _num_field(payload: JsonObject, key: str) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 async def _fetch_text(url: str) -> str:
@@ -205,6 +215,7 @@ class UpdateService:
                 settings.fcc_update_repo, settings.fcc_update_branch
             )
             remote: str | None = None
+            remote_python: str | None = None
             error: str | None = None
             try:
                 text = await _fetch_text(url)
@@ -217,11 +228,13 @@ class UpdateService:
                 logger.warning("Update check failed: exc_type={}", type(exc).__name__)
             else:
                 remote = parse_pyproject_version(text)
+                remote_python = parse_pyproject_python(text)
                 if remote is None:
                     error = "The update source pyproject.toml has no [project].version."
             self._save_state(
                 {
                     "remote_version": remote,
+                    "remote_python": remote_python,
                     "check_error": error,
                     "checked_ts": time.time(),
                 }
@@ -262,7 +275,15 @@ class UpdateService:
         script = self._install_guardian_script()
         try:
             self._spawn(
-                self._guardian_command(script, settings=settings, remote=remote)
+                self._guardian_command(
+                    script,
+                    settings=settings,
+                    remote=remote,
+                    wait_pid=os.getpid(),
+                    relaunch_b64=base64.b64encode(
+                        "\n".join(sys.argv).encode("utf-8")
+                    ).decode("ascii"),
+                )
             )
         except OSError as exc:
             raise UpdateCheckFailedError(
@@ -290,6 +311,55 @@ class UpdateService:
             "gate, install the new version, and relaunch automatically. This "
             "can take several minutes.",
         }
+
+    async def prepare_cli_update(
+        self, settings: Settings, launcher: Path
+    ) -> tuple[JsonObject, bool]:
+        """Stage a foreground guardian run for ``fcc-update``.
+
+        Returns the fresh snapshot and whether the configured branch is newer;
+        when it is, ``launcher`` (chosen by the native wrapper) now runs the
+        guardian. The caller must exit before the launcher runs: ``uv tool
+        install`` replaces its interpreter.
+        """
+
+        current = package_version()
+        if not update_capable(current):
+            raise UpdateDisabledError(
+                "fcc-update is disabled when FCC runs from a source checkout. "
+                "Reinstall with scripts/install.ps1 or install.sh."
+            )
+        if self.snapshot(settings)["in_progress"]:
+            raise UpdateInProgressError("An update is already running.")
+        checked = await self.check(settings, force=True)
+        check_error = checked.get("check_error")
+        remote = checked.get("latest_version")
+        if isinstance(check_error, str) and check_error:
+            raise UpdateCheckFailedError(check_error)
+        if not isinstance(remote, str):
+            raise UpdateCheckFailedError("The update source version is unknown.")
+        if not checked.get("update_available"):
+            return checked, False
+        self._prepare_work_dir()
+        script = self._install_guardian_script()
+        self._write_launcher(
+            self._guardian_command(
+                script,
+                settings=settings,
+                remote=remote,
+                wait_pid=os.getpid(),
+                relaunch_b64=_NO_RELAUNCH_B64,
+            ),
+            launcher,
+        )
+        self._save_state(
+            {
+                "from_version": current,
+                "target_version": remote,
+                "scheduled_ts": time.time(),
+            }
+        )
+        return checked, True
 
     async def run_auto_tick(self, settings: Settings) -> bool:
         """Check and schedule when due; True when the process must stop now."""
@@ -328,15 +398,67 @@ class UpdateService:
             target.chmod(0o755)
         return target
 
+    @staticmethod
+    def _write_launcher(command: list[str], launcher: Path) -> None:
+        if sys.platform == "win32":
+            # cmd reads batch files in the OEM codepage, so non-ASCII paths
+            # (user profiles) travel inside an ASCII -EncodedCommand payload.
+            file_index = command.index("-File")
+            invocation = " ".join(
+                [
+                    "&",
+                    _powershell_quote(command[file_index + 1]),
+                    # Guardian arguments are "-Name value" pairs.
+                    *(
+                        arg if index % 2 == 0 else _powershell_quote(arg)
+                        for index, arg in enumerate(command[file_index + 2 :])
+                    ),
+                ]
+            )
+            encoded = base64.b64encode(
+                f"{invocation}; exit $LASTEXITCODE".encode("utf-16-le")
+            ).decode("ascii")
+            launcher.write_text(
+                "@echo off\r\n"
+                "powershell -NoProfile -ExecutionPolicy Bypass "
+                f"-EncodedCommand {encoded}\r\n"
+                "exit /b %errorlevel%\r\n",
+                encoding="ascii",
+                newline="",
+            )
+        else:
+            launcher.write_text(
+                f"#!/bin/sh\nexec {shlex.join(command)}\n",
+                encoding="utf-8",
+                newline="",
+            )
+            launcher.chmod(0o755)
+
+    def _python_version(self) -> str:
+        """Interpreter for the install: the target's exact pin, else this one."""
+
+        pinned = _str_field(_load_json(self._state_path), "remote_python")
+        if pinned is not None:
+            return pinned
+        info = sys.version_info
+        return f"{info.major}.{info.minor}.{info.micro}"
+
     def _guardian_command(
-        self, script: Path, *, settings: Settings, remote: str
+        self,
+        script: Path,
+        *,
+        settings: Settings,
+        remote: str,
+        wait_pid: int,
+        relaunch_b64: str,
     ) -> list[str]:
-        relaunch = base64.b64encode("\n".join(sys.argv).encode("utf-8")).decode("ascii")
+        relaunch = relaunch_b64
+        python_version = self._python_version()
         archive_url = build_archive_url(
             settings.fcc_update_repo, settings.fcc_update_branch
         )
         if sys.platform == "win32":
-            python_spec = "cpython-3.14.0-windows-x86_64-none"
+            python_spec = f"cpython-{python_version}-windows-x86_64-none"
             return [
                 "powershell",
                 "-NoProfile",
@@ -345,7 +467,7 @@ class UpdateService:
                 "-File",
                 str(script),
                 "-WaitPid",
-                str(os.getpid()),
+                str(wait_pid),
                 "-ArchiveUrl",
                 archive_url,
                 "-TargetVersion",
@@ -366,13 +488,13 @@ class UpdateService:
         return [
             "bash",
             str(script),
-            str(os.getpid()),
+            str(wait_pid),
             archive_url,
             remote,
             str(self._work_dir),
             str(self._progress_path),
             relaunch,
-            "3.14.0",
+            python_version,
             PYTEST_GATE_EXCLUDE,
             os.getcwd(),
         ]

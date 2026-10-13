@@ -38,7 +38,9 @@ def test_cli_scripts_are_registered() -> None:
     )
 
     assert pyproject["project"]["scripts"] == {
+        "_fcc-update-check": "free_claude_code.updater.check:main",
         "fcc-server": "free_claude_code.cli.entrypoints:serve",
+        "fcc-doctor": "free_claude_code.cli.entrypoints:doctor",
         "fcc-claude": "free_claude_code.cli.launchers.claude:launch",
         "fcc-codex": "free_claude_code.cli.launchers.codex:launch",
         "fcc-pi": "free_claude_code.cli.launchers.pi:launch",
@@ -102,7 +104,7 @@ def test_non_version_entrypoint_delegates_to_server_command() -> None:
     with patch.object(commands, "serve") as command:
         entrypoints.serve(())
 
-    command.assert_called_once_with()
+    command.assert_called_once_with(console_logging=True)
 
 
 def test_explicit_open_admin_waits_for_owned_http_ready():
@@ -114,8 +116,9 @@ def test_explicit_open_admin_waits_for_owned_http_ready():
         open_admin.assert_not_called()
         settings = _launcher_settings()
         supervisor._ready_settings = settings
+        supervisor._ready_instance_id = "ready-instance"
         supervisor.request_open_admin()
-        open_admin.assert_called_once_with(settings, 0)
+        open_admin.assert_called_once_with(settings, 0, "ready-instance")
 
 
 @pytest.mark.parametrize("open_admin_browser", (False, True))
@@ -156,7 +159,7 @@ def test_server_startup_repairs_invalid_managed_provider_proxy(
     managed.write_text(
         "\n".join(
             (
-                "FCC_CONFIG_SCHEMA=1",
+                "FCC_CONFIG_SCHEMA=2",
                 "MODEL=nvidia_nim/test-model",
                 f"OPENAI_PROXY={invalid_proxy}",
                 "",
@@ -267,7 +270,7 @@ def test_load_server_settings_leaves_process_owned_invalid_proxy_explicit(
     managed = managed_env_path()
     managed.parent.mkdir(parents=True)
     managed.write_text(
-        "FCC_CONFIG_SCHEMA=1\nOPENAI_PROXY=invalid://managed-proxy\n",
+        "FCC_CONFIG_SCHEMA=2\nOPENAI_PROXY=invalid://managed-proxy\n",
         encoding="utf-8",
     )
     baseline = managed.read_bytes()
@@ -299,6 +302,7 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
         restart_callbacks.append(restart_callback)
         app = SimpleNamespace(
             runtime=SimpleNamespace(
+                instance_id=f"instance-{len(apps)}",
                 is_closed=False,
                 begin_shutdown=lambda: None,
                 http_started=lambda: None,
@@ -343,7 +347,7 @@ def test_serve_supervisor_restarts_when_app_requests_restart() -> None:
         commands.serve()
 
     assert len(servers) == 2
-    open_admin.assert_called_once_with(settings, 0)
+    open_admin.assert_called_once_with(settings, 0, "instance-0")
     clear_settings_cache.assert_called_once()
     kill_all.assert_called_once()
 
@@ -365,6 +369,7 @@ def test_serve_supervisor_refuses_restart_after_incomplete_shutdown() -> None:
         restart_callbacks.append(restart_callback)
         return SimpleNamespace(
             runtime=SimpleNamespace(
+                instance_id="incomplete-instance",
                 is_closed=False,
                 begin_shutdown=lambda: None,
                 http_started=lambda: None,

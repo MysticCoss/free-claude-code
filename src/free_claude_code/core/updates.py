@@ -14,6 +14,10 @@ from .version import _UNKNOWN_VERSION
 _REPO_SEGMENT_PATTERN = re.compile(r"^(?![-.])[A-Za-z0-9._-]+(?<![-.])$")
 # Git branch names allow alphanumerics plus . _ - / and may not contain "..".
 _BRANCH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+# Fork revision local label: ``+f1.0`` in ``6.16.3+f1.0``.
+_FORK_LABEL_PATTERN = re.compile(r"f(\d+(?:\.\d+)*)")
+# Exact interpreter pin: ``requires-python = "==3.14.7"``.
+_EXACT_PYTHON_PATTERN = re.compile(r"==\s*(\d+\.\d+\.\d+)")
 
 
 def update_capable(version: str) -> bool:
@@ -29,8 +33,8 @@ def update_capable(version: str) -> bool:
 def version_tuple(version: str) -> tuple[int, ...] | None:
     """Return the numeric release segments of a version, or None if invalid.
 
-    Local labels (``+cu130``) and prerelease suffixes are ignored; a plain
-    ``5.22.4`` and a ``5.22.4`` with build metadata compare equal.
+    Local labels (``+cu130``, ``+f1.0``) and prerelease suffixes are ignored;
+    a plain ``5.22.4`` and a ``5.22.4`` with build metadata compare equal.
     """
 
     stripped = version.strip().split("+", 1)[0]
@@ -40,17 +44,48 @@ def version_tuple(version: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.group(1).split("."))
 
 
+def fork_revision_tuple(version: str) -> tuple[int, ...]:
+    """Return the fork revision from a ``<upstream>+f<major>.<minor>`` version.
+
+    Versions without a fork label (plain upstream releases, other local
+    labels) return ``()``, which sorts below every fork revision.
+    """
+
+    _, separator, local = version.strip().partition("+")
+    if not separator:
+        return ()
+    match = _FORK_LABEL_PATTERN.fullmatch(local)
+    if match is None:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _padded(parts: tuple[int, ...], width: int) -> tuple[int, ...]:
+    return parts + (0,) * (width - len(parts))
+
+
 def is_newer_version(candidate: str, current: str) -> bool:
-    """Return True when ``candidate`` is a strictly newer release of ``current``."""
+    """Return True when ``candidate`` is a strictly newer release of ``current``.
+
+    The upstream release segments decide first; on a tie the fork revision
+    (``+f<major>.<minor>``) decides.
+    """
 
     candidate_parts = version_tuple(candidate)
     current_parts = version_tuple(current)
     if candidate_parts is None or current_parts is None:
         return False
     width = max(len(candidate_parts), len(current_parts))
-    padded_candidate = candidate_parts + (0,) * (width - len(candidate_parts))
-    padded_current = current_parts + (0,) * (width - len(current_parts))
-    return padded_candidate > padded_current
+    padded_candidate = _padded(candidate_parts, width)
+    padded_current = _padded(current_parts, width)
+    if padded_candidate != padded_current:
+        return padded_candidate > padded_current
+    candidate_fork = fork_revision_tuple(candidate)
+    current_fork = fork_revision_tuple(current)
+    if not candidate_fork or not current_fork:
+        return bool(candidate_fork) and not current_fork
+    fork_width = max(len(candidate_fork), len(current_fork))
+    return _padded(candidate_fork, fork_width) > _padded(current_fork, fork_width)
 
 
 def parse_pyproject_version(text: str) -> str | None:
@@ -65,6 +100,23 @@ def parse_pyproject_version(text: str) -> str | None:
         return None
     version = project.get("version")
     return version if isinstance(version, str) else None
+
+
+def parse_pyproject_python(text: str) -> str | None:
+    """Return the exact ``X.Y.Z`` from a ``requires-python = "==X.Y.Z"`` pin."""
+
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    requirement = project.get("requires-python")
+    if not isinstance(requirement, str):
+        return None
+    match = _EXACT_PYTHON_PATTERN.fullmatch(requirement.strip())
+    return match.group(1) if match else None
 
 
 def validate_update_repo(value: str) -> str:

@@ -29,8 +29,6 @@ def huggingface_config():
     return make_provider_config(
         api_key="test_hf_key",
         base_url=HUGGINGFACE_DEFAULT_BASE,
-        rate_limit=10,
-        rate_window=60,
     )
 
 
@@ -210,7 +208,7 @@ def test_build_request_body_does_not_replay_prior_thinking_blocks(
     assert body["messages"] == [
         {
             "role": "assistant",
-            "content": "[Earlier reasoning]\nhidden prior thought\n\nvisible answer",
+            "content": "hidden prior thought\n\nvisible answer",
         }
     ]
     assert "reasoning_content" not in body["messages"][0]
@@ -236,7 +234,7 @@ def test_build_request_body_does_not_replay_top_level_reasoning_content(
     assert body["messages"] == [
         {
             "role": "assistant",
-            "content": "[Earlier reasoning]\nhidden prior reasoning\n\nvisible answer",
+            "content": "hidden prior reasoning\n\nvisible answer",
         }
     ]
     assert "hidden prior reasoning" in str(body)

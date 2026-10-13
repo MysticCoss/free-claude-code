@@ -59,7 +59,6 @@ def _make_runner(**flags: bool) -> MessagingNodeRunner:
         platform_name="test",
         outbound=MagicMock(),
         cli_manager=MagicMock(),
-        session_store=MagicMock(),
         get_tree_queue=MagicMock(),
         format_status=lambda emoji, title, _detail: f"{emoji} {title}",
         get_parse_mode=lambda: None,

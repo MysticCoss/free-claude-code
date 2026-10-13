@@ -57,7 +57,8 @@ async def test_executor_converts_chat_request_once(wire):
             client=client,
         )
         executor = ProviderExecutor(
-            AsyncMock(side_effect=lambda _: provider), progress_timeout_seconds=60
+            AsyncMock(side_effect=lambda _, _api_key_number: provider),
+            progress_timeout_seconds=60,
         )
         builder_name = (
             "_build_request_body"
@@ -71,7 +72,7 @@ async def test_executor_converts_chat_request_once(wire):
             provider._chat, builder_name, wraps=getattr(provider._chat, builder_name)
         ) as build:
             stream = getattr(executor, f"stream_{wire}")(
-                routed, raw_log_payload={}, request_id="conversion-once"
+                routed, raw_log_payload=dict, request_id="conversion-once"
             )
             output = "".join([event async for event in stream])
         assert "hello" in output
@@ -103,10 +104,11 @@ async def test_executor_converts_selected_opencode_route_once(wire, egress, warm
             await provider.list_model_infos()
         with patch.object(transport, name, wraps=getattr(transport, name)) as build:
             executor = ProviderExecutor(
-                AsyncMock(side_effect=lambda _: provider), progress_timeout_seconds=60
+                AsyncMock(side_effect=lambda _, _api_key_number: provider),
+                progress_timeout_seconds=60,
             )
             stream = getattr(executor, f"stream_{wire}")(
-                routed, raw_log_payload={}, request_id="opencode-conversion-once"
+                routed, raw_log_payload=dict, request_id="opencode-conversion-once"
             )
             assert f"{egress}-ok" in "".join([event async for event in stream])
         assert build.call_count == 1
@@ -142,10 +144,11 @@ async def test_executor_converts_subscription_request_once(wire):
             provider._responses, name, wraps=getattr(provider._responses, name)
         ) as build:
             executor = ProviderExecutor(
-                AsyncMock(side_effect=lambda _: provider), progress_timeout_seconds=60
+                AsyncMock(side_effect=lambda _, _api_key_number: provider),
+                progress_timeout_seconds=60,
             )
             stream = getattr(executor, f"stream_{wire}")(
-                routed, raw_log_payload={}, request_id="subscription-conversion-once"
+                routed, raw_log_payload=dict, request_id="subscription-conversion-once"
             )
             assert auth.access_calls == 0
             assert "hello" in "".join([event async for event in stream])

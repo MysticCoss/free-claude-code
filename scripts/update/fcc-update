@@ -1,0 +1,19 @@
+#!/bin/sh
+# Update this fork from FCC_UPDATE_REPO/FCC_UPDATE_BRANCH (default
+# MysticCoss/free-claude-code@main) through the same tested guardian the
+# Admin UI uses. The checker stages that guardian into the launcher path.
+set -eu
+if [ "$#" -gt 0 ]; then
+    echo "fcc-update takes no options; it installs the fork branch set by FCC_UPDATE_REPO/FCC_UPDATE_BRANCH." >&2
+    exit 2
+fi
+launcher="${TMPDIR:-/tmp}/fcc-update-$$.sh"
+status=0
+"$(dirname "$0")/_fcc-update-check" "$launcher" || status=$?
+case "$status" in
+    0) rm -f "$launcher"; exit 0 ;;
+    10) ;;
+    *) rm -f "$launcher"; exit "$status" ;;
+esac
+# exec: the install replaces this wrapper file while the launcher runs.
+exec sh -c 'status=0; sh "$1" || status=$?; rm -f "$1"; exit "$status"' sh "$launcher"

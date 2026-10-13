@@ -20,26 +20,27 @@ from free_claude_code.providers.admission import (
     ProviderAdmissionController,
     ProviderOperationKind,
 )
+from free_claude_code.providers.admission_policy import ProviderAdmissionLimits
 from free_claude_code.providers.nvidia_nim import NvidiaNimProvider
 from free_claude_code.providers.runtime import build_provider_config
 from tests.providers.support import immediate_admission
 
 
 def _admission_from_settings(settings: Settings) -> ProviderAdmissionController:
-    """Build the real admission controller through the production factory path."""
-    config = build_provider_config(PROVIDER_CATALOG["nvidia_nim"], settings)
+    """Build the real admission controller from the production limits policy."""
+    limits = ProviderAdmissionLimits.from_settings(settings)
     return ProviderAdmissionController(
         provider_name="nvidia_nim",
-        rate_limit=config.rate_limit,
-        rate_window=config.rate_window,
-        max_concurrency=config.max_concurrency,
+        rate_limit=limits.rate_limit,
+        rate_window=limits.rate_window,
+        max_concurrency=limits.max_concurrency,
     )
 
 
 def test_settings_http_timeouts_reach_provider_config() -> None:
     """Distinct Settings timeouts arrive intact on the built ProviderConfig."""
     settings = Settings(
-        nvidia_nim_api_key="test-key",
+        nvidia_nim_api_keys="test-key",
         http_connect_timeout=5.0,
         http_read_timeout=600.0,
         http_write_timeout=15.0,
@@ -55,7 +56,7 @@ def test_settings_http_timeouts_reach_provider_config() -> None:
 def test_settings_http_timeouts_reach_provider_client() -> None:
     """Settings timeouts flow through ProviderConfig into the HTTP client."""
     settings = Settings(
-        nvidia_nim_api_key="test-key",
+        nvidia_nim_api_keys="test-key",
         http_connect_timeout=5.0,
         http_read_timeout=600.0,
         http_write_timeout=15.0,
@@ -79,7 +80,7 @@ def test_settings_http_timeouts_reach_provider_client() -> None:
 async def test_settings_max_concurrency_limits_in_flight_provider_calls() -> None:
     """Settings(provider_max_concurrency=2) caps concurrent provider calls at 2."""
     settings = Settings(
-        nvidia_nim_api_key="test-key",
+        nvidia_nim_api_keys="test-key",
         provider_rate_limit=1_000_000,
         provider_rate_window=1,
         provider_max_concurrency=2,
@@ -133,7 +134,7 @@ async def test_settings_max_concurrency_limits_in_flight_provider_calls() -> Non
 async def test_settings_rate_limit_holds_excess_calls_in_window() -> None:
     """Settings(provider_rate_limit=1) parks the second call for the window."""
     settings = Settings(
-        nvidia_nim_api_key="test-key",
+        nvidia_nim_api_keys="test-key",
         provider_rate_limit=1,
         provider_rate_window=60,
         provider_max_concurrency=1_000,

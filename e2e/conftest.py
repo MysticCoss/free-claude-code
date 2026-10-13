@@ -10,9 +10,11 @@ from pathlib import Path
 
 import pytest
 import uvicorn
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
+from e2e.artifacts import failure_artifacts_recorder as failure_artifacts_recorder
 from e2e.code_support import CodeControl
+from e2e.server_shutdown import join_server
 from free_claude_code.api.app import create_app
 from free_claude_code.api.ports import ApiServices
 from free_claude_code.application.model_metadata import ProviderModelInfo
@@ -23,16 +25,23 @@ from free_claude_code.config.loader import (
     clear_settings_cache,
     get_settings,
 )
+from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
 from free_claude_code.harnesses import (
     claude_desktop_integration,
     claude_integration,
+    claude_onboarding,
     codex_integration,
     jetbrains_acp_integration,
+    vscode_chat_integration,
 )
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
+from free_claude_code.providers.credential_validation import (
+    CredentialCheck,
+    CredentialStatus,
+)
 from free_claude_code.providers.runtime import ProviderRuntime
 from free_claude_code.runtime.application import ApplicationRuntime
 from free_claude_code.runtime.asgi import RuntimeASGIApp
@@ -40,6 +49,12 @@ from free_claude_code.runtime.configuration import ConfigurationService
 from free_claude_code.runtime.folder_picker import NativeFolderPicker
 from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 from tests.web_tools_support import StubWebToolsClient
+
+
+@pytest.fixture(scope="session", autouse=True)
+def browser_assertion_timeout() -> None:
+    # Windows CI can finish UI hydration just beyond Playwright's five-second default.
+    expect.set_options(timeout=10_000)
 
 
 class _ModelListingProvider(BaseProvider):
@@ -53,9 +68,6 @@ class _ModelListingProvider(BaseProvider):
             ProviderConfig(
                 api_key="browser-test",
                 base_url="https://provider.invalid/v1",
-                rate_limit=1_000,
-                rate_window=1,
-                max_concurrency=100,
                 http_read_timeout=1.0,
                 http_write_timeout=1.0,
                 http_connect_timeout=1.0,
@@ -102,6 +114,7 @@ class _ModelListingProvider(BaseProvider):
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
         request_headers: Mapping[str, str] | None = None,
         model_info: ProviderModelInfo | None = None,
+        continuation=None,
     ) -> AsyncIterator[str]:
         if False:
             yield ""
@@ -115,6 +128,8 @@ class _ModelListingProvider(BaseProvider):
         response_model: str | None = None,
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
         request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        continuation=None,
     ) -> AsyncIterator[str]:
         if False:
             yield ""
@@ -131,16 +146,34 @@ def admin_client_files():
 
 
 @pytest.fixture
+def provider_load_guard(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    attempted: list[str] = []
+
+    def forbidden(provider_id: str, *_args):
+        attempted.append(provider_id)
+        raise AssertionError(f"Browser fixture loaded real provider: {provider_id}")
+
+    monkeypatch.setattr(
+        "free_claude_code.providers.runtime.runtime._load_constructor", forbidden
+    )
+    yield
+    assert attempted == [], f"Browser fixture loaded real providers: {attempted}"
+
+
+@pytest.fixture
 def admin_base_url(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     code_control: CodeControl,
     admin_client_files,
+    provider_load_guard,
 ) -> Iterator[str]:
     """Serve one fully isolated Admin application on an OS-assigned port."""
 
     config_dir = tmp_path / ".fcc"
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / ".dsh"))
+    monkeypatch.delenv("FCC_DSH_DESKTOP_API_KEY", raising=False)
     monkeypatch.setattr(
         jetbrains_acp_integration,
         "config_path",
@@ -167,7 +200,12 @@ def admin_base_url(
         codex_integration, "config_path", lambda: tmp_path / ".codex" / "config.toml"
     )
     monkeypatch.setattr(
-        claude_integration, "claude_state_path", lambda: tmp_path / ".claude.json"
+        vscode_chat_integration,
+        "config_path",
+        lambda: tmp_path / "vscode/chatLanguageModels.json",
+    )
+    monkeypatch.setattr(
+        claude_onboarding, "state_path", lambda: tmp_path / ".claude.json"
     )
     monkeypatch.setattr(
         claude_integration,
@@ -194,6 +232,23 @@ def admin_base_url(
     monkeypatch.setattr(env_migrations, "verified_checkout_env_path", lambda: None)
     clear_settings_cache()
 
+    async def verified_credentials(settings, submissions):
+        return tuple(
+            CredentialCheck(
+                submission.key,
+                CredentialStatus.VERIFIED,
+                "API key accepted.",
+                index,
+                submission.provider_id,
+            )
+            for submission in submissions
+            for index, _ in enumerate(submission.credentials)
+        )
+
+    monkeypatch.setattr(
+        "free_claude_code.runtime.application.check_credentials", verified_credentials
+    )
+
     store = ManagedConfigStore()
     store.initialize({})
     store.commit(
@@ -202,6 +257,7 @@ def admin_base_url(
 
     provider_secret = "CREDENTIAL[unrecognized-format-987654321]"
     providers: dict[str, BaseProvider] = {
+        "nvidia_nim": _ModelListingProvider(),
         "open_router": _ModelListingProvider(
             frozenset(
                 {
@@ -225,15 +281,29 @@ def admin_base_url(
             error=RuntimeError(f"Provider rejected credential {provider_secret}")
         ),
     }
+
+    async def fixture_provider(
+        provider_id: str, _settings: Settings, _admission_registry, _api_key_number
+    ) -> BaseProvider:
+        if provider_id not in providers:
+            raise AssertionError(f"Missing browser fixture provider: {provider_id}")
+        return providers[provider_id]
+
     manager = ProviderRuntimeManager(
         get_settings(),
-        runtime_factory=lambda snapshot: ProviderRuntime(snapshot, dict(providers)),
+        runtime_factory=lambda snapshot, admission_registry: ProviderRuntime(
+            snapshot,
+            admission_registry,
+            {(provider_id, 1): provider for provider_id, provider in providers.items()},
+            provider_constructor=fixture_provider,
+        ),
     )
     runtime = ApplicationRuntime(
         manager,
         configuration=ConfigurationService(ManagedConfigStore()),
         transcriber=None,
         code_service=code_control.service,
+        database=code_control.database,
     )
     monkeypatch.setattr(
         NativeFolderPicker,
@@ -318,13 +388,9 @@ def admin_base_url(
         yield f"http://127.0.0.1:{port}"
     finally:
         server.should_exit = True
-        # Generous join: under full-suite xdist load uvicorn lifespan shutdown
-        # can exceed 5s even when the server is healthy.
-        thread.join(timeout=15.0)
+        join_server(thread, code_control, request)
         listener.close()
         clear_settings_cache()
-        if thread.is_alive():
-            pytest.fail("Admin browser-test server did not stop")
 
 
 @pytest.fixture(autouse=True)
@@ -336,3 +402,6 @@ def close_browser_connections_before_server_teardown(
     yield
     if not page.is_closed():
         page.goto("about:blank")
+        # Context disposal can otherwise leak an unfinished route.fetch() error
+        # into the next test's Playwright call.
+        page.unroute_all(behavior="ignoreErrors")

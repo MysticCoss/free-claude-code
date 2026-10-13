@@ -25,6 +25,7 @@ from free_claude_code.core.anthropic import MessagesRequest
 from free_claude_code.core.anthropic.streaming import format_sse_event
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
+from free_claude_code.core.stream_recovery import ContinuationSeed
 from tests.web_tools_support import StubWebToolsClient
 
 
@@ -410,6 +411,7 @@ class _ControlledProvider:
         reasoning: ReasoningPolicy,
         request_headers: Mapping[str, str] | None = None,
         model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens, response_model, reasoning
         self.request_ids.append(request_id)
@@ -430,6 +432,8 @@ class _ControlledProvider:
         response_model: str,
         reasoning: ReasoningPolicy,
         request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         del input_tokens, response_model, reasoning
         self.request_ids.append(request_id)
@@ -456,11 +460,13 @@ class _Lease:
     def model_info(self, provider_id: str, model_id: str) -> ProviderModelInfo | None:
         return None
 
-    def is_provider_cached(self, provider_id: str) -> bool:
+    def is_provider_cached(self, provider_id: str, api_key_number: int = 1) -> bool:
         del provider_id
         return True
 
-    async def resolve_provider(self, provider_id: str) -> ProviderPort:
+    async def resolve_provider(
+        self, provider_id: str, api_key_number: int = 1
+    ) -> ProviderPort:
         assert provider_id == "nvidia_nim"
         return self._provider
 

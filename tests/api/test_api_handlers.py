@@ -23,6 +23,7 @@ from free_claude_code.core.anthropic.streaming import format_sse_event
 from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.reasoning import ReasoningPolicy
+from free_claude_code.core.stream_recovery import ContinuationSeed
 from tests.web_tools_support import StubWebToolsClient
 
 _LEGACY_CLASSIFIER_SYSTEM = (
@@ -64,6 +65,7 @@ class FakeProvider:
         reasoning: ReasoningPolicy,
         request_headers: Mapping[str, str] | None = None,
         model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         self.requests.append(request)
         self.stream_kwargs.append(
@@ -86,6 +88,8 @@ class FakeProvider:
         response_model: str | None = None,
         reasoning: ReasoningPolicy,
         request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         self.responses_requests.append(request)
         self.stream_kwargs.append(
@@ -128,7 +132,7 @@ async def test_messages_handler_passes_routed_request_and_stream_metadata() -> N
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -171,7 +175,7 @@ async def test_messages_handler_startup_invalid_request_stays_http_error(
     provider = RejectStartupProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -247,7 +251,7 @@ async def test_messages_handler_aggregates_provider_stream_when_stream_false() -
     )
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -290,7 +294,7 @@ async def test_messages_handler_returns_error_json_for_stream_false_sse_error() 
     )
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -361,7 +365,7 @@ async def test_messages_handler_discards_partial_stream_false_output_on_error() 
     )
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -397,6 +401,7 @@ async def test_messages_handler_stream_false_provider_exception_keeps_status() -
             reasoning: ReasoningPolicy,
             request_headers: Mapping[str, str] | None = None,
             model_info: ProviderModelInfo | None = None,
+            continuation: ContinuationSeed | None = None,
         ) -> AsyncIterator[str]:
             self.requests.append(request)
             self.stream_kwargs.append(
@@ -418,7 +423,7 @@ async def test_messages_handler_stream_false_provider_exception_keeps_status() -
     provider = FailingProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -455,7 +460,7 @@ async def test_messages_handler_normalizes_safety_classifier_policy(
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -499,7 +504,7 @@ async def test_messages_handler_preserves_thinking_for_non_classifier() -> None:
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -541,7 +546,7 @@ async def test_messages_handler_tolerates_required_thinking_for_classifier() -> 
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -584,7 +589,7 @@ async def test_messages_handler_prefers_no_thinking_without_classifier_stop_hint
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     request = MessagesRequest(
@@ -622,7 +627,7 @@ async def test_messages_handler_preserves_unowned_classifier_stop_sequences() ->
     provider = FakeProvider()
     handler = MessagesHandler(
         Settings(),
-        provider_resolver=AsyncMock(side_effect=lambda _: provider),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
         web_tools=StubWebToolsClient(),
     )
     original_stops = ["custom", "</severity>", "custom", "</severity>", "tail"]
@@ -677,7 +682,8 @@ async def test_messages_handler_optimization_intercepts_before_provider_executio
 async def test_responses_handler_bypasses_message_only_optimizations() -> None:
     provider = FakeProvider()
     handler = ResponsesHandler(
-        Settings(), provider_resolver=AsyncMock(side_effect=lambda _: provider)
+        Settings(),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
     )
 
     with patch(
@@ -701,7 +707,8 @@ async def test_responses_handler_bypasses_message_only_optimizations() -> None:
 async def test_responses_handler_does_not_apply_safety_classifier_policy() -> None:
     provider = FakeProvider()
     handler = ResponsesHandler(
-        Settings(), provider_resolver=AsyncMock(side_effect=lambda _: provider)
+        Settings(),
+        provider_resolver=AsyncMock(side_effect=lambda _, _api_key_number: provider),
     )
 
     with patch("free_claude_code.api.handlers.messages.trace_event") as trace_mock:

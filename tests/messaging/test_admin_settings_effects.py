@@ -6,6 +6,7 @@ honor it. Network clients are mocked, no fixed ports are used, and ``HOME``
 is redirected so no live ``~/.fcc`` state is touched.
 """
 
+import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,15 +19,14 @@ from free_claude_code.messaging.platforms.ports import (
     InboundMessageHandler,
     MessagingPlatformComponents,
 )
-from free_claude_code.messaging.session import SessionStore
 from free_claude_code.providers.nvidia_nim.voice import (
     _NIM_ASR_MODEL_MAP,
     NvidiaNimTranscriber,
 )
-from free_claude_code.runtime.application import ApplicationRuntime
 from free_claude_code.runtime.bootstrap import _create_transcriber
-from free_claude_code.runtime.configuration import ConfigurationService
-from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
+from free_claude_code.runtime.messaging_service import MessagingService
+from free_claude_code.runtime.messaging_sqlite import SQLiteMessagingStore
+from free_claude_code.runtime.sqlite_database import SQLiteDatabase
 
 
 @pytest.fixture(autouse=True)
@@ -59,33 +59,21 @@ class _TrackingMessagingRuntime:
         return True
 
 
-class _SessionStoreSpy:
-    """Capture ``SessionStore`` constructor kwargs while building the real store."""
-
-    def __init__(self) -> None:
-        self.managed_message_cap: object = "unset"
-
-    def __call__(
-        self,
-        storage_path: str = "sessions.json",
-        *,
-        managed_message_cap: int | None = None,
-    ) -> SessionStore:
-        self.managed_message_cap = managed_message_cap
-        return SessionStore(
-            storage_path=storage_path, managed_message_cap=managed_message_cap
-        )
-
-
 async def _start_workflow_with_settings(
     settings: Settings,
-    store_spy: _SessionStoreSpy,
-) -> tuple[ApplicationRuntime, MagicMock, MagicMock]:
-    manager = ProviderRuntimeManager(settings)
-    runtime = ApplicationRuntime(
-        manager,
-        configuration=AsyncMock(spec=ConfigurationService),
+    tmp_path: Path,
+) -> tuple[MessagingService, SQLiteDatabase, MagicMock, MagicMock]:
+    database_path = tmp_path / "fcc.db"
+    database = SQLiteDatabase(database_path, database_path.with_suffix(".lock"))
+    http_ready = asyncio.Event()
+    http_ready.set()
+    service = MessagingService(
+        settings=lambda: settings,
+        database=database,
+        http_ready=http_ready,
+        is_draining=lambda: False,
         transcriber=None,
+        transcriber_factory=None,
     )
     events: list[str] = []
     components = MessagingPlatformComponents(
@@ -94,6 +82,7 @@ async def _start_workflow_with_settings(
         outbound=MagicMock(),
     )
     workflow = MagicMock()
+    workflow.restore = AsyncMock()
     workflow.repair_restored_statuses = AsyncMock()
     workflow.close = AsyncMock()
     cli_manager = MagicMock()
@@ -103,17 +92,21 @@ async def _start_workflow_with_settings(
             return_value=cli_manager,
         ) as cli_constructor,
         patch(
-            "free_claude_code.messaging.session.SessionStore",
-            new=store_spy,
-        ),
-        patch(
             "free_claude_code.messaging.workflow.MessagingWorkflow",
             return_value=workflow,
         ) as workflow_constructor,
     ):
-        runtime.http_started()
-        await runtime._start_messaging_workflow(components)
-    return runtime, cli_constructor, workflow_constructor
+        service._messaging_import_task = asyncio.create_task(
+            service._initialize_messaging_storage()
+        )
+        await service._start_messaging_workflow(components)
+    return service, database, cli_constructor, workflow_constructor
+
+
+async def _close(service: MessagingService, database: SQLiteDatabase) -> None:
+    service.cancel_background_tasks()
+    await service.wait_background_tasks()
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -122,10 +115,9 @@ async def test_allowed_dir_reaches_messaging_workflow_as_workspace_and_allowed_d
 ) -> None:
     allowed = tmp_path / "allowed-workspace"
     settings = Settings(allowed_dir=str(allowed))
-    store_spy = _SessionStoreSpy()
 
-    runtime, cli_constructor, _ = await _start_workflow_with_settings(
-        settings, store_spy
+    service, database, cli_constructor, _ = await _start_workflow_with_settings(
+        settings, tmp_path
     )
     try:
         workspace_path = cli_constructor.call_args.kwargs["workspace_path"]
@@ -133,31 +125,30 @@ async def test_allowed_dir_reaches_messaging_workflow_as_workspace_and_allowed_d
         assert cli_constructor.call_args.kwargs["allowed_dirs"] == [workspace_path]
         assert Path(workspace_path).is_dir()
     finally:
-        assert await runtime.close() is True
+        await _close(service, database)
 
 
 @pytest.mark.asyncio
-async def test_max_message_log_entries_per_chat_wires_session_store_cap() -> None:
+async def test_max_message_log_entries_per_chat_wires_session_store_cap(
+    tmp_path: Path,
+) -> None:
     settings = Settings(max_message_log_entries_per_chat=2)
-    store_spy = _SessionStoreSpy()
 
-    runtime, _, workflow_constructor = await _start_workflow_with_settings(
-        settings, store_spy
+    service, database, _, workflow_constructor = await _start_workflow_with_settings(
+        settings, tmp_path
     )
     try:
-        assert store_spy.managed_message_cap == 2
         session_store = workflow_constructor.call_args.kwargs["session_store"]
-        assert isinstance(session_store, SessionStore)
+        assert isinstance(session_store, SQLiteMessagingStore)
         for index in range(3):
-            session_store.record_message_id(
+            await session_store.record_message_id(
                 "telegram", "chat", f"msg-{index}", "out", "note"
             )
-        assert session_store.get_tracked_message_ids_for_chat("telegram", "chat") == [
-            "msg-1",
-            "msg-2",
-        ]
+        assert await session_store.get_tracked_message_ids_for_chat(
+            "telegram", "chat"
+        ) == ["msg-1", "msg-2"]
     finally:
-        assert await runtime.close() is True
+        await _close(service, database)
 
 
 def _fake_riva_client(
@@ -191,7 +182,7 @@ async def test_nim_whisper_model_selects_matching_riva_function_id(
         voice_note_enabled=True,
         whisper_device="nvidia_nim",
         whisper_model=model,
-        nvidia_nim_api_key="test-nim-key",
+        nvidia_nim_api_keys="test-nim-key",
     )
     expected_function_id, expected_language = _NIM_ASR_MODEL_MAP[model]
 

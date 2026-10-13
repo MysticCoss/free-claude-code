@@ -1,4 +1,6 @@
+import base64
 import json
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -468,3 +470,210 @@ def test_default_spawn_starts_new_session_on_posix(
     assert isinstance(kwargs, dict)
     assert kwargs.get("start_new_session") is True
     assert "creationflags" not in kwargs
+
+
+def _fetch_returning(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    async def fake_fetch(url: str) -> str:
+        return text
+
+    monkeypatch.setattr(updater_module, "_fetch_text", fake_fetch)
+
+
+def _python_arg(command: list[str]) -> str:
+    if sys.platform == "win32":
+        return command[command.index("-PythonSpec") + 1]
+    return command[8]
+
+
+@pytest.mark.asyncio
+async def test_guardian_installs_with_the_target_exact_python_pin(
+    tmp_path: Path, installed_version: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fetch_returning(
+        monkeypatch,
+        '[project]\nversion = "5.23.0"\nrequires-python = "==3.14.9"\n',
+    )
+    spawn = SpawnRecorder()
+
+    await _service(tmp_path, spawn).apply(_settings())
+
+    expected = (
+        "cpython-3.14.9-windows-x86_64-none" if sys.platform == "win32" else "3.14.9"
+    )
+    assert _python_arg(spawn.calls[0]) == expected
+
+
+@pytest.mark.asyncio
+async def test_guardian_falls_back_to_running_python_without_exact_pin(
+    tmp_path: Path, installed_version: str, no_network: list[str]
+) -> None:
+    spawn = SpawnRecorder()
+
+    await _service(tmp_path, spawn).apply(_settings())
+
+    info = sys.version_info
+    assert f"{info.major}.{info.minor}.{info.micro}" in _python_arg(spawn.calls[0])
+
+
+@pytest.mark.asyncio
+async def test_prepare_cli_update_stages_foreground_launcher(
+    tmp_path: Path, installed_version: str, no_network: list[str]
+) -> None:
+    spawn = SpawnRecorder()
+    service = _service(tmp_path, spawn)
+    launcher = tmp_path / "launcher"
+
+    snapshot, available = await service.prepare_cli_update(_settings(), launcher)
+
+    assert available is True
+    assert spawn.calls == []
+    assert snapshot["latest_version"] == "5.23.0"
+    text = _launcher_payload(launcher)
+    guardian = (
+        "update_guardian.ps1" if sys.platform == "win32" else "update_guardian.sh"
+    )
+    assert guardian in text
+    assert "5.23.0" in text
+    assert "MysticCoss/free-claude-code/archive/refs/heads/main.zip" in text
+    # No relaunch: the CLI caller is a one-shot command, not a server.
+    assert updater_module._NO_RELAUNCH_B64 in text
+    assert service.snapshot(_settings())["target_version"] == "5.23.0"
+
+
+def _launcher_payload(launcher: Path) -> str:
+    text = launcher.read_bytes().decode("utf-8")
+    if "-EncodedCommand " not in text:
+        return text
+    encoded = text.split("-EncodedCommand ", 1)[1].split("\r\n", 1)[0]
+    return base64.b64decode(encoded).decode("utf-16-le")
+
+
+@pytest.mark.asyncio
+async def test_prepare_cli_update_skips_when_up_to_date(
+    tmp_path: Path, installed_version: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fetch_returning(monkeypatch, '[project]\nversion = "5.22.4"\n')
+    service = _service(tmp_path, SpawnRecorder())
+    launcher = tmp_path / "launcher"
+
+    snapshot, available = await service.prepare_cli_update(_settings(), launcher)
+
+    assert available is False
+    assert snapshot["update_available"] is False
+    assert not launcher.exists()
+    assert not (tmp_path / "work").exists()
+
+
+@pytest.mark.asyncio
+async def test_prepare_cli_update_raises_on_unreachable_source(
+    tmp_path: Path, installed_version: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing_fetch(url: str) -> str:
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(updater_module, "_fetch_text", failing_fetch)
+
+    with pytest.raises(UpdateCheckFailedError):
+        await _service(tmp_path, SpawnRecorder()).prepare_cli_update(
+            _settings(), tmp_path / "launcher"
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_cli_update_refuses_source_checkouts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(updater_module, "package_version", lambda: "0+unknown")
+
+    with pytest.raises(UpdateDisabledError):
+        await _service(tmp_path, SpawnRecorder()).prepare_cli_update(
+            _settings(), tmp_path / "launcher"
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_cli_update_refuses_while_guardian_runs(
+    tmp_path: Path, installed_version: str, no_network: list[str]
+) -> None:
+    (tmp_path / "progress.json").write_text(
+        json.dumps({"stage": "installing", "updated_ts": time.time()}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UpdateInProgressError):
+        await _service(tmp_path, SpawnRecorder()).prepare_cli_update(
+            _settings(), tmp_path / "launcher"
+        )
+
+
+def test_win32_launcher_is_ascii_and_quotes_powershell_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updater_module.sys, "platform", "win32")
+    launcher = tmp_path / "launcher.cmd"
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\Users\\José's 测试\\update_guardian.ps1",
+        "-Cwd",
+        "C:\\100%\\it's",
+        "-TestExclude",
+        "-not-a-flag",
+    ]
+
+    UpdateService._write_launcher(command, launcher)
+
+    raw = launcher.read_bytes()
+    assert raw.isascii()
+    text = raw.decode("ascii")
+    assert text.startswith("@echo off\r\n")
+    assert text.endswith("exit /b %errorlevel%\r\n")
+    assert _launcher_payload(launcher) == (
+        "& 'C:\\Users\\José''s 测试\\update_guardian.ps1' -Cwd 'C:\\100%\\it''s' "
+        "-TestExclude '-not-a-flag'; exit $LASTEXITCODE"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd + PowerShell launcher")
+def test_win32_launcher_runs_guardian_at_unicode_path_and_keeps_exit_code(
+    tmp_path: Path,
+) -> None:
+    area = tmp_path / "José's 测试 100%"
+    area.mkdir()
+    guardian = area / "update_guardian.ps1"
+    guardian.write_text(
+        "param([string]$Cwd, [string]$TestExclude)\n"
+        'Write-Output "cwd=$Cwd|exclude=$TestExclude"\n'
+        "exit 7\n",
+        encoding="utf-8-sig",
+    )
+    launcher = area / "launcher.cmd"
+    UpdateService._write_launcher(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(guardian),
+            "-Cwd",
+            str(area),
+            "-TestExclude",
+            "not a and not b",
+        ],
+        launcher,
+    )
+
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(launcher)],
+        capture_output=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 7, result.stderr
+    output = result.stdout.decode("utf-8", errors="replace")
+    assert "exclude=not a and not b" in output
+    assert "cwd=" in output

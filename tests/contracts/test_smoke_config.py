@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from free_claude_code.config.api_keys import normalize_api_keys
+from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from smoke.conftest import (
     DISABLED_PROVIDER_MODEL,
     provider_model_params,
@@ -28,57 +30,65 @@ def _settings(**overrides):
         "model_opus": None,
         "model_sonnet": None,
         "model_haiku": None,
-        "azure_openai_api_key": "",
+        "azure_openai_api_keys": "",
         "azure_openai_base_url": "",
-        "nvidia_nim_api_key": "",
-        "open_router_api_key": "",
-        "mistral_api_key": "",
-        "codestral_api_key": "",
-        "deepseek_api_key": "",
-        "kimi_api_key": "",
-        "kimi_code_api_key": "",
-        "wafer_api_key": "",
-        "minimax_api_key": "",
-        "opencode_api_key": "",
-        "vercel_ai_gateway_api_key": "",
-        "bedrock_api_key": "",
+        "nvidia_nim_api_keys": "",
+        "open_router_api_keys": "",
+        "mistral_api_keys": "",
+        "codestral_api_keys": "",
+        "deepseek_api_keys": "",
+        "kimi_api_keys": "",
+        "kimi_code_api_keys": "",
+        "wafer_api_keys": "",
+        "minimax_api_keys": "",
+        "opencode_api_keys": "",
+        "vercel_ai_gateway_api_keys": "",
+        "bedrock_api_keys": "",
         "bedrock_base_url": "https://bedrock-mantle.us-east-1.api.aws/v1",
-        "huggingface_api_key": "",
-        "cohere_api_key": "",
-        "zai_api_key": "",
-        "kilo_api_key": "",
-        "gemini_api_key": "",
+        "huggingface_api_keys": "",
+        "cohere_api_keys": "",
+        "zai_api_keys": "",
+        "kilo_api_keys": "",
+        "gemini_api_keys": "",
         "vertex_project_id": "",
         "vertex_location": "global",
-        "groq_api_key": "",
-        "cline_api_key": "",
-        "xai_api_key": "",
-        "qwencloud_api_key": "",
-        "qwencloud_coding_api_key": "",
-        "together_api_key": "",
-        "deepinfra_api_key": "",
-        "siliconflow_api_key": "",
-        "nebius_api_key": "",
-        "scw_secret_key": "",
-        "chutes_api_key": "",
-        "featherless_api_key": "",
-        "wandb_api_key": "",
-        "sambanova_api_key": "",
-        "cerebras_api_key": "",
-        "ollama_api_key": "",
-        "poolside_api_key": "",
-        "llm7_api_key": "",
-        "lightning_api_key": "",
-        "experiential_api_key": "",
-        "fireworks_api_key": "",
-        "novita_api_key": "",
-        "cloudflare_api_token": "",
+        "groq_api_keys": "",
+        "cline_api_keys": "",
+        "xai_api_keys": "",
+        "qwencloud_api_keys": "",
+        "qwencloud_coding_api_keys": "",
+        "together_api_keys": "",
+        "deepinfra_api_keys": "",
+        "siliconflow_api_keys": "",
+        "nebius_api_keys": "",
+        "scw_secret_keys": "",
+        "opper_api_keys": "",
+        "chutes_api_keys": "",
+        "featherless_api_keys": "",
+        "wandb_api_keys": "",
+        "sambanova_api_keys": "",
+        "cerebras_api_keys": "",
+        "ollama_api_keys": "",
+        "poolside_api_keys": "",
+        "llm7_api_keys": "",
+        "lightning_api_keys": "",
+        "experiential_api_keys": "",
+        "cheaperinference_api_keys": "",
+        "orcarouter_api_keys": "",
+        "xkiro_api_keys": "",
+        "fireworks_api_keys": "",
+        "novita_api_keys": "",
+        "cloudflare_api_tokens": "",
         "cloudflare_account_id": "",
         "lm_studio_base_url": "",
         "llamacpp_base_url": "",
         "ollama_base_url": "http://localhost:11434",
     }
     values.update(overrides)
+    for attr in {
+        d.credential_attr for d in PROVIDER_CATALOG.values() if d.credential_attr
+    }:
+        values[attr] = normalize_api_keys(values.get(attr))
     return SimpleNamespace(**values)
 
 
@@ -139,7 +149,7 @@ def test_ollama_cloud_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            ollama_api_key="ollama-cloud-key",
+            ollama_api_keys="ollama-cloud-key",
         )
     )
 
@@ -157,7 +167,7 @@ def test_provider_smoke_models_cover_configured_providers_independent_of_model_m
     config = _smoke_config(
         settings=_settings(
             model="ollama/llama3.1",
-            deepseek_api_key="deepseek-key",
+            deepseek_api_keys="deepseek-key",
             ollama_base_url="",
         )
     )
@@ -177,7 +187,7 @@ def test_poolside_provider_configuration_uses_documented_default_model(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            poolside_api_key="poolside-key",
+            poolside_api_keys="poolside-key",
         )
     )
 
@@ -196,7 +206,7 @@ def test_llm7_provider_configuration_uses_stable_default_selector(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            llm7_api_key="llm7-key",
+            llm7_api_keys="llm7-key",
         )
     )
 
@@ -213,7 +223,7 @@ def test_llm7_smoke_override_accepts_selector_with_or_without_prefix(
     settings = _settings(
         model="ollama/llama3.1",
         ollama_base_url="",
-        llm7_api_key="llm7-key",
+        llm7_api_keys="llm7-key",
     )
     for override in ("fast", "llm7/fast"):
         monkeypatch.setenv("FCC_SMOKE_MODEL_LLM7", override)
@@ -228,7 +238,7 @@ def test_llm7_is_not_enabled_without_explicit_credential(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_LLM7", raising=False)
     config = _smoke_config(
         provider_matrix=frozenset({"llm7"}),
-        settings=_settings(ollama_base_url="", llm7_api_key=""),
+        settings=_settings(ollama_base_url="", llm7_api_keys=""),
     )
 
     assert not config.has_provider_configuration("llm7")
@@ -243,7 +253,7 @@ def test_lightning_provider_configuration_uses_documented_default_model(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            lightning_api_key="lightning-key",
+            lightning_api_keys="lightning-key",
         )
     )
 
@@ -260,7 +270,7 @@ def test_lightning_smoke_override_accepts_model_with_or_without_prefix(
     settings = _settings(
         model="ollama/llama3.1",
         ollama_base_url="",
-        lightning_api_key="lightning-key",
+        lightning_api_keys="lightning-key",
     )
     for override in (
         "lightning-ai/deepseek-v4-pro",
@@ -278,7 +288,7 @@ def test_lightning_is_not_enabled_without_explicit_credential(monkeypatch) -> No
     monkeypatch.delenv("FCC_SMOKE_MODEL_LIGHTNING", raising=False)
     config = _smoke_config(
         provider_matrix=frozenset({"lightning"}),
-        settings=_settings(ollama_base_url="", lightning_api_key=""),
+        settings=_settings(ollama_base_url="", lightning_api_keys=""),
     )
 
     assert not config.has_provider_configuration("lightning")
@@ -293,7 +303,7 @@ def test_experiential_provider_configuration_uses_documented_free_model(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            experiential_api_key="experiential-key",
+            experiential_api_keys="experiential-key",
         )
     )
 
@@ -310,7 +320,7 @@ def test_experiential_smoke_override_accepts_model_with_or_without_prefix(
     settings = _settings(
         model="ollama/llama3.1",
         ollama_base_url="",
-        experiential_api_key="experiential-key",
+        experiential_api_keys="experiential-key",
     )
     for override in (
         "deepseek-v4-flash",
@@ -330,10 +340,112 @@ def test_experiential_is_not_enabled_without_explicit_credential(
     monkeypatch.delenv("FCC_SMOKE_MODEL_EXPERIENTIAL", raising=False)
     config = _smoke_config(
         provider_matrix=frozenset({"experiential"}),
-        settings=_settings(ollama_base_url="", experiential_api_key=""),
+        settings=_settings(ollama_base_url="", experiential_api_keys=""),
     )
 
     assert not config.has_provider_configuration("experiential")
+    assert config.provider_smoke_models() == []
+
+
+def test_cheaperinference_provider_configuration_uses_default_model(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_CHEAPERINFERENCE", raising=False)
+    config = _smoke_config(
+        settings=_settings(
+            model="ollama/llama3.1",
+            ollama_base_url="",
+            cheaperinference_api_keys="ci_live_key",
+        )
+    )
+
+    assert config.has_provider_configuration("cheaperinference")
+    models = config.provider_smoke_models()
+    assert [model.provider for model in models] == ["cheaperinference"]
+    assert models[0].full_model == "cheaperinference/gpt-5.4-mini"
+    assert models[0].source == "provider_default"
+
+
+def test_cheaperinference_smoke_override_accepts_model_with_or_without_prefix(
+    monkeypatch,
+) -> None:
+    settings = _settings(
+        model="ollama/llama3.1",
+        ollama_base_url="",
+        cheaperinference_api_keys="ci_live_key",
+    )
+    for override in (
+        "claude-sonnet-5",
+        "cheaperinference/claude-sonnet-5",
+    ):
+        monkeypatch.setenv("FCC_SMOKE_MODEL_CHEAPERINFERENCE", override)
+        models = _smoke_config(settings=settings).provider_smoke_models()
+
+        assert [model.provider for model in models] == ["cheaperinference"]
+        assert models[0].full_model == "cheaperinference/claude-sonnet-5"
+        assert models[0].source == "FCC_SMOKE_MODEL_CHEAPERINFERENCE"
+
+
+def test_cheaperinference_is_not_enabled_without_explicit_credential(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_CHEAPERINFERENCE", raising=False)
+    config = _smoke_config(
+        provider_matrix=frozenset({"cheaperinference"}),
+        settings=_settings(ollama_base_url="", cheaperinference_api_keys=""),
+    )
+
+    assert not config.has_provider_configuration("cheaperinference")
+    assert config.provider_smoke_models() == []
+
+
+def test_orcarouter_provider_configuration_uses_documented_free_model(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_ORCAROUTER", raising=False)
+    config = _smoke_config(
+        settings=_settings(
+            model="ollama/llama3.1",
+            ollama_base_url="",
+            orcarouter_api_keys="orcarouter-key",
+        )
+    )
+
+    assert config.has_provider_configuration("orcarouter")
+    models = config.provider_smoke_models()
+    assert [model.provider for model in models] == ["orcarouter"]
+    assert models[0].full_model == "orcarouter/deepseek/deepseek-v4-flash-free"
+    assert models[0].source == "provider_default"
+
+
+def test_orcarouter_smoke_override_accepts_model_with_or_without_prefix(
+    monkeypatch,
+) -> None:
+    settings = _settings(
+        model="ollama/llama3.1",
+        ollama_base_url="",
+        orcarouter_api_keys="orcarouter-key",
+    )
+    for override in (
+        "deepseek/deepseek-v4-pro-free",
+        "orcarouter/deepseek/deepseek-v4-pro-free",
+    ):
+        monkeypatch.setenv("FCC_SMOKE_MODEL_ORCAROUTER", override)
+        models = _smoke_config(settings=settings).provider_smoke_models()
+
+        assert [model.provider for model in models] == ["orcarouter"]
+        assert models[0].full_model == "orcarouter/deepseek/deepseek-v4-pro-free"
+        assert models[0].source == "FCC_SMOKE_MODEL_ORCAROUTER"
+
+
+def test_orcarouter_is_not_enabled_without_explicit_credential(monkeypatch) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_ORCAROUTER", raising=False)
+    config = _smoke_config(
+        provider_matrix=frozenset({"orcarouter"}),
+        settings=_settings(ollama_base_url="", orcarouter_api_keys=""),
+    )
+
+    assert not config.has_provider_configuration("orcarouter")
     assert config.provider_smoke_models() == []
 
 
@@ -343,7 +455,7 @@ def test_xai_provider_smoke_uses_current_grok_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            xai_api_key="xai-key",
+            xai_api_keys="xai-key",
         )
     )
 
@@ -362,7 +474,7 @@ def test_cline_pass_provider_smoke_uses_low_cost_subscription_model(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            cline_api_key="cline-key",
+            cline_api_keys="cline-key",
         )
     )
 
@@ -379,7 +491,7 @@ def test_cline_pass_smoke_override_accepts_full_or_upstream_model_ref(
     settings = _settings(
         model="ollama/llama3.1",
         ollama_base_url="",
-        cline_api_key="cline-key",
+        cline_api_keys="cline-key",
     )
     for override in (
         "cline_pass/cline-pass/kimi-k3",
@@ -400,7 +512,7 @@ def test_zai_shared_key_enables_both_provider_smoke_surfaces(monkeypatch) -> Non
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            zai_api_key="shared-zai-key",
+            zai_api_keys="shared-zai-key",
         )
     )
 
@@ -419,7 +531,7 @@ def test_zai_api_smoke_override_is_independent_from_coding_plan(monkeypatch) -> 
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            zai_api_key="shared-zai-key",
+            zai_api_keys="shared-zai-key",
         )
     )
 
@@ -437,7 +549,7 @@ def test_qwencloud_provider_smoke_uses_current_coding_model(monkeypatch) -> None
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            qwencloud_api_key="qwencloud-key",
+            qwencloud_api_keys="qwencloud-key",
         )
     )
 
@@ -454,7 +566,7 @@ def test_qwencloud_coding_provider_smoke_uses_recommended_model(monkeypatch) -> 
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            qwencloud_coding_api_key="qwencloud-coding-key",
+            qwencloud_coding_api_keys="qwencloud-coding-key",
         )
     )
 
@@ -477,8 +589,8 @@ def test_qwencloud_coding_smoke_override_is_independent_from_token_plan(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            qwencloud_api_key="qwencloud-key",
-            qwencloud_coding_api_key="qwencloud-coding-key",
+            qwencloud_api_keys="qwencloud-key",
+            qwencloud_coding_api_keys="qwencloud-coding-key",
         )
     )
 
@@ -500,7 +612,7 @@ def test_together_provider_smoke_uses_current_coding_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            together_api_key="together-key",
+            together_api_keys="together-key",
         )
     )
 
@@ -517,7 +629,7 @@ def test_deepinfra_provider_smoke_uses_current_coding_model(monkeypatch) -> None
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            deepinfra_api_key="deepinfra-key",
+            deepinfra_api_keys="deepinfra-key",
         )
     )
 
@@ -534,7 +646,7 @@ def test_siliconflow_provider_smoke_uses_documented_chat_model(monkeypatch) -> N
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            siliconflow_api_key="siliconflow-key",
+            siliconflow_api_keys="siliconflow-key",
         )
     )
 
@@ -551,7 +663,7 @@ def test_nebius_provider_smoke_uses_documented_agent_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            nebius_api_key="nebius-key",
+            nebius_api_keys="nebius-key",
         )
     )
 
@@ -568,7 +680,7 @@ def test_chutes_provider_smoke_uses_documented_agent_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            chutes_api_key="chutes-key",
+            chutes_api_keys="chutes-key",
         )
     )
 
@@ -585,7 +697,7 @@ def test_scaleway_provider_smoke_uses_documented_agent_model(monkeypatch) -> Non
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            scw_secret_key="scw-key",
+            scw_secret_keys="scw-key",
         )
     )
 
@@ -596,13 +708,30 @@ def test_scaleway_provider_smoke_uses_documented_agent_model(monkeypatch) -> Non
     assert models[0].source == "provider_default"
 
 
+def test_opper_provider_smoke_uses_documented_agent_model(monkeypatch) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_OPPER", raising=False)
+    config = _smoke_config(
+        settings=_settings(
+            model="ollama/llama3.1",
+            ollama_base_url="",
+            opper_api_keys="opper-key",
+        )
+    )
+
+    models = config.provider_smoke_models()
+
+    assert [model.provider for model in models] == ["opper"]
+    assert models[0].full_model == "opper/claude-sonnet-4-6"
+    assert models[0].source == "provider_default"
+
+
 def test_featherless_provider_smoke_uses_documented_agent_model(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_FEATHERLESS", raising=False)
     config = _smoke_config(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            featherless_api_key="featherless-key",
+            featherless_api_keys="featherless-key",
         )
     )
 
@@ -619,7 +748,7 @@ def test_agnes_provider_smoke_uses_documented_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            agnes_api_key="agnes-key",
+            agnes_api_keys="agnes-key",
         )
     )
 
@@ -636,7 +765,7 @@ def test_zenmux_provider_smoke_uses_current_free_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            zenmux_api_key="zenmux-key",
+            zenmux_api_keys="zenmux-key",
         )
     )
 
@@ -653,7 +782,7 @@ def test_wandb_provider_smoke_uses_documented_tool_model(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            wandb_api_key="wandb-key",
+            wandb_api_keys="wandb-key",
         )
     )
 
@@ -670,7 +799,7 @@ def test_wandb_provider_smoke_honors_model_override(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            wandb_api_key="wandb-key",
+            wandb_api_keys="wandb-key",
         )
     )
 
@@ -708,7 +837,7 @@ def test_connected_account_provider_smoke_requires_explicit_model(
 def test_openrouter_provider_smoke_uses_concrete_free_model(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_OPEN_ROUTER", raising=False)
     config = _smoke_config(
-        settings=_settings(open_router_api_key="openrouter-key", ollama_base_url="")
+        settings=_settings(open_router_api_keys="openrouter-key", ollama_base_url="")
     )
 
     models = config.provider_smoke_models()
@@ -721,7 +850,7 @@ def test_openrouter_provider_smoke_uses_concrete_free_model(monkeypatch) -> None
 def test_kilo_provider_smoke_uses_concrete_free_model(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_KILO", raising=False)
     config = _smoke_config(
-        settings=_settings(kilo_api_key="anonymous", ollama_base_url="")
+        settings=_settings(kilo_api_keys="anonymous", ollama_base_url="")
     )
 
     models = config.provider_smoke_models()
@@ -737,7 +866,7 @@ def test_bedrock_provider_configuration_uses_official_api_key(monkeypatch) -> No
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            bedrock_api_key="bedrock-key",
+            bedrock_api_keys="bedrock-key",
         )
     )
 
@@ -756,7 +885,7 @@ def test_azure_openai_provider_configuration_requires_key_and_resource_url(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            azure_openai_api_key="azure-key",
+            azure_openai_api_keys="azure-key",
             azure_openai_base_url=("https://resource.openai.azure.com/openai/v1/"),
         )
     )
@@ -794,7 +923,7 @@ def test_wafer_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            wafer_api_key="wafer-key",
+            wafer_api_keys="wafer-key",
         )
     )
 
@@ -810,7 +939,7 @@ def test_kimi_code_provider_configuration_uses_subscription_key(monkeypatch) -> 
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            kimi_code_api_key="subscription-key",
+            kimi_code_api_keys="subscription-key",
         )
     )
 
@@ -827,7 +956,7 @@ def test_minimax_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            minimax_api_key="minimax-key",
+            minimax_api_keys="minimax-key",
         )
     )
 
@@ -845,7 +974,7 @@ def test_cloudflare_provider_configuration_requires_token_and_account(
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            cloudflare_api_token="cf-token",
+            cloudflare_api_tokens="cf-token",
             cloudflare_account_id="cf-account",
         )
     )
@@ -860,7 +989,7 @@ def test_cloudflare_provider_configuration_missing_account_is_unconfigured() -> 
     config = _smoke_config(
         settings=_settings(
             ollama_base_url="",
-            cloudflare_api_token="cf-token",
+            cloudflare_api_tokens="cf-token",
             cloudflare_account_id="",
         )
     )
@@ -874,7 +1003,7 @@ def test_vercel_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            vercel_ai_gateway_api_key="vercel-key",
+            vercel_ai_gateway_api_keys="vercel-key",
         )
     )
 
@@ -890,7 +1019,7 @@ def test_huggingface_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            huggingface_api_key="hf-key",
+            huggingface_api_keys="hf-key",
         )
     )
 
@@ -906,7 +1035,7 @@ def test_cohere_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            cohere_api_key="cohere-key",
+            cohere_api_keys="cohere-key",
         )
     )
 
@@ -922,7 +1051,7 @@ def test_sambanova_provider_configuration_uses_api_key(monkeypatch) -> None:
         settings=_settings(
             model="ollama/llama3.1",
             ollama_base_url="",
-            sambanova_api_key="sambanova-key",
+            sambanova_api_keys="sambanova-key",
         )
     )
 
@@ -938,7 +1067,7 @@ def test_provider_smoke_model_override_accepts_model_name_without_prefix(
     monkeypatch.setenv("FCC_SMOKE_MODEL_DEEPSEEK", "deepseek-reasoner")
     config = _smoke_config(
         settings=_settings(
-            deepseek_api_key="deepseek-key",
+            deepseek_api_keys="deepseek-key",
             ollama_base_url="",
         ),
         provider_matrix=frozenset({"deepseek"}),
@@ -959,8 +1088,8 @@ def test_provider_smoke_model_override_accepts_owner_model_name(
     config = _smoke_config(
         settings=_settings(
             model="deepseek/deepseek-chat",
-            deepseek_api_key="",
-            nvidia_nim_api_key="nim-key",
+            deepseek_api_keys="",
+            nvidia_nim_api_keys="nim-key",
             ollama_base_url="",
         ),
         provider_matrix=frozenset({"nvidia_nim"}),
@@ -978,7 +1107,7 @@ def test_provider_smoke_model_override_preserves_namespaced_upstream_model(
     monkeypatch.setenv("FCC_SMOKE_MODEL_DEEPSEEK", "ollama/llama3.1")
     config = _smoke_config(
         settings=_settings(
-            deepseek_api_key="deepseek-key",
+            deepseek_api_keys="deepseek-key",
             ollama_base_url="",
         ),
         provider_matrix=frozenset({"deepseek"}),
@@ -992,7 +1121,7 @@ def test_provider_smoke_model_override_preserves_namespaced_upstream_model(
 def test_mistral_reasoning_smoke_uses_reasoning_default(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_MISTRAL_REASONING", raising=False)
     config = _smoke_config(
-        settings=_settings(mistral_api_key="mistral-key", ollama_base_url="")
+        settings=_settings(mistral_api_keys="mistral-key", ollama_base_url="")
     )
 
     model = config.mistral_reasoning_smoke_model()
@@ -1006,7 +1135,7 @@ def test_mistral_reasoning_smoke_uses_reasoning_default(monkeypatch) -> None:
 def test_mistral_reasoning_smoke_accepts_override(monkeypatch) -> None:
     monkeypatch.setenv("FCC_SMOKE_MODEL_MISTRAL_REASONING", "mistral-medium-3-5")
     config = _smoke_config(
-        settings=_settings(mistral_api_key="mistral-key", ollama_base_url="")
+        settings=_settings(mistral_api_keys="mistral-key", ollama_base_url="")
     )
 
     model = config.mistral_reasoning_smoke_model()
@@ -1019,7 +1148,7 @@ def test_mistral_reasoning_smoke_accepts_override(monkeypatch) -> None:
 def test_mistral_reasoning_smoke_respects_provider_matrix(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_MISTRAL_REASONING", raising=False)
     config = _smoke_config(
-        settings=_settings(mistral_api_key="mistral-key", ollama_base_url=""),
+        settings=_settings(mistral_api_keys="mistral-key", ollama_base_url=""),
         provider_matrix=frozenset({"deepseek"}),
     )
 
@@ -1030,8 +1159,8 @@ def test_provider_smoke_matrix_filters_provider_catalog(monkeypatch) -> None:
     monkeypatch.delenv("FCC_SMOKE_MODEL_DEEPSEEK", raising=False)
     config = _smoke_config(
         settings=_settings(
-            deepseek_api_key="deepseek-key",
-            nvidia_nim_api_key="nim-key",
+            deepseek_api_keys="deepseek-key",
+            nvidia_nim_api_keys="nim-key",
             ollama_base_url="",
         ),
         provider_matrix=frozenset({"nvidia_nim"}),
@@ -1050,8 +1179,8 @@ def test_provider_smoke_collection_params_are_grouped_by_provider(
     config = _smoke_config(
         live=True,
         settings=_settings(
-            deepseek_api_key="deepseek-key",
-            nvidia_nim_api_key="nim-key",
+            deepseek_api_keys="deepseek-key",
+            nvidia_nim_api_keys="nim-key",
             ollama_base_url="",
         ),
     )
@@ -1147,7 +1276,7 @@ def test_smoke_config_returns_nvidia_nim_cli_provider_models(monkeypatch) -> Non
     config = _smoke_config(
         settings=_settings(
             model="nvidia_nim/z-ai/glm-5.2",
-            nvidia_nim_api_key="nim-key",
+            nvidia_nim_api_keys="nim-key",
             ollama_base_url="",
         )
     )
@@ -1239,7 +1368,7 @@ def test_smoke_config_returns_openrouter_free_cli_provider_models(monkeypatch) -
     config = _smoke_config(
         settings=_settings(
             model="open_router/poolside/laguna-s-2.1:free",
-            open_router_api_key="openrouter-key",
+            open_router_api_keys="openrouter-key",
             ollama_base_url="",
         )
     )
@@ -1249,3 +1378,53 @@ def test_smoke_config_returns_openrouter_free_cli_provider_models(monkeypatch) -
     assert models[0].provider == "open_router"
     assert models[0].full_model == "open_router/nvidia/nemotron-3-super-120b-a12b:free"
     assert models[0].source == "openrouter_free_cli_default"
+
+
+def test_xkiro_provider_configuration_uses_documented_free_model(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_XKIRO", raising=False)
+    config = _smoke_config(
+        settings=_settings(
+            model="ollama/llama3.1",
+            ollama_base_url="",
+            xkiro_api_keys="xkiro-key",
+        )
+    )
+
+    assert config.has_provider_configuration("xkiro")
+    models = config.provider_smoke_models()
+    assert [model.provider for model in models] == ["xkiro"]
+    assert models[0].full_model == "xkiro/qwen/qwen3.7-flash:free"
+    assert models[0].source == "provider_default"
+
+
+def test_xkiro_smoke_override_accepts_model_with_or_without_prefix(
+    monkeypatch,
+) -> None:
+    settings = _settings(
+        model="ollama/llama3.1",
+        ollama_base_url="",
+        xkiro_api_keys="xkiro-key",
+    )
+    for override in (
+        "qwen/other-model",
+        "xkiro/qwen/other-model",
+    ):
+        monkeypatch.setenv("FCC_SMOKE_MODEL_XKIRO", override)
+        models = _smoke_config(settings=settings).provider_smoke_models()
+
+        assert [model.provider for model in models] == ["xkiro"]
+        assert models[0].full_model == "xkiro/qwen/other-model"
+        assert models[0].source == "FCC_SMOKE_MODEL_XKIRO"
+
+
+def test_xkiro_is_not_enabled_without_explicit_credential(monkeypatch) -> None:
+    monkeypatch.delenv("FCC_SMOKE_MODEL_XKIRO", raising=False)
+    config = _smoke_config(
+        provider_matrix=frozenset({"xkiro"}),
+        settings=_settings(ollama_base_url="", xkiro_api_keys=""),
+    )
+
+    assert not config.has_provider_configuration("xkiro")
+    assert config.provider_smoke_models() == []

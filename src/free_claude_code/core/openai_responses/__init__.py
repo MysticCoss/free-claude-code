@@ -8,7 +8,11 @@ from .errors import (
     openai_error_type_for_failure,
     openai_failure_payload,
 )
-from .events import OPENAI_RESPONSES_SSE_HEADERS, committed_response_failure_frame
+from .events import (
+    OPENAI_RESPONSES_SSE_HEADERS,
+    committed_response_failure_frame,
+    format_response_sse_event,
+)
 from .ids import (
     new_call_id,
     new_message_item_id,
@@ -35,7 +39,6 @@ from .streaming.completion import (
     reasoning_output_item,
     tool_item,
 )
-from .streaming.error_mapping import replay_unsafe_function_call_error
 from .streaming.event_builders import ResponseEventBuilder
 from .streaming.ledger import ResponsesOutputLedger
 from .tokens import estimate_responses_input_tokens
@@ -44,6 +47,7 @@ from .tool_adaptation import (
     ResponsesToolEventAdapter,
     ResponsesToolPolicy,
 )
+from .tool_search import is_client_search
 from .tools import (
     ResponsesToolIdentity,
     flatten_responses_tool_name,
@@ -76,6 +80,8 @@ __all__ = [
     "committed_response_failure_frame",
     "estimate_responses_input_tokens",
     "flatten_responses_tool_name",
+    "format_response_sse_event",
+    "is_client_search",
     "new_call_id",
     "new_message_item_id",
     "new_reasoning_item_id",
@@ -85,7 +91,6 @@ __all__ = [
     "openai_error_type_for_failure",
     "openai_failure_payload",
     "reasoning_output_item",
-    "replay_unsafe_function_call_error",
     "responses_reasoning_config",
     "responses_reasoning_policy",
     "responses_stream_failure_from_event",

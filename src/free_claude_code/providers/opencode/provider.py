@@ -22,6 +22,7 @@ from free_claude_code.core.reasoning import (
     ReasoningPolicy,
 )
 from free_claude_code.core.session_id import conversation_seed, opencode_request_headers
+from free_claude_code.core.stream_recovery import ContinuationSeed
 from free_claude_code.providers.admission import ProviderAdmissionController
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.endpoint_types import EndpointContext
@@ -281,6 +282,7 @@ class OpenCodeProvider(BaseProvider):
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
         model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         return self._dispatch_stream(
             request,
@@ -290,6 +292,7 @@ class OpenCodeProvider(BaseProvider):
             reasoning=reasoning,
             endpoint_context=endpoint_context,
             request_headers=request_headers,
+            continuation=continuation,
         )
 
     async def _dispatch_stream(
@@ -302,6 +305,7 @@ class OpenCodeProvider(BaseProvider):
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         await ensure_opencode_version(proxy=self._config.proxy)
         snapshot = await self._catalog.snapshot(request_id=request_id)
@@ -321,6 +325,7 @@ class OpenCodeProvider(BaseProvider):
                         request_headers or {}, request, request_id
                     ),
                     model_info=route.model_info,
+                    continuation=continuation,
                 )
             else:
                 selected_stream = self._chat.stream_messages(
@@ -334,6 +339,7 @@ class OpenCodeProvider(BaseProvider):
                         request_headers or {}, request, request_id
                     ),
                     model_info=route.model_info,
+                    continuation=continuation,
                 )
             async for event in selected_stream:
                 yield event
@@ -356,6 +362,8 @@ class OpenCodeProvider(BaseProvider):
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
+        model_info: ProviderModelInfo | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         return self._dispatch_responses_stream(
             request,
@@ -365,6 +373,7 @@ class OpenCodeProvider(BaseProvider):
             reasoning=reasoning,
             endpoint_context=endpoint_context,
             request_headers=request_headers,
+            continuation=continuation,
         )
 
     async def _dispatch_responses_stream(
@@ -377,6 +386,7 @@ class OpenCodeProvider(BaseProvider):
         reasoning: ReasoningPolicy,
         endpoint_context: EndpointContext | None = None,
         request_headers: Mapping[str, str] | None = None,
+        continuation: ContinuationSeed | None = None,
     ) -> AsyncIterator[str]:
         await ensure_opencode_version(proxy=self._config.proxy)
         snapshot = await self._catalog.snapshot(request_id=request_id)
@@ -396,6 +406,7 @@ class OpenCodeProvider(BaseProvider):
                         request_headers or {}, request, request_id
                     ),
                     model_info=route.model_info,
+                    continuation=continuation,
                 )
             else:
                 selected_stream = self._chat.stream_responses(
@@ -408,6 +419,7 @@ class OpenCodeProvider(BaseProvider):
                     extra_headers=self._upstream_headers(
                         request_headers or {}, request, request_id
                     ),
+                    continuation=continuation,
                 )
             async for event in selected_stream:
                 yield event
