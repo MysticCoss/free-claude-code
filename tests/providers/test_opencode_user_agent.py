@@ -10,7 +10,11 @@ from free_claude_code.providers.opencode import user_agent as ua
 @pytest.fixture(autouse=True)
 def _stale_version_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ua, "_version", ua.FALLBACK_VERSION)
-    monkeypatch.setattr(ua, "_refreshed_at", 0.0)
+    # Seed a guaranteed-stale stamp, not 0.0: time.monotonic() counts from
+    # boot, so on machines with less uptime than _TTL_S (every CI runner)
+    # 0.0 looks fresh and ensure_opencode_version() returns the fallback
+    # without ever calling the mocked fetchers.
+    monkeypatch.setattr(ua, "_refreshed_at", time.monotonic() - ua._TTL_S - 1)
 
 
 def test_user_agent_is_versioned_product_token() -> None:
