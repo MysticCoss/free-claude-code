@@ -3,6 +3,7 @@ import pytest
 from free_claude_code.core.updates import (
     fork_revision_tuple,
     is_newer_version,
+    parse_pyproject_python,
     version_tuple,
 )
 
@@ -52,3 +53,18 @@ def test_is_newer_version_with_fork_revision(
     candidate: str, current: str, expected: bool
 ) -> None:
     assert is_newer_version(candidate, current) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('[project]\nrequires-python = "==3.14.7"\n', "3.14.7"),
+        ('[project]\nrequires-python = "== 3.14.7"\n', "3.14.7"),
+        ('[project]\nrequires-python = ">=3.14.0"\n', None),
+        ('[project]\nrequires-python = "==3.14"\n', None),
+        ("[project]\n", None),
+        ("not toml [", None),
+    ],
+)
+def test_parse_pyproject_python(text: str, expected: str | None) -> None:
+    assert parse_pyproject_python(text) == expected

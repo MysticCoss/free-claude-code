@@ -26,9 +26,9 @@ from free_claude_code.application.routing import ModelRouter
 from free_claude_code.cli import commands as cli_commands
 from free_claude_code.cli.commands import ServerSupervisor, desktop_listener_port
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
+from free_claude_code.config.api_keys import normalize_api_keys
 from free_claude_code.config.provider_catalog import SUPPORTED_PROVIDER_IDS
 from free_claude_code.config.reasoning import ReasoningPreference
-from free_claude_code.config.api_keys import normalize_api_keys
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.gateway_model_ids import (
     decode_gateway_model_id,

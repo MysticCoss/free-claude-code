@@ -495,11 +495,9 @@ Stop all running FCC commands, then run:
 fcc-update
 ```
 
-If FCC is already up to date, the command stops without running the installer. Otherwise, it shows the installed and available versions before updating. If the version check fails, retry the command.
+`fcc-update` installs this fork from the GitHub branch set by `FCC_UPDATE_REPO` and `FCC_UPDATE_BRANCH` (default `MysticCoss/free-claude-code@main`), the same source as the Admin UI's in-app update. If FCC is already up to date, the command stops. Otherwise, it shows the installed and available versions, runs the update test gate against the downloaded branch, and installs it only when the gate passes. If the version check fails, retry the command.
 
 To reinstall FCC or change optional components while already up to date, run the [installer](#install) directly.
-
-For local voice support, include `--voice-local` (macOS/Linux) or `-VoiceLocal` (Windows), plus your `--torch-backend` or `-TorchBackend` option if used.
 
 If your installation does not have `fcc-update` yet, run the [installer](#install) once to add it.
 

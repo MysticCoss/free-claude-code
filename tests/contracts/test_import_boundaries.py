@@ -11,7 +11,9 @@ _PACKAGE_ROOT = _REPO_ROOT / "src" / "free_claude_code"
 _PACKAGE_NAME = "free_claude_code"
 
 ALLOWED_PACKAGE_DEPENDENCIES: dict[str, set[str]] = {
-    "updater": set(),
+    # Fork: the fcc-update preflight reuses the in-app UpdateService so the
+    # CLI and Admin UI share one tested update path.
+    "updater": {"application", "config"},
     "config": {"core"},
     "core": set(),
     "application": {"config", "core"},

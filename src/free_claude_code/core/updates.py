@@ -16,6 +16,8 @@ _REPO_SEGMENT_PATTERN = re.compile(r"^(?![-.])[A-Za-z0-9._-]+(?<![-.])$")
 _BRANCH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 # Fork revision local label: ``+f1.0`` in ``6.16.3+f1.0``.
 _FORK_LABEL_PATTERN = re.compile(r"f(\d+(?:\.\d+)*)")
+# Exact interpreter pin: ``requires-python = "==3.14.7"``.
+_EXACT_PYTHON_PATTERN = re.compile(r"==\s*(\d+\.\d+\.\d+)")
 
 
 def update_capable(version: str) -> bool:
@@ -98,6 +100,23 @@ def parse_pyproject_version(text: str) -> str | None:
         return None
     version = project.get("version")
     return version if isinstance(version, str) else None
+
+
+def parse_pyproject_python(text: str) -> str | None:
+    """Return the exact ``X.Y.Z`` from a ``requires-python = "==X.Y.Z"`` pin."""
+
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    requirement = project.get("requires-python")
+    if not isinstance(requirement, str):
+        return None
+    match = _EXACT_PYTHON_PATTERN.fullmatch(requirement.strip())
+    return match.group(1) if match else None
 
 
 def validate_update_repo(value: str) -> str:
