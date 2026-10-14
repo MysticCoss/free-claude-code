@@ -1,0 +1,1 @@
+@directives/CLAUDE.md

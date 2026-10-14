@@ -97,6 +97,33 @@ class Message(BaseModel):
     )
     reasoning_content: str | None = None
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def _flatten_tool_additions(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        return [_tool_addition_as_text(block) for block in value]
+
+
+def _tool_addition_as_text(block: object) -> object:
+    """Render Claude Code's deferred-tool ``tool_addition`` notice as text.
+
+    Translated providers have no equivalent block; the tool itself is still
+    advertised through ``tools``, so only the notice needs to survive.
+    """
+    if not isinstance(block, dict) or block.get("type") != "tool_addition":
+        return block
+    tool = block.get("tool")
+    definition = tool.get("definition") if isinstance(tool, dict) else None
+    if not isinstance(definition, dict):
+        definition = tool if isinstance(tool, dict) else {}
+    name = definition.get("name")
+    description = definition.get("description")
+    text = f"Tool now available: {name}" if name else "A tool is now available."
+    if description:
+        text += f" — {description}"
+    return {"type": "text", "text": text}
+
 
 class Tool(_AnthropicBlockBase):
     name: str

@@ -7,6 +7,7 @@ from free_claude_code.core.anthropic.conversion import (
 )
 from free_claude_code.core.anthropic.models import (
     ContentBlockDocument,
+    ContentBlockText,
     ContentBlockWebFetchToolResult,
     Message,
     MessagesRequest,
@@ -282,6 +283,38 @@ def test_document_and_web_fetch_blocks_preserve_protocol_extensions() -> None:
     assert content[0].model_dump()["cache_control"] == {"type": "ephemeral"}
     assert isinstance(content[1], ContentBlockWebFetchToolResult)
     assert content[1].model_dump()["provider_extension"] is True
+
+
+def test_tool_addition_blocks_become_text() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "mcp__docs__batch",
+                                    "description": "Create a doc.",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    content = request.messages[0].content
+    assert isinstance(content, list)
+    assert isinstance(content[1], ContentBlockText)
+    assert content[1].text == "Tool now available: mcp__docs__batch — Create a doc."
 
 
 def test_content_block_descriptions_remain_in_the_public_schema() -> None:
