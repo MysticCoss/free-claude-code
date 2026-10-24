@@ -16,6 +16,12 @@ from free_claude_code.providers.credential_validation import (
 from tests.api.support import create_test_app, provider_manager_for_app, runtime_for_app
 
 
+@pytest.fixture(autouse=True)
+def _no_process_openai_key(monkeypatch):
+    """Edit OPENAI_API_KEY as a managed key even if the developer shell sets it."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 def client_for(app):
     return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
 
