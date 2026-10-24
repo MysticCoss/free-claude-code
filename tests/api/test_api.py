@@ -270,6 +270,38 @@ def test_create_message_schema_validation_has_request_id_without_terminal_header
     assert "x-should-retry" not in response.headers
 
 
+def test_create_message_accepts_claude_code_tool_notices(client: TestClient):
+    """Deferred-tool notices in history reach the provider as text, not a 422."""
+    _stream_messages_calls.clear()
+    response = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-3-sonnet",
+            "max_tokens": 32,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "# Environment update"},
+                        {
+                            "type": "tool_removal",
+                            "tool": {"type": "tool_reference", "name": "SendFeedback"},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    content = _stream_messages_calls[0][0][0].messages[0].content
+    assert isinstance(content, list)
+    assert content[1].model_dump() == {
+        "type": "text",
+        "text": "Tool no longer available: SendFeedback",
+    }
+
+
 def test_create_message_pre_start_provider_error_returns_terminal_json(
     client: TestClient,
 ):
