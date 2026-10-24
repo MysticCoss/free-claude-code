@@ -7,6 +7,7 @@ from free_claude_code.core.anthropic.conversion import (
 )
 from free_claude_code.core.anthropic.models import (
     ContentBlockDocument,
+    ContentBlockText,
     ContentBlockWebFetchToolResult,
     Message,
     MessagesRequest,
@@ -282,6 +283,134 @@ def test_document_and_web_fetch_blocks_preserve_protocol_extensions() -> None:
     assert content[0].model_dump()["cache_control"] == {"type": "ephemeral"}
     assert isinstance(content[1], ContentBlockWebFetchToolResult)
     assert content[1].model_dump()["provider_extension"] is True
+
+
+def test_tool_addition_blocks_become_text() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "mcp__docs__batch",
+                                    "description": "Create a doc.",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    content = request.messages[0].content
+    assert isinstance(content, list)
+    assert isinstance(content[1], ContentBlockText)
+    assert content[1].text == "Tool now available: mcp__docs__batch — Create a doc."
+
+
+def test_tool_removal_blocks_become_text() -> None:
+    request = MessagesRequest.model_validate(
+        {
+            "model": "model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "# Environment update"},
+                        {
+                            "type": "tool_removal",
+                            "tool": {"type": "tool_reference", "name": "SendFeedback"},
+                        },
+                        {
+                            "type": "tool_removal",
+                            "tool": {
+                                "type": "tool_reference",
+                                "name": "mcp__docs__update",
+                            },
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    content = request.messages[0].content
+    assert isinstance(content, list)
+    plain, tagged = content[1], content[2]
+    assert isinstance(plain, ContentBlockText)
+    assert plain.text == "Tool no longer available: SendFeedback"
+    assert "cache_control" not in plain.model_dump()
+    assert isinstance(tagged, ContentBlockText)
+    assert tagged.text == "Tool no longer available: mcp__docs__update"
+    assert tagged.model_dump()["cache_control"] == {"type": "ephemeral"}
+
+
+def test_tool_addition_notice_keeps_cache_control() -> None:
+    message = Message.model_validate(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_addition",
+                    "tool": {"type": "tool_definition", "definition": {"name": "t"}},
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    )
+
+    assert isinstance(message.content, list)
+    block = message.content[0]
+    assert isinstance(block, ContentBlockText)
+    assert block.text == "Tool now available: t"
+    assert block.model_dump()["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.parametrize(
+    ("block", "text"),
+    [
+        ({"type": "tool_addition"}, "A tool is now available."),
+        (
+            {"type": "tool_addition", "tool": {"name": "bare"}},
+            "Tool now available: bare",
+        ),
+        ({"type": "tool_removal"}, "A tool is no longer available."),
+        (
+            {"type": "tool_removal", "tool": "SendFeedback"},
+            "A tool is no longer available.",
+        ),
+        (
+            {"type": "tool_removal", "tool": {"type": "tool_reference"}},
+            "A tool is no longer available.",
+        ),
+    ],
+)
+def test_malformed_tool_notices_still_become_text(
+    block: dict[str, object], text: str
+) -> None:
+    message = Message.model_validate({"role": "user", "content": [block]})
+
+    assert isinstance(message.content, list)
+    notice = message.content[0]
+    assert isinstance(notice, ContentBlockText)
+    assert notice.text == text
+
+
+def test_unhashable_block_type_is_a_validation_error_not_a_crash() -> None:
+    with pytest.raises(ValidationError):
+        Message.model_validate(
+            {"role": "user", "content": [{"type": ["tool_removal"]}]}
+        )
 
 
 def test_content_block_descriptions_remain_in_the_public_schema() -> None:

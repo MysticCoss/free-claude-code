@@ -97,6 +97,58 @@ class Message(BaseModel):
     )
     reasoning_content: str | None = None
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def _flatten_tool_notices(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        return [_tool_notice_as_text(block) for block in value]
+
+
+def _tool_notice_as_text(block: object) -> object:
+    """Render Claude Code's deferred-tool notices as text.
+
+    ``tool_addition`` and ``tool_removal`` blocks announce tools appearing or
+    disappearing mid-conversation. Translated providers have no equivalent
+    blocks; the tools themselves are still advertised through ``tools``, so
+    only the notice needs to survive.
+    """
+    if not isinstance(block, dict):
+        return block
+    tool = block.get("tool")
+    tool = tool if isinstance(tool, dict) else {}
+    if block.get("type") == "tool_addition":
+        text = _tool_addition_text(tool)
+    elif block.get("type") == "tool_removal":
+        text = _tool_removal_text(tool)
+    else:
+        return block
+    notice = {"type": "text", "text": text}
+    if "cache_control" in block:
+        notice["cache_control"] = block["cache_control"]
+    return notice
+
+
+def _tool_addition_text(tool: dict[str, object]) -> str:
+    definition = tool.get("definition")
+    if not isinstance(definition, dict):
+        definition = tool
+    name = definition.get("name")
+    description = definition.get("description")
+    text = f"Tool now available: {name}" if name else "A tool is now available."
+    if description:
+        text += f" — {description}"
+    return text
+
+
+def _tool_removal_text(tool: dict[str, object]) -> str:
+    name = tool.get("name")
+    return (
+        f"Tool no longer available: {name}"
+        if name
+        else "A tool is no longer available."
+    )
+
 
 class Tool(_AnthropicBlockBase):
     name: str
