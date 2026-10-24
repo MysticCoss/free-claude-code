@@ -25,6 +25,23 @@ REQUIRED_TEST_RUNNERS = {
 }
 
 
+def _git_bash() -> str | None:
+    """Locate Git for Windows' bash from wherever ``git`` resolves.
+
+    ``git`` may resolve to ``<Git>\\cmd\\git.exe`` or
+    ``<Git>\\mingw64\\bin\\git.exe``, so search its ancestors for the install
+    root that holds ``bin\\bash.exe``.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return None
+    for root in Path(git).resolve().parents:
+        candidate = root / "bin" / "bash.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 @pytest.mark.parametrize(
     "requirement, valid",
     [
@@ -42,11 +59,7 @@ def test_ci_python_identity_parses_toml(
     (tmp_path / "pyproject.toml").write_text(
         f"[project]\nrequires-python = {requirement}\n", encoding="utf-8"
     )
-    bash = shutil.which("bash")
-    if sys.platform == "win32":
-        git = shutil.which("git")
-        assert git is not None
-        bash = str(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    bash = _git_bash() if sys.platform == "win32" else shutil.which("bash")
     assert bash is not None
     env = {
         **os.environ,
