@@ -16,6 +16,7 @@ SCRIPTS = ("fcc-update", "fcc-update.cmd")
 # "argv[1] is the launcher path; exit 0 / 1 / 10, and on 10 it is staged".
 STUB_CHECK = """
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -45,8 +46,8 @@ def main():
         launcher.write_text(
             "#!/bin/sh\\n"
             "echo launcher ran\\n"
-            f"printf 'exit 99\\\\n' > '{launcher_target}'\\n"
-            f"printf 'replaced' > '{checker_target}'\\n"
+            f"printf 'exit 99\\\\n' > {shlex.quote(launcher_target)}\\n"
+            f"printf 'replaced' > {shlex.quote(checker_target)}\\n"
             f"exit {code}\\n",
             encoding="utf-8",
             newline="",
@@ -68,7 +69,9 @@ def fixture_wheel(area: Path) -> Path:
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         )
         for name in SCRIPTS:
-            source = (ROOT / "scripts/update" / name).read_text(encoding="utf-8")
+            # Bytes, not text: universal newlines would strip the CRLF that
+            # cmd.exe needs to parse the batch wrapper reliably.
+            source = (ROOT / "scripts/update" / name).read_bytes()
             archive.writestr(f"{dist}.data/scripts/{name}", source)
         archive.writestr(
             f"{dist}.dist-info/entry_points.txt",
@@ -96,8 +99,15 @@ def test_installed_update_runs_launcher_and_survives_replacement(
         pytest.skip("uv is required for native script lifecycle coverage")
     area = tmp_path / "José 测试 (spaces) apostrophe'"
     area.mkdir()
+    # A private temp dir per case: cmd.exe seeds %RANDOM% per second, so
+    # parallel cases would otherwise stage (and delete) the same launcher.
+    temp = tmp_path / "temp"
+    temp.mkdir()
     env = dict(os.environ)
     env.update(
+        TMPDIR=str(temp),
+        TEMP=str(temp),
+        TMP=str(temp),
         UV_TOOL_DIR=str(area / "tools"),
         UV_TOOL_BIN_DIR=str(area / "bin"),
         UV_NO_CONFIG="1",
@@ -156,7 +166,6 @@ def test_installed_update_runs_launcher_and_survives_replacement(
     if outcome == "options":
         assert "takes no options" in result.stderr
     # The wrapper removes the staged launcher on every path.
-    temp = Path(env.get("TMPDIR") or env.get("TEMP") or "/tmp")
     assert not list(temp.glob("fcc-update-*"))
     result = subprocess.run(
         [uv, "tool", "uninstall", "free-claude-code"],
