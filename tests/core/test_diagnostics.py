@@ -176,3 +176,65 @@ def test_execution_failure_format_uses_semantic_category_and_request_id() -> Non
     assert '{"error":{"message":"bad field token=<redacted>"}}' in message
     assert "Request ID: req_diagnostic" in message
     assert "invalid_request_error" not in message
+
+
+def test_empty_body_invalid_request_adds_actionable_hint() -> None:
+    failure = ExecutionFailure(
+        kind=FailureKind.INVALID_REQUEST,
+        status_code=400,
+        message="Invalid request sent to provider.",
+        retryable=False,
+    )
+    detail = UpstreamErrorDetail(status_code=400, body_text=None, category_hint=None)
+
+    message = format_execution_failure_message(
+        failure,
+        detail,
+        upstream_name="OPENCODE_GO",
+        request_id="req_empty_body",
+    )
+
+    assert "(empty upstream error body)" in message
+    assert "too many or too large tool definitions" in message
+    assert "configure a fallback model" in message
+
+
+def test_empty_body_hint_is_omitted_for_non_validation_status() -> None:
+    failure = ExecutionFailure(
+        kind=FailureKind.UPSTREAM,
+        status_code=500,
+        message="Provider API request failed.",
+        retryable=True,
+    )
+    detail = UpstreamErrorDetail(status_code=500, body_text=None, category_hint=None)
+
+    message = format_execution_failure_message(
+        failure,
+        detail,
+        upstream_name="ACME",
+    )
+
+    assert "(empty upstream error body)" in message
+    assert "too many or too large tool definitions" not in message
+
+
+def test_hint_is_omitted_when_upstream_body_is_present() -> None:
+    failure = ExecutionFailure(
+        kind=FailureKind.INVALID_REQUEST,
+        status_code=400,
+        message="Invalid request sent to provider.",
+        retryable=False,
+    )
+    detail = UpstreamErrorDetail(
+        status_code=400,
+        body_text='{"error":{"message":"bad field"}}',
+        category_hint=None,
+    )
+
+    message = format_execution_failure_message(
+        failure,
+        detail,
+        upstream_name="ACME",
+    )
+
+    assert "too many or too large tool definitions" not in message
