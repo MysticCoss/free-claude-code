@@ -54,6 +54,9 @@ def translate_tool_schema_patterns(schema: Any) -> Any:
     for key, value in schema.items():
         replacement = value
         if key == "pattern" and isinstance(value, str):
+            if _has_nul_atom(value):
+                changed = True
+                continue
             replacement = _translate_pattern(value)
         elif key in _SCHEMA_MAP_KEYS and isinstance(value, dict):
             mapped = {
@@ -67,6 +70,28 @@ def translate_tool_schema_patterns(schema: Any) -> Any:
         result[key] = replacement
         changed |= replacement is not value
     return result if changed else schema
+
+
+def _has_nul_atom(pattern: str) -> bool:
+    """Detect a NUL atom (literal or ``\\0`` escape) some upstream gateways reject.
+
+    OpenCode Go answers an empty-body HTTP 400 for any tool carrying such a
+    ``pattern``. A pattern is an advisory constraint, so callers drop it.
+    """
+    if "\x00" in pattern:
+        return True
+    index = 0
+    while index < len(pattern) - 1:
+        if pattern[index] == "\\":
+            if (
+                pattern[index + 1] == "0"
+                and not pattern[index + 2 : index + 3].isdigit()
+            ):
+                return True
+            index += 2
+            continue
+        index += 1
+    return False
 
 
 def _translate_pattern(pattern: str) -> str:
