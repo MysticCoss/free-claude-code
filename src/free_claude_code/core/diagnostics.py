@@ -10,6 +10,17 @@ from .failures import ExecutionFailure
 
 ERROR_DETAIL_DISPLAY_CAP_BYTES = 16_384
 _MAX_CAUSE_CHAIN_DEPTH = 4
+# A provider that rejects a request as invalid (HTTP 400/422) but returns no
+# body leaves the client with nothing to act on. The most common cause in
+# practice is a provider-side limit on the request itself -- most often too many
+# or too large tool definitions -- so the empty body is annotated with that hint
+# and concrete next steps rather than left bare.
+_EMPTY_INVALID_REQUEST_HINT = (
+    "The provider rejected the request as invalid but returned no error detail. "
+    "This usually means the request exceeded a provider-side limit -- most often "
+    "too many or too large tool definitions. Try a model or provider with a "
+    "higher limit, configure a fallback model, or reduce the number of tools."
+)
 _UPSTREAM_BODY_ATTR = "_fcc_upstream_error_body"
 _UPSTREAM_BODY_TRUNCATED_ATTR = "_fcc_upstream_error_body_truncated"
 
@@ -226,6 +237,8 @@ def format_execution_failure_message(
     lines.append(detail.body_text or "(empty upstream error body)")
     if _body_truncation_line_needed(detail):
         lines.append(f"... [truncated after {ERROR_DETAIL_DISPLAY_CAP_BYTES} bytes]")
+    if not detail.body_text and detail.is_invalid_request():
+        lines.extend(("", _EMPTY_INVALID_REQUEST_HINT))
     _append_request_id_lines(lines, request_id)
     return "\n".join(lines)
 
