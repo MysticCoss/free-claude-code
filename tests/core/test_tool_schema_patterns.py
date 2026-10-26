@@ -278,3 +278,39 @@ def test_instance_data_is_untouched_and_translation_is_idempotent():
 )
 def test_non_patterns_remain_unchanged(schema):
     assert translate_tool_schema_patterns(schema) is schema
+
+
+@pytest.mark.parametrize("pattern", ["^[^\0]*$", "^[^\x00]*$", r"^a\0$"])
+def test_nul_patterns_are_dropped_without_touching_other_keywords(pattern):
+    schema = {
+        "type": "object",
+        "properties": {
+            "paths": {
+                "type": "array",
+                "items": {"type": "string", "pattern": pattern, "minLength": 1},
+            }
+        },
+    }
+
+    translated = translate_tool_schema_patterns(schema)
+
+    assert translated["properties"]["paths"]["items"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+    assert "pattern" in schema["properties"]["paths"]["items"]
+
+
+@pytest.mark.parametrize(
+    "pattern", ["^a" + "\\" * 2 + "0$", r"^\10$", r"^\d0$", "^[a-z]+$"]
+)
+def test_non_nul_patterns_are_kept(pattern):
+    schema = {"type": "string", "pattern": pattern}
+
+    assert translate_tool_schema_patterns(schema) is schema
+
+
+def test_property_named_pattern_is_not_mistaken_for_a_regex():
+    schema = {"type": "object", "properties": {"pattern": {"type": "string"}}}
+
+    assert translate_tool_schema_patterns(schema) is schema
